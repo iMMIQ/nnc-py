@@ -8,6 +8,7 @@
 #include "nnc_runtime.h"
 #include <math.h>
 #include <string.h>
+#include <stdint.h>
 
 /* Helper: Calculate total number of elements */
 static int64_t tensor_numel(Tensor* t) {

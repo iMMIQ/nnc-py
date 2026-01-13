@@ -34,14 +34,19 @@ class CEmitter:
 
     def _emit_declarations(self, ctx: CompileContext):
         """Emit variable declarations."""
-        self.write_line("/* Tensor buffer declarations */")
+        self.write_line("/* Tensor declarations */")
         for tensor_name, tensor in ctx.graph.tensors.items():
             if tensor_name in ctx.graph.constants:
-                continue  # Constants declared elsewhere
+                continue  # Constants are defined in constants.c
 
             var_name = ctx.tensor_symbols.get(tensor_name, tensor_name)
-            c_dtype = self._map_dtype(tensor.dtype)
-            self.write_line(f"extern {c_dtype} *{var_name};")
+            self.write_line(f"extern Tensor {var_name};")
+
+        # Declare constant tensors (defined in constants.c)
+        for tensor_name in ctx.graph.constants:
+            var_name = ctx.tensor_symbols.get(tensor_name, tensor_name)
+            self.write_line(f"extern Tensor {var_name};")
+
         self.write_line()
 
     def _emit_functions(self, ctx: CompileContext):
@@ -69,20 +74,46 @@ class CEmitter:
 
     def _emit_operator_call(self, ctx: CompileContext, node: Node):
         """Emit operator function call."""
+        from nnc_py.ir.node import OpType
+
         op_name = f"nnc_{node.op_type.value.lower()}"
 
         # Prepare arguments
         args = []
 
-        # Input tensors
-        for input_name in node.inputs:
-            var_name = ctx.tensor_symbols.get(input_name, input_name)
-            args.append(f"&{var_name}")
+        # Special handling for Conv operation
+        if node.op_type == OpType.CONV2D:
+            # Conv requires: input, weight, bias, output
+            # bias might be missing (use NULL)
+            if len(node.inputs) >= 1:
+                var_name = ctx.tensor_symbols.get(node.inputs[0], node.inputs[0])
+                args.append(f"&{var_name}")  # input
+            if len(node.inputs) >= 2:
+                var_name = ctx.tensor_symbols.get(node.inputs[1], node.inputs[1])
+                args.append(f"&{var_name}")  # weight
 
-        # Output tensors
-        for output_name in node.outputs:
-            var_name = ctx.tensor_symbols.get(output_name, output_name)
-            args.append(f"&{var_name}")
+            # bias parameter
+            if len(node.inputs) >= 3:
+                var_name = ctx.tensor_symbols.get(node.inputs[2], node.inputs[2])
+                args.append(f"&{var_name}")  # bias
+            else:
+                args.append("NULL")  # No bias
+
+            # Output tensor
+            if len(node.outputs) >= 1:
+                var_name = ctx.tensor_symbols.get(node.outputs[0], node.outputs[0])
+                args.append(f"&{var_name}")  # output
+        else:
+            # Generic handling for other operations
+            # Input tensors
+            for input_name in node.inputs:
+                var_name = ctx.tensor_symbols.get(input_name, input_name)
+                args.append(f"&{var_name}")
+
+            # Output tensors
+            for output_name in node.outputs:
+                var_name = ctx.tensor_symbols.get(output_name, output_name)
+                args.append(f"&{var_name}")
 
         # Add attribute parameters
         attr_args = self._format_attributes(node)
@@ -105,9 +136,14 @@ class CEmitter:
             args.append(f"{sh}, {sw}")
 
         if "pads" in node.attrs:
+            # ONNX pads: [pad_top, pad_left, pad_bottom, pad_right]
+            # Runtime expects: pad_h, pad_w (assuming symmetric padding)
             pads = node.attrs["pads"]
             if len(pads) == 4:
-                args.append(f"{pads[0]}, {pads[1]}, {pads[2]}, {pads[3]}")
+                # Use top and left padding values
+                args.append(f"{pads[0]}, {pads[1]}")
+            elif len(pads) == 2:
+                args.append(f"{pads[0]}, {pads[1]}")
 
         if "axis" in node.attrs:
             args.append(str(node.attrs["axis"]))

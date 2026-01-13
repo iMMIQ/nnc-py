@@ -41,6 +41,8 @@ class X86Backend(BackendBase):
 
     def _generate_source(self, ctx: CompileContext) -> str:
         """Generate main source file."""
+        # Need to pass tensor type info to emitter
+        from nnc_py.codegen.c_emitter import CEmitter
         emitter = CEmitter()
         return emitter.emit(ctx)
 
@@ -52,21 +54,18 @@ class X86Backend(BackendBase):
             "#define MODEL_H",
             "",
             "#include <stdint.h>",
+            '#include "nnc_types.h"',
             "",
-            "/* Input/Output declarations */",
+            "/* Input/Output Tensor declarations */",
         ]
 
         for tensor_name in ctx.graph.inputs:
-            tensor = ctx.graph.get_tensor(tensor_name)
-            c_dtype = self._map_dtype(tensor.dtype)
             var_name = ctx.tensor_symbols.get(tensor_name, tensor_name)
-            lines.append(f"extern {c_dtype} *{var_name};")
+            lines.append(f"extern Tensor {var_name};")
 
         for tensor_name in ctx.graph.outputs:
-            tensor = ctx.graph.get_tensor(tensor_name)
-            c_dtype = self._map_dtype(tensor.dtype)
             var_name = ctx.tensor_symbols.get(tensor_name, tensor_name)
-            lines.append(f"extern {c_dtype} *{var_name};")
+            lines.append(f"extern Tensor {var_name};")
 
         lines.extend([
             "",
@@ -89,18 +88,36 @@ class X86Backend(BackendBase):
         import numpy as np
 
         for name, arr in ctx.graph.constants.items():
+            tensor = ctx.graph.get_tensor(name)
             dtype = self._map_numpy_dtype(arr.dtype)
             size = arr.size
             data = arr.flatten().tolist()
-
-            # Format data
-            data_str = ", ".join(str(x) for x in data[:10])
-            if size > 10:
-                data_str += ", ..."
+            shape = list(arr.shape)
 
             lines.append(f"/* Constant: {name} */")
-            lines.append(f"const {dtype} {name}[{size}] = {{")
-            lines.append(f"    {data_str}")
+            lines.append(f"static const {dtype} {name}_data[{size}] = {{")
+
+            # Format data with multiple values per line
+            values_per_line = 10
+            for i in range(0, size, values_per_line):
+                chunk = data[i:i + values_per_line]
+                line_values = ", ".join(f"{x:.9g}" for x in chunk)
+                if i + values_per_line < size:
+                    line_values += ","
+                lines.append(f"    {line_values}")
+
+            lines.append("};")
+            lines.append("")
+
+            # Generate Tensor structure
+            shape_str = ", ".join(str(s) for s in shape)
+            lines.append(f"static const int64_t {name}_shape[] = {{{shape_str}}};")
+            lines.append(f"Tensor {name} = {{")
+            lines.append(f"    .data = (void*){name}_data,")
+            lines.append(f"    .dtype = NNC_DTYPE_FLOAT32,")
+            lines.append(f"    .shape = (int64_t*){name}_shape,")
+            lines.append(f"    .ndim = {len(shape)},")
+            lines.append(f"    .nbytes = {size * 4},")
             lines.append("};")
             lines.append("")
 
