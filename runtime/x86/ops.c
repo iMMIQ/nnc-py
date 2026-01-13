@@ -7,6 +7,7 @@
 #include "nnc_ops.h"
 #include "nnc_runtime.h"
 #include <math.h>
+#include <stdio.h>
 #include <string.h>
 #include <stdint.h>
 
@@ -163,13 +164,123 @@ void nnc_conv(
     int stride_h, int stride_w,
     int pad_h, int pad_w
 ) {
-    /* TODO: Implement actual 2D convolution */
-    /* This is a placeholder - needs proper implementation */
-    int64_t n = tensor_numel(output);
+    /* Standard 2D convolution implementation
+     * Input: [N, C_in, H, W]
+     * Weight: [C_out, C_in, kH, kW]
+     * Bias: [C_out] (optional)
+     * Output: [N, C_out, H_out, W_out]
+     */
+
+    /* Debug: Check pointers */
+    fprintf(stderr, "nnc_conv: Checking pointers...\\n");
+    fflush(stderr);
+
+    if (!input || !weight || !output) {
+        fprintf(stderr, "nnc_conv: NULL tensor pointer\\n");
+        fflush(stderr);
+        return;
+    }
+    if (!input->data || !weight->data || !output->data) {
+        fprintf(stderr, "nnc_conv: NULL data pointer\\n");
+        fprintf(stderr, "  input->data=%p, weight->data=%p, output->data=%p\\n",
+                input->data, weight->data, output->data);
+        fflush(stderr);
+        return;
+    }
+    if (!input->shape || !weight->shape || !output->shape) {
+        fprintf(stderr, "nnc_conv: NULL shape pointer\\n");
+        fflush(stderr);
+        return;
+    }
+
+    fprintf(stderr, "nnc_conv: All pointers valid\\n");
+    fflush(stderr);
+
+    /* Extract dimensions */
+    int N = input->shape[0];
+    int C_in = input->shape[1];
+    int H_in = input->shape[2];
+    int W_in = input->shape[3];
+
+    int C_out = weight->shape[0];
+    int H_out = output->shape[2];
+    int W_out = output->shape[3];
+
+    fprintf(stderr, "nnc_conv: dimensions\\n");
+    fprintf(stderr, "  input: [%d, %d, %d, %d]\\n", N, C_in, H_in, W_in);
+    fprintf(stderr, "  weight: [%d, %d, %d, %d]\\n", C_out, weight->shape[1], weight->shape[2], weight->shape[3]);
+    fprintf(stderr, "  output: [%d, %d, %d, %d]\\n", (int)output->shape[0], (int)output->shape[1], H_out, W_out);
+    fprintf(stderr, "  kernel: [%d, %d], stride: [%d, %d], pad: [%d, %d]\\n",
+            kernel_h, kernel_w, stride_h, stride_w, pad_h, pad_w);
+    fflush(stderr);
+
+    /* Get data pointers */
+    float* in_data = (float*)input->data;
+    float* weight_data = (float*)weight->data;
+    float* bias_data = bias ? (float*)bias->data : NULL;
     float* out_data = (float*)output->data;
 
-    for (int64_t i = 0; i < n; i++) {
+    /* Compute output dimensions */
+    /* H_out = (H_in + 2*pad_h - kernel_h) / stride_h + 1 */
+    /* W_out = (W_in + 2*pad_w - kernel_w) / stride_w + 1 */
+
+    /* Initialize output to zero */
+    int64_t output_size = N * C_out * H_out * W_out;
+    for (int64_t i = 0; i < output_size; i++) {
         out_data[i] = 0.0f;
+    }
+
+    /* Perform convolution */
+    for (int n = 0; n < N; n++) {
+        for (int c_out = 0; c_out < C_out; c_out++) {
+            for (int h_out = 0; h_out < H_out; h_out++) {
+                for (int w_out = 0; w_out < W_out; w_out++) {
+                    /* Compute convolution window start position */
+                    int h_in = h_out * stride_h - pad_h;
+                    int w_in = w_out * stride_w - pad_w;
+
+                    float sum = 0.0f;
+
+                    /* Convolve over kernel */
+                    for (int c_in = 0; c_in < C_in; c_in++) {
+                        for (int kh = 0; kh < kernel_h; kh++) {
+                            for (int kw = 0; kw < kernel_w; kw++) {
+                                int h = h_in + kh;
+                                int w = w_in + kw;
+
+                                /* Check bounds */
+                                if (h >= 0 && h < H_in && w >= 0 && w < W_in) {
+                                    /* Calculate indices */
+                                    int64_t in_idx = n * C_in * H_in * W_in
+                                                   + c_in * H_in * W_in
+                                                   + h * W_in
+                                                   + w;
+
+                                    int64_t weight_idx = c_out * C_in * kernel_h * kernel_w
+                                                      + c_in * kernel_h * kernel_w
+                                                      + kh * kernel_w
+                                                      + kw;
+
+                                    sum += in_data[in_idx] * weight_data[weight_idx];
+                                }
+                            }
+                        }
+                    }
+
+                    /* Add bias if present */
+                    if (bias_data) {
+                        sum += bias_data[c_out];
+                    }
+
+                    /* Write output */
+                    int64_t out_idx = n * C_out * H_out * W_out
+                                    + c_out * H_out * W_out
+                                    + h_out * W_out
+                                    + w_out;
+                    out_data[out_idx] = sum;
+                }
+            }
+        }
     }
 }
 

@@ -50,7 +50,16 @@ class ONNXFrontend:
             ir_graph.add_tensor(tensor_type)
             ir_graph.outputs.append(tensor_type.name)
 
-        # 3. Parse operator nodes
+        # 3. Parse constants (initializers) FIRST - needed for shape inference
+        for initializer in onnx_graph.initializer:
+            arr = numpy_helper.to_array(initializer)
+            ir_graph.constants[initializer.name] = arr
+
+            # Create tensor definition for constant
+            tensor_type = self._parse_initializer(initializer)
+            ir_graph.add_tensor(tensor_type)
+
+        # 4. Parse operator nodes
         for onnx_node in onnx_graph.node:
             ir_node = self._parse_node(onnx_node)
             ir_graph.add_node(ir_node)
@@ -64,15 +73,6 @@ class ONNXFrontend:
                     )
                     if inferred_type:
                         ir_graph.add_tensor(inferred_type)
-
-        # 4. Parse constants (initializers)
-        for initializer in onnx_graph.initializer:
-            arr = numpy_helper.to_array(initializer)
-            ir_graph.constants[initializer.name] = arr
-
-            # Create tensor definition for constant
-            tensor_type = self._parse_initializer(initializer)
-            ir_graph.add_tensor(tensor_type)
 
         # 5. Validate graph
         self._validate_graph(ir_graph)
@@ -163,16 +163,98 @@ class ONNXFrontend:
 
     def _infer_tensor_type(self, onnx_node, output_name: str, graph: Graph) -> TensorType | None:
         """Infer tensor type from node and input types."""
-        # For simplicity, assume float32 and same shape as first input
-        # This is a placeholder - proper type inference would be more sophisticated
-        if onnx_node.input and onnx_node.input[0] in graph.tensors:
-            input_tensor = graph.tensors[onnx_node.input[0]]
+        if not onnx_node.input:
+            return None
+
+        input_tensor = graph.tensors.get(onnx_node.input[0])
+        if not input_tensor:
+            return None
+
+        op_type = onnx_node.op_type
+
+        # Handle different operators with proper shape inference
+        if op_type == "Conv":
+            # Input: [N, C_in, H, W]
+            # Weight: [C_out, C_in, kH, kW]
+            # Output: [N, C_out, H_out, W_out]
+            if len(onnx_node.input) < 2:
+                return None
+
+            # Get weight tensor to find C_out
+            weight_name = onnx_node.input[1]
+            weight_tensor = graph.tensors.get(weight_name)
+            if not weight_tensor or len(weight_tensor.shape.dims) < 1:
+                return None
+
+            # C_out is the first dimension of weight
+            c_out = weight_tensor.shape.dims[0]
+
+            # Compute spatial output dimensions
+            # H_out = (H_in + 2*pad - kernel) / stride + 1
+            in_shape = input_tensor.shape.dims
+            if len(in_shape) != 4:
+                return None
+
+            # Get kernel shape, stride, padding from attributes
+            kernel_shape = self._get_attr(onnx_node, "kernel_shape")
+            strides = self._get_attr(onnx_node, "strides", [1, 1])
+            pads = self._get_attr(onnx_node, "pads", [0, 0, 0, 0])
+
+            # If kernel_shape not in attrs, try to get from weight tensor
+            if not kernel_shape and weight_tensor:
+                weight_dims = weight_tensor.shape.dims
+                if len(weight_dims) >= 4:
+                    kernel_shape = [weight_dims[2], weight_dims[3]]
+
+            if not kernel_shape or len(kernel_shape) != 2:
+                return None
+
+            # pads in ONNX is [pad_top, pad_left, pad_bottom, pad_right]
+            pad_h = pads[0] + pads[2] if len(pads) == 4 else pads[0] * 2 if len(pads) == 2 else 0
+            pad_w = pads[1] + pads[3] if len(pads) == 4 else pads[1] * 2 if len(pads) == 2 else 0
+
+            h_out = (in_shape[2] + pad_h - kernel_shape[0]) // strides[0] + 1
+            w_out = (in_shape[3] + pad_w - kernel_shape[1]) // (strides[1] if len(strides) > 1 else strides[0]) + 1
+
+            output_shape = TensorShape(
+                dims=[in_shape[0], c_out, h_out, w_out],
+                layout=input_tensor.shape.layout
+            )
+
+            return TensorType(
+                dtype=input_tensor.dtype,
+                shape=output_shape,
+                name=output_name,
+            )
+
+        elif op_type == "Relu":
+            # Relu preserves shape
             return TensorType(
                 dtype=input_tensor.dtype,
                 shape=input_tensor.shape,
                 name=output_name,
             )
-        return None
+
+        # Default: same shape as input (for other ops)
+        return TensorType(
+            dtype=input_tensor.dtype,
+            shape=input_tensor.shape,
+            name=output_name,
+        )
+
+    def _get_attr(self, onnx_node, attr_name: str, default=None):
+        """Get attribute value from ONNX node."""
+        for attr in onnx_node.attribute:
+            if attr.name == attr_name:
+                if attr.ints:
+                    return [int(v) for v in attr.ints]
+                elif attr.HasField("i"):
+                    return int(attr.i)
+                elif attr.HasField("f"):
+                    return float(attr.f)
+                elif attr.s:
+                    return attr.s.decode()
+        return default
 
     def _map_onnx_dtype(self, onnx_dtype: int) -> DataType:
         """Map ONNX dtype to IR DataType."""
