@@ -236,18 +236,18 @@ void nnc_conv(
     fflush(stderr);
 
     /* Extract dimensions */
-    int N = input->shape[0];
-    int C_in = input->shape[1];
-    int H_in = input->shape[2];
-    int W_in = input->shape[3];
+    int N = (int)input->shape[0];
+    int C_in = (int)input->shape[1];
+    int H_in = (int)input->shape[2];
+    int W_in = (int)input->shape[3];
 
-    int C_out = weight->shape[0];
-    int H_out = output->shape[2];
-    int W_out = output->shape[3];
+    int C_out = (int)weight->shape[0];
+    int H_out = (int)output->shape[2];
+    int W_out = (int)output->shape[3];
 
     fprintf(stderr, "nnc_conv: dimensions\\n");
     fprintf(stderr, "  input: [%d, %d, %d, %d]\\n", N, C_in, H_in, W_in);
-    fprintf(stderr, "  weight: [%d, %d, %d, %d]\\n", C_out, weight->shape[1], weight->shape[2], weight->shape[3]);
+    fprintf(stderr, "  weight: [%d, %d, %d, %d]\\n", C_out, (int)weight->shape[1], (int)weight->shape[2], (int)weight->shape[3]);
     fprintf(stderr, "  output: [%d, %d, %d, %d]\\n", (int)output->shape[0], (int)output->shape[1], H_out, W_out);
     fprintf(stderr, "  kernel: [%d, %d], stride: [%d, %d], pad: [%d, %d]\\n",
             kernel_h, kernel_w, stride_h, stride_w, pad_h, pad_w);
@@ -812,7 +812,6 @@ void nnc_split(Tensor* input, Tensor** outputs, int num_outputs, int axis) {
         Tensor* out = outputs[out_idx];
         float* out_data = (float*)out->data;
 
-        int64_t out_offset = 0;
         for (int outer = 0; outer < outer_size; outer++) {
             /* Calculate source offset for this output */
             int64_t base_src = outer * split_dim * inner_size + out_idx * split_size * inner_size;
