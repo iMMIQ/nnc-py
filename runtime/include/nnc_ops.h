@@ -35,6 +35,14 @@ void nnc_div(Tensor* a, Tensor* b, Tensor* out);
  */
 void nnc_equal(Tensor* a, Tensor* b, Tensor* out);
 
+/* And - element-wise logical AND
+ * Args:
+ *   a: First input tensor
+ *   b: Second input tensor
+ *   out: Output tensor (1.0f where both a and b are non-zero, 0.0f otherwise)
+ */
+void nnc_and(Tensor* a, Tensor* b, Tensor* out);
+
 /* ============================================================================
  * Neural Network Operations
  * ============================================================================ */

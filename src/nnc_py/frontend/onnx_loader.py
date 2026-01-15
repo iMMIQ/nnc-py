@@ -592,6 +592,37 @@ class ONNXFrontend:
                 name=output_name,
             )
 
+        elif op_type == "And":
+            # And operation - element-wise logical AND, outputs bool
+            # Output shape follows broadcasting rules
+            if len(onnx_node.input) < 2:
+                return None
+
+            right_name = onnx_node.input[1]
+            right_tensor = graph.tensors.get(right_name)
+            if not right_tensor or not right_tensor.shape.dims:
+                # If right shape unknown, use left shape
+                return TensorType(
+                    dtype=DataType.BOOL,
+                    shape=input_tensor.shape,
+                    name=output_name,
+                )
+
+            a_shape = input_tensor.shape.dims
+            b_shape = right_tensor.shape.dims
+
+            # Simple broadcasting: use the larger shape
+            if len(a_shape) >= len(b_shape):
+                out_shape = a_shape
+            else:
+                out_shape = b_shape
+
+            return TensorType(
+                dtype=DataType.BOOL,
+                shape=TensorShape(dims=out_shape, layout=input_tensor.shape.layout),
+                name=output_name,
+            )
+
         # Default: same shape as input (for other ops)
         return TensorType(
             dtype=input_tensor.dtype,

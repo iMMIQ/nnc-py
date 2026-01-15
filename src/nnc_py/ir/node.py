@@ -33,6 +33,12 @@ class OpType(Enum):
     LESS = "Less"
     GREATER = "Greater"
 
+    # Logical ops
+    AND = "And"
+    OR = "Or"
+    XOR = "Xor"
+    NOT = "Not"
+
     # Matrix ops
     MATMUL = "MatMul"
     GEMM = "Gemm"

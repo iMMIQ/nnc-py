@@ -167,6 +167,10 @@ clean:
         self.lib.nnc_equal.argtypes = [ctypes.POINTER(Tensor), ctypes.POINTER(Tensor), ctypes.POINTER(Tensor)]
         self.lib.nnc_equal.restype = None
 
+        # nnc_and(Tensor* a, Tensor* b, Tensor* out)
+        self.lib.nnc_and.argtypes = [ctypes.POINTER(Tensor), ctypes.POINTER(Tensor), ctypes.POINTER(Tensor)]
+        self.lib.nnc_and.restype = None
+
     def _make_tensor(self, np_array):
         """Create a Tensor from numpy array."""
         # Ensure C-contiguous and correct dtype
@@ -656,6 +660,41 @@ clean:
 
         max_diff = self._compare_results(data_out, expected)
         print(f"  equal_broadcast max_diff: {max_diff}")
+
+    def test_and(self):
+        """Test nnc_and - element-wise logical AND."""
+        a = np.array([[1.0, 0.0], [1.0, 1.0]], dtype=np.float32)
+        b = np.array([[1.0, 1.0], [0.0, 1.0]], dtype=np.float32)
+        # Expected: [[1, 0], [0, 1]] (float representation of boolean AND)
+        expected = ((a != 0) & (b != 0)).astype(np.float32)
+
+        tensor_a, data_a = self._make_tensor(a)
+        tensor_b, data_b = self._make_tensor(b)
+
+        out = np.zeros_like(expected, dtype=np.float32)
+        tensor_out, data_out = self._make_tensor(out)
+
+        self.lib.nnc_and(ctypes.byref(tensor_a), ctypes.byref(tensor_b), ctypes.byref(tensor_out))
+
+        max_diff = self._compare_results(data_out, expected)
+        print(f"  and max_diff: {max_diff}")
+
+    def test_and_broadcast(self):
+        """Test nnc_and with broadcasting."""
+        a = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)  # [2, 2]
+        b = np.array([1.0, 0.0], dtype=np.float32)  # [2] - broadcast to [2, 2]
+        expected = ((a != 0) & (b != 0)).astype(np.float32)
+
+        tensor_a, data_a = self._make_tensor(a)
+        tensor_b, data_b = self._make_tensor(b)
+
+        out = np.zeros_like(expected, dtype=np.float32)
+        tensor_out, data_out = self._make_tensor(out)
+
+        self.lib.nnc_and(ctypes.byref(tensor_a), ctypes.byref(tensor_b), ctypes.byref(tensor_out))
+
+        max_diff = self._compare_results(data_out, expected)
+        print(f"  and_broadcast max_diff: {max_diff}")
 
 
 if __name__ == "__main__":
