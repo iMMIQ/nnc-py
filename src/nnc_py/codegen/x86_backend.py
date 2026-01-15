@@ -4,6 +4,7 @@ from nnc_py.codegen.base import BackendBase, CodeGenResult
 from nnc_py.codegen.c_emitter import CEmitter
 from nnc_py.ir.context import CompileContext
 from nnc_py.ir.types import DataType
+from nnc_py.utils.name_manager import NameManager
 
 
 class X86Backend(BackendBase):
@@ -308,14 +309,18 @@ int main(void) {{
 """
 
     def _assign_symbols(self, ctx: CompileContext):
-        """Assign C symbol names."""
+        """Assign C symbol names using NameManager."""
+        name_manager = NameManager()
+
+        # Assign names for tensors
         for tensor_name, tensor in ctx.graph.tensors.items():
-            # Replace invalid C characters with underscore
-            c_name = tensor_name.replace("/", "_").replace(".", "_")
+            # Use NameManager to sanitize the name
+            c_name = name_manager.get_symbol(tensor_name, prefix="tensor_")
             ctx.tensor_symbols[tensor_name] = c_name
 
+        # Assign names for nodes
         for node_name in ctx.graph.nodes:
-            c_name = f"node_{node_name.replace('/', '_').replace('.', '_')}"
+            c_name = name_manager.get_symbol(node_name, prefix="node_")
             ctx.node_symbols[node_name] = c_name
 
     def _map_dtype(self, dtype: DataType) -> str:
