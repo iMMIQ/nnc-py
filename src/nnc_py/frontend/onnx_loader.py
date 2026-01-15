@@ -711,6 +711,9 @@ class ONNXFrontend:
         # Check all inputs are defined
         for node in graph.nodes.values():
             for input_name in node.inputs:
+                # Skip empty input names (optional inputs like Clip's min/max)
+                if not input_name:
+                    continue
                 if input_name not in graph.tensors:
                     raise ValueError(f"Input tensor '{input_name}' not found in graph for node '{node.name}'")
 
