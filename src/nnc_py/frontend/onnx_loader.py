@@ -2,6 +2,11 @@
 
 import onnx
 from onnx import helper, numpy_helper
+try:
+    from onnx import shape_inference
+    HAS_SHAPE_INFERENCE = True
+except ImportError:
+    HAS_SHAPE_INFERENCE = False
 
 from nnc_py.ir.graph import Graph
 from nnc_py.ir.node import Node, OpType
@@ -33,6 +38,15 @@ class ONNXFrontend:
         """
         # Load ONNX model
         model = onnx.load(onnx_path)
+
+        # Apply ONNX shape inference if available
+        if HAS_SHAPE_INFERENCE:
+            try:
+                model = shape_inference.infer_shapes(model)
+            except Exception as e:
+                # Shape inference failed, continue with original model
+                pass
+
         onnx_graph = model.graph
 
         # Create IR graph
@@ -59,7 +73,12 @@ class ONNXFrontend:
             tensor_type = self._parse_initializer(initializer)
             ir_graph.add_tensor(tensor_type)
 
-        # 4. Parse operator nodes
+        # 4. Build a value_info map from shape inference
+        value_info_map = {}
+        for vi in onnx_graph.value_info:
+            value_info_map[vi.name] = vi
+
+        # 5. Parse operator nodes
         for onnx_node in onnx_graph.node:
             ir_node = self._parse_node(onnx_node)
 
@@ -69,17 +88,49 @@ class ONNXFrontend:
 
             ir_graph.add_node(ir_node)
 
-            # Create tensor definitions for node outputs if not already defined
+            # Create tensor definitions for node outputs
+            # Use shape inference results if available
             for output_name in onnx_node.output:
                 if output_name not in ir_graph.tensors:
-                    # Try to infer type from node
-                    inferred_type = self._infer_tensor_type(
-                        onnx_node, output_name, ir_graph
-                    )
-                    if inferred_type:
-                        ir_graph.add_tensor(inferred_type)
+                    # Check if shape inference has info for this output
+                    if output_name in value_info_map:
+                        tensor_type = self._parse_tensor_type(value_info_map[output_name])
+                        ir_graph.add_tensor(tensor_type)
+                    else:
+                        # Try to infer type from node
+                        inferred_type = self._infer_tensor_type(
+                            onnx_node, output_name, ir_graph
+                        )
+                        if inferred_type:
+                            ir_graph.add_tensor(inferred_type)
+                        else:
+                            # If inference failed, create a placeholder tensor
+                            # This ensures the graph is complete for multi-output nodes
+                            ir_graph.add_tensor(TensorType(
+                                dtype=DataType.FLOAT32,
+                                shape=TensorShape(dims=[], layout=MemoryLayout.NHWC),
+                                name=output_name,
+                            ))
 
-        # 5. Validate graph
+        # 6. Second pass: refine tensor shapes that weren't resolved by shape inference
+        max_iterations = 3
+        for _ in range(max_iterations):
+            changed = False
+            for onnx_node in onnx_graph.node:
+                for output_name in onnx_node.output:
+                    existing_tensor = ir_graph.tensors.get(output_name)
+                    if existing_tensor and not existing_tensor.shape.dims:
+                        # Try to infer shape again
+                        inferred_type = self._infer_tensor_type(
+                            onnx_node, output_name, ir_graph
+                        )
+                        if inferred_type and inferred_type.shape.dims:
+                            ir_graph.tensors[output_name] = inferred_type
+                            changed = True
+            if not changed:
+                break
+
+        # 7. Validate graph
         self._validate_graph(ir_graph)
 
         return ir_graph
@@ -303,15 +354,78 @@ class ONNXFrontend:
                 name=output_name,
             )
 
+        elif op_type == "Reshape":
+            # Reshape operation - shape comes from second input or attribute
+            new_shape = None
+
+            # First check if shape is in attributes
+            if "shape" in onnx_node.attribute:
+                for attr in onnx_node.attribute:
+                    if attr.name == "shape":
+                        new_shape = [int(v) for v in attr.ints]
+                        break
+
+            # If not in attributes, check second input (constant)
+            if not new_shape and len(onnx_node.input) >= 2:
+                shape_input_name = onnx_node.input[1]
+                if shape_input_name in graph.constants:
+                    new_shape = graph.constants[shape_input_name].tolist()
+
+            # Handle -1 in shape (infer from dimension)
+            if new_shape:
+                resolved_shape = []
+                total_size = 1
+                unknown_idx = -1
+                for i, dim in enumerate(new_shape):
+                    if dim == -1 or dim == 0:
+                        unknown_idx = i
+                        resolved_shape.append(dim)  # Will resolve below
+                    else:
+                        resolved_shape.append(dim)
+                        total_size *= dim
+
+                # If there's a -1, compute it from total element count
+                if unknown_idx >= 0:
+                    input_total = 1
+                    for dim in input_tensor.shape.dims:
+                        input_total *= dim
+                    resolved_shape[unknown_idx] = input_total // total_size if total_size > 0 else input_total
+
+                return TensorType(
+                    dtype=input_tensor.dtype,
+                    shape=TensorShape(dims=resolved_shape, layout=input_tensor.shape.layout),
+                    name=output_name,
+                )
+            else:
+                # Shape not known, use input shape as fallback
+                return TensorType(
+                    dtype=input_tensor.dtype,
+                    shape=input_tensor.shape,
+                    name=output_name,
+                )
+
         elif op_type == "Split":
             # Split divides tensor along axis into multiple outputs
             # Need to find which output index this is and compute split size
             axis = self._get_attr(onnx_node, "axis", 0)
             split_attr = self._get_attr(onnx_node, "split", None)
 
+            # Check if input shape is available
+            if not input_tensor.shape.dims:
+                # Shape not yet known, return unknown shape
+                return TensorType(
+                    dtype=input_tensor.dtype,
+                    shape=TensorShape(dims=[], layout=input_tensor.shape.layout),
+                    name=output_name,
+                )
+
             # Handle negative axis
             if axis < 0:
                 axis = len(input_tensor.shape.dims) + axis
+
+            # Validate axis
+            if axis >= len(input_tensor.shape.dims):
+                return None
 
             # Find the output index
             output_idx = -1
@@ -340,6 +454,102 @@ class ONNXFrontend:
                 out_shape[axis] = split_sizes[output_idx]
             else:
                 out_shape[axis] = out_shape[axis] // len(onnx_node.output)
+
+            return TensorType(
+                dtype=input_tensor.dtype,
+                shape=TensorShape(dims=out_shape, layout=input_tensor.shape.layout),
+                name=output_name,
+            )
+
+        elif op_type == "MatMul":
+            # Matrix multiplication shape inference
+            # [M, K] @ [K, N] = [M, N]
+            # [B, M, K] @ [B, K, N] = [B, M, N]
+            # [B, M, K] @ [K, N] = [B, M, N] (broadcasting)
+            # [M, K] @ [B, K, N] = [B, M, N] (broadcasting)
+
+            if len(onnx_node.input) < 2:
+                return None
+
+            # Get second input (right matrix)
+            right_name = onnx_node.input[1]
+            right_tensor = graph.tensors.get(right_name)
+            if not right_tensor or not right_tensor.shape.dims:
+                return None
+
+            a_shape = input_tensor.shape.dims
+            b_shape = right_tensor.shape.dims
+
+            if not a_shape or not b_shape:
+                return None
+
+            a_ndim = len(a_shape)
+            b_ndim = len(b_shape)
+
+            # Handle different cases
+            if a_ndim == 1 and b_ndim == 1:
+                # Vector @ Vector = scalar
+                out_shape = []
+            elif a_ndim == 1 and b_ndim == 2:
+                # Vector @ Matrix = Vector
+                out_shape = [b_shape[1]]
+            elif a_ndim == 2 and b_ndim == 1:
+                # Matrix @ Vector = Vector
+                out_shape = [a_shape[0]]
+            elif a_ndim == 2 and b_ndim == 2:
+                # Matrix @ Matrix = Matrix
+                out_shape = [a_shape[0], b_shape[1]]
+            else:
+                # Batched matrix multiplication
+                # Compute broadcasted batch dimensions
+                max_ndim = max(a_ndim, b_ndim)
+                a_padded = [1] * (max_ndim - a_ndim) + list(a_shape)
+                b_padded = [1] * (max_ndim - b_ndim) + list(b_shape)
+
+                # Broadcast batch dimensions
+                batch_shape = []
+                for i in range(max_ndim - 2):
+                    a_dim = a_padded[i]
+                    b_dim = b_padded[i]
+                    if a_dim == 1:
+                        batch_shape.append(b_dim)
+                    elif b_dim == 1 or a_dim == b_dim:
+                        batch_shape.append(a_dim)
+                    else:
+                        return None  # Incompatible dimensions
+
+                # Last two dimensions are [M, K] @ [K, N] = [M, N]
+                out_shape = batch_shape + [a_padded[-2], b_padded[-1]]
+
+            return TensorType(
+                dtype=input_tensor.dtype,
+                shape=TensorShape(dims=out_shape, layout=input_tensor.shape.layout),
+                name=output_name,
+            )
+
+        elif op_type == "Add" or op_type == "Mul" or op_type == "Sub" or op_type == "Div":
+            # Element-wise operations - handle broadcasting
+            if len(onnx_node.input) < 2:
+                return None
+
+            right_name = onnx_node.input[1]
+            right_tensor = graph.tensors.get(right_name)
+            if not right_tensor or not right_tensor.shape.dims:
+                # If right shape unknown, use left shape
+                return TensorType(
+                    dtype=input_tensor.dtype,
+                    shape=input_tensor.shape,
+                    name=output_name,
+                )
+
+            a_shape = input_tensor.shape.dims
+            b_shape = right_tensor.shape.dims
+
+            # Simple broadcasting: use the larger shape
+            if len(a_shape) >= len(b_shape):
+                out_shape = a_shape
+            else:
+                out_shape = b_shape
 
             return TensorType(
                 dtype=input_tensor.dtype,

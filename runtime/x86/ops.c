@@ -103,15 +103,54 @@ void nnc_tanh(Tensor* input, Tensor* output) {
 }
 
 void nnc_softmax(Tensor* input, Tensor* output, int axis) {
-    /* Simplified implementation - assumes axis is the last dimension */
-    int64_t n = tensor_numel(output);
+    /* Softmax activation along specified axis */
     float* in_data = (float*)input->data;
     float* out_data = (float*)output->data;
 
-    /* For simplicity, just copy input to output */
-    /* A proper implementation would compute softmax along the specified axis */
-    for (int64_t i = 0; i < n; i++) {
-        out_data[i] = in_data[i];
+    int ndim = input->ndim;
+
+    /* Handle negative axis */
+    if (axis < 0) {
+        axis = ndim + axis;
+    }
+
+    /* Calculate dimensions */
+    int64_t outer_size = 1;
+    for (int i = 0; i < axis; i++) {
+        outer_size *= input->shape[i];
+    }
+
+    int64_t softmax_dim = input->shape[axis];
+    int64_t inner_size = 1;
+    for (int i = axis + 1; i < ndim; i++) {
+        inner_size *= input->shape[i];
+    }
+
+    /* Perform softmax */
+    for (int64_t outer = 0; outer < outer_size; outer++) {
+        for (int64_t inner = 0; inner < inner_size; inner++) {
+            /* Find max for numerical stability */
+            float max_val = -INFINITY;
+            for (int64_t s = 0; s < softmax_dim; s++) {
+                int64_t idx = outer * softmax_dim * inner_size + s * inner_size + inner;
+                if (in_data[idx] > max_val) {
+                    max_val = in_data[idx];
+                }
+            }
+
+            /* Compute sum of exp(x - max) */
+            float sum_exp = 0.0f;
+            for (int64_t s = 0; s < softmax_dim; s++) {
+                int64_t idx = outer * softmax_dim * inner_size + s * inner_size + inner;
+                sum_exp += expf(in_data[idx] - max_val);
+            }
+
+            /* Compute softmax probabilities */
+            for (int64_t s = 0; s < softmax_dim; s++) {
+                int64_t idx = outer * softmax_dim * inner_size + s * inner_size + inner;
+                out_data[idx] = expf(in_data[idx] - max_val) / sum_exp;
+            }
+        }
     }
 }
 
@@ -310,13 +349,54 @@ void nnc_flatten(Tensor* input, Tensor* output, int axis) {
 }
 
 void nnc_transpose(Tensor* input, Tensor* output, int64_t* perm, int ndim) {
-    /* TODO: Implement actual transpose */
-    int64_t n = tensor_numel(output);
+    /* Transpose operation with permutation
+     * If perm is NULL, reverse the dimensions
+     */
+
     float* in_data = (float*)input->data;
     float* out_data = (float*)output->data;
 
-    for (int64_t i = 0; i < n; i++) {
-        out_data[i] = in_data[i];
+    int64_t total_elements = tensor_numel(output);
+
+    /* Build permutation array if NULL (reverse permutation) */
+    int64_t local_perm[8];  /* Support up to 8 dimensions */
+    if (perm == NULL) {
+        for (int i = 0; i < ndim; i++) {
+            local_perm[i] = ndim - 1 - i;
+        }
+        perm = local_perm;
+    }
+
+    /* Calculate strides for input and output */
+    int64_t in_strides[8];
+    int64_t out_strides[8];
+
+    in_strides[ndim - 1] = 1;
+    for (int i = ndim - 2; i >= 0; i--) {
+        in_strides[i] = in_strides[i + 1] * input->shape[i + 1];
+    }
+
+    out_strides[ndim - 1] = 1;
+    for (int i = ndim - 2; i >= 0; i--) {
+        out_strides[i] = out_strides[i + 1] * output->shape[i + 1];
+    }
+
+    /* Perform transpose */
+    for (int64_t out_idx = 0; out_idx < total_elements; out_idx++) {
+        /* Convert output linear index to multi-dimensional indices */
+        int64_t temp = out_idx;
+        int64_t in_idx = 0;
+
+        for (int i = 0; i < ndim; i++) {
+            int64_t out_dim_idx = temp / out_strides[i];
+            temp = temp % out_strides[i];
+
+            /* Map output dimension to input dimension using permutation */
+            int64_t in_dim = perm[i];
+            in_idx += out_dim_idx * in_strides[in_dim];
+        }
+
+        out_data[out_idx] = in_data[in_idx];
     }
 }
 
@@ -345,12 +425,103 @@ void nnc_unsqueeze(Tensor* input, Tensor* output, int axis) {
  * ============================================================================ */
 
 void nnc_matmul(Tensor* a, Tensor* b, Tensor* output) {
-    /* TODO: Implement actual matrix multiplication */
-    int64_t n = tensor_numel(output);
+    /* Matrix multiplication supporting various tensor shapes
+     * Handles: 2D matrices, and batched matrix multiplication
+     */
+
+    float* a_data = (float*)a->data;
+    float* b_data = (float*)b->data;
     float* out_data = (float*)output->data;
 
-    for (int64_t i = 0; i < n; i++) {
-        out_data[i] = 0.0f;
+    int a_ndim = a->ndim;
+    int b_ndim = b->ndim;
+    int out_ndim = output->ndim;
+
+    if (a_ndim == 2 && b_ndim == 2) {
+        /* Standard 2D matrix multiplication: [M, K] @ [K, N] = [M, N] */
+        int M = a->shape[0];
+        int K = a->shape[1];
+        int N = b->shape[1];
+
+        for (int i = 0; i < M; i++) {
+            for (int j = 0; j < N; j++) {
+                float sum = 0.0f;
+                for (int k = 0; k < K; k++) {
+                    sum += a_data[i * K + k] * b_data[k * N + j];
+                }
+                out_data[i * N + j] = sum;
+            }
+        }
+    } else if (a_ndim == 1 && b_ndim == 2) {
+        /* Vector @ Matrix: [K] @ [K, N] = [N] */
+        int K = a->shape[0];
+        int N = b->shape[1];
+
+        for (int j = 0; j < N; j++) {
+            float sum = 0.0f;
+            for (int k = 0; k < K; k++) {
+                sum += a_data[k] * b_data[k * N + j];
+            }
+            out_data[j] = sum;
+        }
+    } else if (a_ndim == 2 && b_ndim == 1) {
+        /* Matrix @ Vector: [M, K] @ [K] = [M] */
+        int M = a->shape[0];
+        int K = a->shape[1];
+
+        for (int i = 0; i < M; i++) {
+            float sum = 0.0f;
+            for (int k = 0; k < K; k++) {
+                sum += a_data[i * K + k] * b_data[k];
+            }
+            out_data[i] = sum;
+        }
+    } else if (a_ndim >= 2 && b_ndim >= 2) {
+        /* Batched matrix multiplication
+         * Broadcasting: [B, M, K] @ [B, K, N] or [M, K] @ [B, K, N], etc.
+         */
+
+        /* Get batch dimensions */
+        int64_t batch_size = 1;
+        for (int i = 0; i < out_ndim - 2; i++) {
+            batch_size *= output->shape[i];
+        }
+
+        /* Get matrix dimensions for the last 2 dimensions */
+        int M = output->shape[out_ndim - 2];
+        int N = output->shape[out_ndim - 1];
+        int K = a->shape[a_ndim - 1];
+
+        /* Calculate strides */
+        int64_t a_batch_stride = 1;
+        for (int i = 0; i < a_ndim; i++) {
+            a_batch_stride *= a->shape[i];
+        }
+        a_batch_stride /= (a->shape[a_ndim - 2] * a->shape[a_ndim - 1]);
+
+        int64_t b_batch_stride = 1;
+        for (int i = 0; i < b_ndim; i++) {
+            b_batch_stride *= b->shape[i];
+        }
+        b_batch_stride /= (b->shape[b_ndim - 2] * b->shape[b_ndim - 1]);
+
+        int64_t out_batch_stride = M * N;
+
+        for (int64_t batch = 0; batch < batch_size; batch++) {
+            float* a_batch = a_data + batch * a_batch_stride;
+            float* b_batch = b_data + batch * b_batch_stride;
+            float* out_batch = out_data + batch * out_batch_stride;
+
+            for (int i = 0; i < M; i++) {
+                for (int j = 0; j < N; j++) {
+                    float sum = 0.0f;
+                    for (int k = 0; k < K; k++) {
+                        sum += a_batch[i * K + k] * b_batch[k * N + j];
+                    }
+                    out_batch[i * N + j] = sum;
+                }
+            }
+        }
     }
 }
 
@@ -372,11 +543,94 @@ void nnc_gemm(
  * ============================================================================ */
 
 void nnc_reducemean(Tensor* input, Tensor* output, int axis, int keepdims) {
-    /* TODO: Implement actual mean reduction */
+    /* Mean reduction along specified axis */
+    float* in_data = (float*)input->data;
+    float* out_data = (float*)output->data;
+
+    int ndim = input->ndim;
+
+    /* Handle negative axis */
+    if (axis < 0) {
+        axis = ndim + axis;
+    }
+
+    /* Calculate dimensions */
+    int64_t outer_size = 1;
+    for (int i = 0; i < axis; i++) {
+        outer_size *= input->shape[i];
+    }
+
+    int64_t reduce_dim = input->shape[axis];
+    int64_t inner_size = 1;
+    for (int i = axis + 1; i < ndim; i++) {
+        inner_size *= input->shape[i];
+    }
+
+    /* Perform reduction */
+    for (int64_t outer = 0; outer < outer_size; outer++) {
+        for (int64_t inner = 0; inner < inner_size; inner++) {
+            float sum = 0.0f;
+            for (int64_t r = 0; r < reduce_dim; r++) {
+                int64_t idx = outer * reduce_dim * inner_size + r * inner_size + inner;
+                sum += in_data[idx];
+            }
+            float mean = sum / (float)reduce_dim;
+
+            /* Calculate output index */
+            int64_t out_idx;
+            if (keepdims) {
+                out_idx = outer * 1 * inner_size + 0 * inner_size + inner;
+            } else {
+                out_idx = outer * inner_size + inner;
+            }
+            out_data[out_idx] = mean;
+        }
+    }
 }
 
 void nnc_reducesum(Tensor* input, Tensor* output, int axis, int keepdims) {
-    /* TODO: Implement actual sum reduction */
+    /* Sum reduction along specified axis */
+    float* in_data = (float*)input->data;
+    float* out_data = (float*)output->data;
+
+    int ndim = input->ndim;
+
+    /* Handle negative axis */
+    if (axis < 0) {
+        axis = ndim + axis;
+    }
+
+    /* Calculate dimensions */
+    int64_t outer_size = 1;
+    for (int i = 0; i < axis; i++) {
+        outer_size *= input->shape[i];
+    }
+
+    int64_t reduce_dim = input->shape[axis];
+    int64_t inner_size = 1;
+    for (int i = axis + 1; i < ndim; i++) {
+        inner_size *= input->shape[i];
+    }
+
+    /* Perform reduction */
+    for (int64_t outer = 0; outer < outer_size; outer++) {
+        for (int64_t inner = 0; inner < inner_size; inner++) {
+            float sum = 0.0f;
+            for (int64_t r = 0; r < reduce_dim; r++) {
+                int64_t idx = outer * reduce_dim * inner_size + r * inner_size + inner;
+                sum += in_data[idx];
+            }
+
+            /* Calculate output index */
+            int64_t out_idx;
+            if (keepdims) {
+                out_idx = outer * 1 * inner_size + 0 * inner_size + inner;
+            } else {
+                out_idx = outer * inner_size + inner;
+            }
+            out_data[out_idx] = sum;
+        }
+    }
 }
 
 /* ============================================================================
@@ -384,7 +638,48 @@ void nnc_reducesum(Tensor* input, Tensor* output, int axis, int keepdims) {
  * ============================================================================ */
 
 void nnc_concat(Tensor** inputs, Tensor* output, int num_inputs, int axis) {
-    /* TODO: Implement actual concatenation */
+    /* Concatenation along specified axis
+     * Combines multiple tensors along a given dimension
+     */
+
+    float* out_data = (float*)output->data;
+
+    /* Handle negative axis */
+    if (axis < 0) {
+        axis = output->ndim + axis;
+    }
+
+    /* Calculate dimensions before and after concat axis */
+    int64_t outer_size = 1;
+    for (int i = 0; i < axis; i++) {
+        outer_size *= output->shape[i];
+    }
+
+    int64_t inner_size = 1;
+    for (int i = axis + 1; i < output->ndim; i++) {
+        inner_size *= output->shape[i];
+    }
+
+    /* Copy data from each input tensor */
+    int64_t output_offset = 0;
+    for (int input_idx = 0; input_idx < num_inputs; input_idx++) {
+        Tensor* input = inputs[input_idx];
+        float* in_data = (float*)input->data;
+
+        int64_t concat_dim = input->shape[axis];
+        int64_t copy_size = concat_dim * inner_size;
+
+        for (int64_t outer = 0; outer < outer_size; outer++) {
+            int64_t dest_base = outer * output->shape[axis] * inner_size + output_offset;
+            int64_t src_base = outer * concat_dim * inner_size;
+
+            for (int64_t i = 0; i < copy_size; i++) {
+                out_data[dest_base + i] = in_data[src_base + i];
+            }
+        }
+
+        output_offset += concat_dim * inner_size;
+    }
 }
 
 void nnc_batchnorm(
