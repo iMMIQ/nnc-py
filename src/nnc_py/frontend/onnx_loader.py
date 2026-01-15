@@ -62,6 +62,11 @@ class ONNXFrontend:
         # 4. Parse operator nodes
         for onnx_node in onnx_graph.node:
             ir_node = self._parse_node(onnx_node)
+
+            # Special handling for Constant nodes - extract value from attributes
+            if onnx_node.op_type == "Constant":
+                self._parse_constant_node(onnx_node, ir_graph)
+
             ir_graph.add_node(ir_node)
 
             # Create tensor definitions for node outputs if not already defined
@@ -165,8 +170,47 @@ class ONNXFrontend:
 
         return attrs
 
+    def _parse_constant_node(self, onnx_node, graph: Graph) -> None:
+        """Parse Constant node and extract value to constants.
+
+        Constant nodes have their value stored in the 'value' attribute.
+        """
+        # Find the 'value' attribute
+        value_attr = None
+        for attr in onnx_node.attribute:
+            if attr.name == "value":
+                value_attr = attr
+                break
+
+        if value_attr is None:
+            return
+
+        # Convert TensorProto to numpy array
+        try:
+            arr = numpy_helper.to_array(value_attr.t)
+            output_name = onnx_node.output[0]
+            graph.constants[output_name] = arr
+
+            # Create tensor definition for the constant
+            dtype = self._map_onnx_dtype(value_attr.t.data_type)
+            dims = list(value_attr.t.dims)
+            layout = MemoryLayout.NCHW if len(dims) == 4 else MemoryLayout.NHWC
+            shape = TensorShape(dims=dims, layout=layout)
+
+            tensor_type = TensorType(dtype=dtype, shape=shape, name=output_name)
+            graph.add_tensor(tensor_type)
+        except Exception as e:
+            # If parsing fails, the constant will remain undefined
+            # This can happen for empty tensors or special cases
+            pass
+
     def _infer_tensor_type(self, onnx_node, output_name: str, graph: Graph) -> TensorType | None:
         """Infer tensor type from node and input types."""
+        # Handle Constant nodes - no inputs, type should already be defined
+        if onnx_node.op_type == "Constant":
+            # Type is already defined by _parse_constant_node
+            return graph.tensors.get(output_name)
+
         if not onnx_node.input:
             return None
 

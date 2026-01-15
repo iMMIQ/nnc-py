@@ -48,6 +48,7 @@ class OpType(Enum):
     BATCH_NORM = "BatchNormalization"
     LAYER_NORM = "LayerNormalization"
     IDENTITY = "Identity"
+    CONSTANT = "Constant"
     CLIP = "Clip"
     CAST = "Cast"
 
