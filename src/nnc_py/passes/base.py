@@ -74,6 +74,8 @@ class PassManager:
         Returns:
             List of passes to run.
         """
+        from nnc_py.passes.constant_folding import ConstantFoldingPass
+
         passes = []
 
         # O0: No optimization
@@ -82,18 +84,16 @@ class PassManager:
 
         # O1: Basic optimizations
         if opt_level >= 1:
-            # passes.append(CanonicalizePass())
-            # passes.append(ConstantFoldingPass())
-            # passes.append(DeadCodeEliminationPass())
-            pass  # Placeholder - passes to be implemented
+            passes.append(ConstantFoldingPass())
 
         # O2: Intermediate optimizations
         if opt_level >= 2:
-            # passes.append(LayoutConversionPass())
-            pass  # Placeholder - passes to be implemented
+            # TODO: Add more passes (LayoutConversionPass, etc.)
+            pass
 
         # O3: Advanced optimizations
         if opt_level >= 3:
-            pass  # Placeholder - passes to be implemented
+            # TODO: Add advanced passes
+            pass
 
         return passes
