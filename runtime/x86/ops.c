@@ -770,14 +770,11 @@ void nnc_layernorm(
 void nnc_identity(Tensor* input, Tensor* output) {
     /* Identity operation - copy input to output */
     int64_t n = tensor_numel(output);
-    float* in_data = (float*)input->data;
-    float* out_data = (float*)output->data;
+    int64_t input_n = tensor_numel(input);
+    int64_t copy_n = (n < input_n) ? n : input_n;
 
-    /* Copy data (handle potential overlap) */
-    int64_t copy_n = (n < tensor_numel(input)) ? n : tensor_numel(input);
-    for (int64_t i = 0; i < copy_n; i++) {
-        out_data[i] = in_data[i];
-    }
+    /* Use memcpy for safe copy (handles overlap and aliasing correctly) */
+    memcpy(output->data, input->data, copy_n * sizeof(float));
 }
 
 void nnc_split(Tensor* input, Tensor** outputs, int num_outputs, int axis) {
