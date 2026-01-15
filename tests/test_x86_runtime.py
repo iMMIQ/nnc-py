@@ -171,6 +171,18 @@ clean:
         self.lib.nnc_and.argtypes = [ctypes.POINTER(Tensor), ctypes.POINTER(Tensor), ctypes.POINTER(Tensor)]
         self.lib.nnc_and.restype = None
 
+        # Math operations (unary)
+        self.lib.nnc_sqrt.argtypes = [ctypes.POINTER(Tensor), ctypes.POINTER(Tensor)]
+        self.lib.nnc_sqrt.restype = None
+        self.lib.nnc_exp.argtypes = [ctypes.POINTER(Tensor), ctypes.POINTER(Tensor)]
+        self.lib.nnc_exp.restype = None
+        self.lib.nnc_log.argtypes = [ctypes.POINTER(Tensor), ctypes.POINTER(Tensor)]
+        self.lib.nnc_log.restype = None
+        self.lib.nnc_abs.argtypes = [ctypes.POINTER(Tensor), ctypes.POINTER(Tensor)]
+        self.lib.nnc_abs.restype = None
+        self.lib.nnc_neg.argtypes = [ctypes.POINTER(Tensor), ctypes.POINTER(Tensor)]
+        self.lib.nnc_neg.restype = None
+
     def _make_tensor(self, np_array):
         """Create a Tensor from numpy array."""
         # Ensure C-contiguous and correct dtype
@@ -695,6 +707,81 @@ clean:
 
         max_diff = self._compare_results(data_out, expected)
         print(f"  and_broadcast max_diff: {max_diff}")
+
+    def test_sqrt(self):
+        """Test nnc_sqrt - element-wise square root."""
+        a = np.array([[1.0, 4.0], [9.0, 16.0]], dtype=np.float32)
+        expected = np.sqrt(a)
+
+        tensor_a, data_a = self._make_tensor(a)
+
+        out = np.zeros_like(expected, dtype=np.float32)
+        tensor_out, data_out = self._make_tensor(out)
+
+        self.lib.nnc_sqrt(ctypes.byref(tensor_a), ctypes.byref(tensor_out))
+
+        max_diff = self._compare_results(data_out, expected)
+        print(f"  sqrt max_diff: {max_diff}")
+
+    def test_exp(self):
+        """Test nnc_exp - element-wise exponential."""
+        a = np.array([[0.0, 1.0], [2.0, 3.0]], dtype=np.float32)
+        expected = np.exp(a)
+
+        tensor_a, data_a = self._make_tensor(a)
+
+        out = np.zeros_like(expected, dtype=np.float32)
+        tensor_out, data_out = self._make_tensor(out)
+
+        self.lib.nnc_exp(ctypes.byref(tensor_a), ctypes.byref(tensor_out))
+
+        max_diff = self._compare_results(data_out, expected, tol=1e-4)
+        print(f"  exp max_diff: {max_diff}")
+
+    def test_log(self):
+        """Test nnc_log - element-wise natural logarithm."""
+        a = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+        expected = np.log(a)
+
+        tensor_a, data_a = self._make_tensor(a)
+
+        out = np.zeros_like(expected, dtype=np.float32)
+        tensor_out, data_out = self._make_tensor(out)
+
+        self.lib.nnc_log(ctypes.byref(tensor_a), ctypes.byref(tensor_out))
+
+        max_diff = self._compare_results(data_out, expected, tol=1e-4)
+        print(f"  log max_diff: {max_diff}")
+
+    def test_abs(self):
+        """Test nnc_abs - element-wise absolute value."""
+        a = np.array([[-1.0, -2.0], [3.0, -4.0]], dtype=np.float32)
+        expected = np.abs(a)
+
+        tensor_a, data_a = self._make_tensor(a)
+
+        out = np.zeros_like(expected, dtype=np.float32)
+        tensor_out, data_out = self._make_tensor(out)
+
+        self.lib.nnc_abs(ctypes.byref(tensor_a), ctypes.byref(tensor_out))
+
+        max_diff = self._compare_results(data_out, expected)
+        print(f"  abs max_diff: {max_diff}")
+
+    def test_neg(self):
+        """Test nnc_neg - element-wise negation."""
+        a = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+        expected = -a
+
+        tensor_a, data_a = self._make_tensor(a)
+
+        out = np.zeros_like(expected, dtype=np.float32)
+        tensor_out, data_out = self._make_tensor(out)
+
+        self.lib.nnc_neg(ctypes.byref(tensor_a), ctypes.byref(tensor_out))
+
+        max_diff = self._compare_results(data_out, expected)
+        print(f"  neg max_diff: {max_diff}")
 
 
 if __name__ == "__main__":

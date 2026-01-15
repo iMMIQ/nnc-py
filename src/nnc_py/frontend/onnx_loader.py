@@ -338,6 +338,14 @@ class ONNXFrontend:
                 name=output_name,
             )
 
+        elif op_type == "Sqrt":
+            # Sqrt preserves shape
+            return TensorType(
+                dtype=input_tensor.dtype,
+                shape=input_tensor.shape,
+                name=output_name,
+            )
+
         elif op_type == "LayerNormalization":
             # LayerNormalization preserves shape
             return TensorType(

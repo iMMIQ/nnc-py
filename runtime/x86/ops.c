@@ -1101,3 +1101,76 @@ void nnc_and(Tensor* a, Tensor* b, Tensor* out) {
         }
     }
 }
+
+/* ============================================================================
+ * Math Operations (Unary Element-wise)
+ * ============================================================================ */
+
+void nnc_sqrt(Tensor* input, Tensor* output) {
+    /* Element-wise square root operation
+     * Computes sqrt(x) for each element
+     */
+    int64_t n = tensor_numel(output);
+    float* in_data = (float*)input->data;
+    float* out_data = (float*)output->data;
+
+    for (int64_t i = 0; i < n; i++) {
+        float x = in_data[i];
+        /* Handle negative inputs - return NaN for sqrt of negative numbers */
+        out_data[i] = (x >= 0.0f) ? sqrtf(x) : NAN;
+    }
+}
+
+void nnc_exp(Tensor* input, Tensor* output) {
+    /* Element-wise exponential operation
+     * Computes exp(x) for each element
+     */
+    int64_t n = tensor_numel(output);
+    float* in_data = (float*)input->data;
+    float* out_data = (float*)output->data;
+
+    for (int64_t i = 0; i < n; i++) {
+        out_data[i] = expf(in_data[i]);
+    }
+}
+
+void nnc_log(Tensor* input, Tensor* output) {
+    /* Element-wise natural logarithm operation
+     * Computes log(x) for each element
+     */
+    int64_t n = tensor_numel(output);
+    float* in_data = (float*)input->data;
+    float* out_data = (float*)output->data;
+
+    for (int64_t i = 0; i < n; i++) {
+        float x = in_data[i];
+        /* Handle non-positive inputs - return NaN */
+        out_data[i] = (x > 0.0f) ? logf(x) : NAN;
+    }
+}
+
+void nnc_abs(Tensor* input, Tensor* output) {
+    /* Element-wise absolute value operation
+     * Computes |x| for each element
+     */
+    int64_t n = tensor_numel(output);
+    float* in_data = (float*)input->data;
+    float* out_data = (float*)output->data;
+
+    for (int64_t i = 0; i < n; i++) {
+        out_data[i] = fabsf(in_data[i]);
+    }
+}
+
+void nnc_neg(Tensor* input, Tensor* output) {
+    /* Element-wise negation operation
+     * Computes -x for each element
+     */
+    int64_t n = tensor_numel(output);
+    float* in_data = (float*)input->data;
+    float* out_data = (float*)output->data;
+
+    for (int64_t i = 0; i < n; i++) {
+        out_data[i] = -in_data[i];
+    }
+}

@@ -39,6 +39,13 @@ class OpType(Enum):
     XOR = "Xor"
     NOT = "Not"
 
+    # Math ops (unary element-wise)
+    SQRT = "Sqrt"
+    EXP = "Exp"
+    LOG = "Log"
+    ABS = "Abs"
+    NEG = "Neg"
+
     # Matrix ops
     MATMUL = "MatMul"
     GEMM = "Gemm"

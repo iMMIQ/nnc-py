@@ -74,6 +74,45 @@ void nnc_tanh(Tensor* input, Tensor* output);
 void nnc_softmax(Tensor* input, Tensor* output, int axis);
 
 /* ============================================================================
+ * Math Operations (Unary Element-wise)
+ * ============================================================================ */
+
+/* Sqrt - element-wise square root
+ * Args:
+ *   input:  Input tensor
+ *   output: Output tensor (sqrt(x) for each element)
+ */
+void nnc_sqrt(Tensor* input, Tensor* output);
+
+/* Exp - element-wise exponential
+ * Args:
+ *   input:  Input tensor
+ *   output: Output tensor (exp(x) for each element)
+ */
+void nnc_exp(Tensor* input, Tensor* output);
+
+/* Log - element-wise natural logarithm
+ * Args:
+ *   input:  Input tensor
+ *   output: Output tensor (log(x) for each element)
+ */
+void nnc_log(Tensor* input, Tensor* output);
+
+/* Abs - element-wise absolute value
+ * Args:
+ *   input:  Input tensor
+ *   output: Output tensor (|x| for each element)
+ */
+void nnc_abs(Tensor* input, Tensor* output);
+
+/* Neg - element-wise negation
+ * Args:
+ *   input:  Input tensor
+ *   output: Output tensor (-x for each element)
+ */
+void nnc_neg(Tensor* input, Tensor* output);
+
+/* ============================================================================
  * Pooling Operations
  * ============================================================================ */
 
