@@ -171,7 +171,7 @@ class X86Backend(BackendBase):
         lines.append("void nnc_run(void) {")
 
         for node in nodes:
-            if node.op_type.value == "constant":
+            if node.op_type == OpType.CONSTANT:
                 continue
             func_name = ctx.node_symbols.get(node.name, node.name)
             lines.append(f"    {func_name}();")
