@@ -58,33 +58,33 @@
 | 9 | ConvBnReluFusionPass | `passes/conv_bn_relu_fusion.py` | 🔜 | Fuse Conv + BN + ReLU → Conv |
 | 10 | AffineFusionPass | `passes/affine_fusion.py` | 🔜 | Fuse `Mul(x, c) + Add(x, c)` → affine transform |
 
-#### Batch 4: Memory Optimization (O3)
+#### Batch 4: Memory Optimization (O2)
 | # | Pass | File | Status | Description |
 |---|------|------|--------|-------------|
-| 11 | InplaceOpPass | `passes/inplace.py` | 🔜 | Identify in-place operations (ReLU, etc.) |
-| 12 | BufferSharingPass | `passes/buffer_sharing.py` | 🔜 | Analyze tensor lifetimes for memory reuse |
-| 13 | MemoryPlanningPass | `passes/memory_plan.py` | 🔜 | Static memory allocation planning |
+| 11 | LivenessAnalysisPass | `passes/liveness.py` | ✅ | Analyze tensor lifetimes for memory reuse |
+| 12 | MemoryPlanningPass | `passes/memory_plan.py` | ✅ | Static memory allocation with buffer sharing |
+| 13 | InplaceOpPass | `passes/inplace.py` | 🔜 | Identify in-place operations (ReLU, etc.) |
 
 ### Optimization Level Configuration
 ```
 O0: [] (no optimization)
 O1: [ConstantFolding]
-O2: [O1 + ReshapeElimination, TransposeElimination, LayoutCanonicalization, ConvBNFusion, ConvReluFusion]
-O3: [O2 + ConvBnReluFusion, AffineFusion, InplaceOp, BufferSharing, MemoryPlanning]
+O2: [O1 + LivenessAnalysis, MemoryPlanning]
+O3: [O2 + InplaceOp, (more passes planned)]
 ```
 
-**Goal**: ⚠️ Optimize IR for better performance (ConstantFoldingPass implemented)
+**Goal**: ⚠️ Optimize IR for better performance (ConstantFolding, LivenessAnalysis, MemoryPlanning implemented)
 
 ---
 
-## Phase 4: Memory Planning 🔜
-- [ ] Liveness analysis
-- [ ] Memory size calculation
-- [ ] Static buffer layout
-- [ ] Memory reuse analysis
+## Phase 4: Memory Planning ✅
+- [x] Liveness analysis
+- [x] Memory size calculation
+- [x] Static buffer layout
+- [x] Memory reuse analysis
 - [ ] User-specified memory overrides
 
-**Goal**: Efficient static memory allocation
+**Goal**: ✅ Efficient static memory allocation (implemented for O2+)
 
 ---
 
@@ -189,11 +189,11 @@ O3: [O2 + ConvBnReluFusion, AffineFusion, InplaceOp, BufferSharing, MemoryPlanni
 - [x] x86 backend
 - [x] End-to-end testing
 
-### v0.2.0 - Optimization 🔜
+### v0.2.0 - Optimization ✅
 - [x] Graph optimization framework
 - [x] Constant folding pass
 - [ ] Operator fusion
-- [ ] Better memory planning
+- [x] Memory planning (liveness + buffer sharing)
 - [ ] Transpose elimination
 
 ### v0.3.0 - Production Ready 📋
@@ -228,6 +228,8 @@ O3: [O2 + ConvBnReluFusion, AffineFusion, InplaceOp, BufferSharing, MemoryPlanni
 | C Emitter | `codegen/c_emitter.py` | ✅ |
 | Pass Framework | `passes/base.py` | ✅ |
 | ConstantFolding | `passes/constant_folding.py` | ✅ |
+| LivenessAnalysis | `passes/liveness.py` | ✅ |
+| MemoryPlanning | `passes/memory_plan.py` | ✅ |
 | Runtime | `runtime/` | ✅ |
 | Tests | `tests/` | ✅ |
-| Documentation | `README.md`, `ROADMAP.md` | ✅ |
+| Documentation | `README.md`, `ROADMAP.md`, `docs/MEMORY_ALLOCATION.md` | ✅ |

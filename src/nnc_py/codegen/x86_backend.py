@@ -1,5 +1,7 @@
 """x86 backend for simulation."""
 
+from typing import List
+
 import numpy as np
 
 from nnc_py.codegen.base import BackendBase, CodeGenResult
@@ -244,6 +246,14 @@ run: model
             "",
         ]
 
+        # Check if memory planning was performed
+        has_memory_plan = "memory_plan" in ctx.metadata
+
+        if has_memory_plan:
+            # Generate static memory pool
+            lines.extend(self._generate_memory_pool(ctx))
+            lines.append("")
+
         # Define all non-constant tensors
         for tensor_name, tensor in ctx.graph.tensors.items():
             if tensor_name in ctx.graph.constants:
@@ -254,10 +264,29 @@ run: model
             shape_init = ", ".join(str(d) for d in shape_list)
 
             lines.append(f"/* Tensor: {tensor_name} */")
-            lines.append(f"int64_t {var_name}_shape[] = {{{shape_init}}};")
+            lines.append(f"static int64_t {var_name}_shape[] = {{{shape_init}}};")
+
+            # Get memory info if available
+            if has_memory_plan:
+                from nnc_py.passes.memory_plan import get_memory_plan
+                plan = get_memory_plan(ctx)
+                if tensor_name in plan.tensor_info:
+                    mem_info = plan.tensor_info[tensor_name]
+                    # Point into static memory pool
+                    data_init = f"_nnc_memory_pool + {mem_info.pool_offset}"
+                else:
+                    # Tensor not in memory plan (e.g., constant)
+                    data_init = "NULL"
+            else:
+                # No memory planning - will use malloc
+                data_init = "NULL"
+
+            # Map dtype
+            dtype_enum = self._map_dtype_to_enum(tensor.dtype)
+
             lines.append(f"Tensor {var_name} = {{")
-            lines.append(f"    .data = NULL,")
-            lines.append(f"    .dtype = NNC_DTYPE_FLOAT32,")
+            lines.append(f"    .data = {data_init},")
+            lines.append(f"    .dtype = {dtype_enum},")
             lines.append(f"    .shape = {var_name}_shape,")
             lines.append(f"    .ndim = {len(shape_list)},")
             lines.append(f"    .nbytes = {tensor.byte_size()},")
@@ -266,68 +295,155 @@ run: model
 
         return "\n".join(lines)
 
+    def _generate_memory_pool(self, ctx: CompileContext) -> List[str]:
+        """Generate static memory pool declaration."""
+        from nnc_py.passes.memory_plan import get_memory_plan
+
+        plan = get_memory_plan(ctx)
+        lines = [
+            "/* Static Memory Pool */",
+            f"/* Total size: {plan.total_size} bytes ({plan.total_size / 1024:.2f} KB) */",
+            f"/* Buffers: {plan.num_buffers}, Tensors: {plan.num_tensors} */",
+            f"#define NNC_MEMORY_SIZE {plan.total_size}",
+            f"#define NNC_MEMORY_ALIGNMENT {plan.alignment}",
+            f"static uint8_t _nnc_memory_pool[NNC_MEMORY_SIZE] "
+            f"__attribute__((aligned(NNC_MEMORY_ALIGNMENT))) = {{0}};",
+            "",
+        ]
+
+        # Optional: generate memory layout descriptor for debugging
+        if ctx.debug:
+            lines.append("/* Memory Layout (for debugging) */")
+            lines.append("typedef struct {")
+            lines.append("    const char* name;")
+            lines.append("    size_t offset;")
+            lines.append("    size_t size;")
+            lines.append("} TensorMemoryLayout;")
+            lines.append("")
+            lines.append("static const TensorMemoryLayout _nnc_memory_layout[] = {")
+
+            for tensor_name in sorted(plan.tensor_info.keys(), key=lambda n: plan.tensor_info[n].pool_offset):
+                mem_info = plan.tensor_info[tensor_name]
+                lines.append(f"    {{\"{tensor_name}\", {mem_info.pool_offset}, {mem_info.size}}},")
+
+            lines.append("    {NULL, 0, 0}  /* Sentinel */")
+            lines.append("};")
+            lines.append("")
+
+        return lines
+
+    def _map_dtype_to_enum(self, dtype: "DataType") -> str:
+        """Map IR dtype to NNC dtype enum."""
+        from nnc_py.ir.types import DataType
+
+        mapping = {
+            DataType.FLOAT32: "NNC_DTYPE_FLOAT32",
+            DataType.FLOAT16: "NNC_DTYPE_FLOAT16",
+            DataType.INT32: "NNC_DTYPE_INT32",
+            DataType.INT8: "NNC_DTYPE_INT8",
+            DataType.UINT8: "NNC_DTYPE_UINT8",
+            DataType.BOOL: "NNC_DTYPE_BOOL",
+        }
+        return mapping.get(dtype, "NNC_DTYPE_FLOAT32")
+
     def _generate_test_runner(self, ctx: CompileContext) -> str:
         """Generate test runner."""
+        # Check if memory planning was performed
+        has_memory_plan = "memory_plan" in ctx.metadata
+
         # Generate tensor setup code
         tensor_setups = []
 
-        # Setup input tensors
-        for tensor_name in ctx.graph.inputs:
-            tensor = ctx.graph.get_tensor(tensor_name)
-            var_name = ctx.tensor_symbols.get(tensor_name, tensor_name)
-            size = tensor.byte_size()
+        if has_memory_plan:
+            # Static allocation - memory is pre-allocated in memory pool
+            # Only need to initialize input tensors with test data
+            from nnc_py.passes.memory_plan import get_memory_plan
+            plan = get_memory_plan(ctx)
 
-            # Generate shape array
-            shape_list = tensor.shape.dims
-            shape_init = ", ".join(str(d) for d in shape_list)
-
-            # Setup code
-            tensor_setups.append(f"    /* Setup {var_name} */")
-            tensor_setups.append(f"    static int64_t {var_name}_shape[] = {{{shape_init}}};")
-            tensor_setups.append(f"    {var_name}.shape = {var_name}_shape;")
-            tensor_setups.append(f"    {var_name}.ndim = {len(shape_list)};")
-            tensor_setups.append(f"    {var_name}.dtype = NNC_DTYPE_FLOAT32;")
-            tensor_setups.append(f"    {var_name}.nbytes = {size};")
-            tensor_setups.append(f"    {var_name}.data = malloc({size});")
-            tensor_setups.append(f"    if (!{var_name}.data) {{ fprintf(stderr, \"Failed to allocate {var_name}\\\\n\"); return 1; }}")
-
-            # Initialize with test pattern
-            num_elements = size // 4
-            tensor_setups.append(f"    for (int i = 0; i < {num_elements}; i++) {{")
-            tensor_setups.append(f"        ((float*){var_name}.data)[i] = (float)i * 0.01f;  /* Test pattern */")
-            tensor_setups.append(f"    }}")
+            tensor_setups.append(f"    /* Using static memory pool: {plan.total_size} bytes */")
             tensor_setups.append("")
 
-        # Setup intermediate and output tensors
-        for tensor_name, tensor in ctx.graph.tensors.items():
-            if tensor_name in ctx.graph.inputs or tensor_name in ctx.graph.constants:
-                continue
+            # Setup input tensors - only initialize with test data
+            for tensor_name in ctx.graph.inputs:
+                tensor = ctx.graph.get_tensor(tensor_name)
+                var_name = ctx.tensor_symbols.get(tensor_name, tensor_name)
+                size = tensor.byte_size()
 
-            var_name = ctx.tensor_symbols.get(tensor_name, tensor_name)
-            size = tensor.byte_size()
-            shape_list = tensor.shape.dims
-            shape_init = ", ".join(str(d) for d in shape_list)
+                # Get memory info
+                if tensor_name in plan.tensor_info:
+                    mem_info = plan.tensor_info[tensor_name]
+                    tensor_setups.append(f"    /* Initialize {var_name} at offset {mem_info.pool_offset} */")
+                else:
+                    tensor_setups.append(f"    /* Initialize {var_name} */")
 
-            tensor_setups.append(f"    /* Setup {var_name} */")
-            tensor_setups.append(f"    static int64_t {var_name}_shape[] = {{{shape_init}}};")
-            tensor_setups.append(f"    {var_name}.shape = {var_name}_shape;")
-            tensor_setups.append(f"    {var_name}.ndim = {len(shape_list)};")
-            tensor_setups.append(f"    {var_name}.dtype = NNC_DTYPE_FLOAT32;")
-            tensor_setups.append(f"    {var_name}.nbytes = {size};")
-            tensor_setups.append(f"    {var_name}.data = calloc({size // 4}, sizeof(float));  /* Initialize to zero */")
-            tensor_setups.append(f"    if (!{var_name}.data) {{ fprintf(stderr, \"Failed to allocate {var_name}\\\\n\"); return 1; }}")
-            tensor_setups.append("")
+                # Initialize with test pattern
+                num_elements = size // 4
+                tensor_setups.append(f"    for (int i = 0; i < {num_elements}; i++) {{")
+                tensor_setups.append(f"        ((float*){var_name}.data)[i] = (float)i * 0.01f;  /* Test pattern */")
+                tensor_setups.append(f"    }}")
+                tensor_setups.append("")
+        else:
+            # Dynamic allocation - use malloc/calloc
+            # Setup input tensors
+            for tensor_name in ctx.graph.inputs:
+                tensor = ctx.graph.get_tensor(tensor_name)
+                var_name = ctx.tensor_symbols.get(tensor_name, tensor_name)
+                size = tensor.byte_size()
 
-        # Free memory
-        tensor_frees = []
-        for tensor_name in ctx.graph.tensors:
-            if tensor_name in ctx.graph.constants:
-                continue
-            var_name = ctx.tensor_symbols.get(tensor_name, tensor_name)
-            tensor_frees.append(f"    free({var_name}.data);")
+                # Generate shape array
+                shape_list = tensor.shape.dims
+                shape_init = ", ".join(str(d) for d in shape_list)
+
+                # Setup code
+                tensor_setups.append(f"    /* Setup {var_name} */")
+                tensor_setups.append(f"    static int64_t {var_name}_shape[] = {{{shape_init}}};")
+                tensor_setups.append(f"    {var_name}.shape = {var_name}_shape;")
+                tensor_setups.append(f"    {var_name}.ndim = {len(shape_list)};")
+                tensor_setups.append(f"    {var_name}.dtype = NNC_DTYPE_FLOAT32;")
+                tensor_setups.append(f"    {var_name}.nbytes = {size};")
+                tensor_setups.append(f"    {var_name}.data = malloc({size});")
+                tensor_setups.append(f"    if (!{var_name}.data) {{ fprintf(stderr, \"Failed to allocate {var_name}\\\\n\"); return 1; }}")
+
+                # Initialize with test pattern
+                num_elements = size // 4
+                tensor_setups.append(f"    for (int i = 0; i < {num_elements}; i++) {{")
+                tensor_setups.append(f"        ((float*){var_name}.data)[i] = (float)i * 0.01f;  /* Test pattern */")
+                tensor_setups.append(f"    }}")
+                tensor_setups.append("")
+
+            # Setup intermediate and output tensors
+            for tensor_name, tensor in ctx.graph.tensors.items():
+                if tensor_name in ctx.graph.inputs or tensor_name in ctx.graph.constants:
+                    continue
+
+                var_name = ctx.tensor_symbols.get(tensor_name, tensor_name)
+                size = tensor.byte_size()
+                shape_list = tensor.shape.dims
+                shape_init = ", ".join(str(d) for d in shape_list)
+
+                tensor_setups.append(f"    /* Setup {var_name} */")
+                tensor_setups.append(f"    static int64_t {var_name}_shape[] = {{{shape_init}}};")
+                tensor_setups.append(f"    {var_name}.shape = {var_name}_shape;")
+                tensor_setups.append(f"    {var_name}.ndim = {len(shape_list)};")
+                tensor_setups.append(f"    {var_name}.dtype = NNC_DTYPE_FLOAT32;")
+                tensor_setups.append(f"    {var_name}.nbytes = {size};")
+                tensor_setups.append(f"    {var_name}.data = calloc({size // 4}, sizeof(float));  /* Initialize to zero */")
+                tensor_setups.append(f"    if (!{var_name}.data) {{ fprintf(stderr, \"Failed to allocate {var_name}\\\\n\"); return 1; }}")
+                tensor_setups.append("")
 
         setup_code = "\n".join(tensor_setups)
-        frees_code = "\n".join(tensor_frees)
+
+        # Free memory - only for dynamic allocation
+        if has_memory_plan:
+            frees_code = "    /* Static allocation - no free needed */"
+        else:
+            tensor_frees = []
+            for tensor_name in ctx.graph.tensors:
+                if tensor_name in ctx.graph.constants:
+                    continue
+                var_name = ctx.tensor_symbols.get(tensor_name, tensor_name)
+                tensor_frees.append(f"    free({var_name}.data);")
+            frees_code = "\n".join(tensor_frees)
 
         # Get input and output tensor variable names
         input_var = None

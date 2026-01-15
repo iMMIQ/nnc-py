@@ -75,6 +75,8 @@ class PassManager:
             List of passes to run.
         """
         from nnc_py.passes.constant_folding import ConstantFoldingPass
+        from nnc_py.passes.liveness import LivenessAnalysisPass
+        from nnc_py.passes.memory_plan import MemoryPlanningPass
 
         passes = []
 
@@ -86,14 +88,14 @@ class PassManager:
         if opt_level >= 1:
             passes.append(ConstantFoldingPass())
 
-        # O2: Intermediate optimizations
+        # O2: Intermediate optimizations (with memory planning)
         if opt_level >= 2:
-            # TODO: Add more passes (LayoutConversionPass, etc.)
-            pass
+            passes.append(LivenessAnalysisPass())
+            passes.append(MemoryPlanningPass())
 
         # O3: Advanced optimizations
         if opt_level >= 3:
-            # TODO: Add advanced passes
+            # TODO: Add advanced passes (operator fusion, etc.)
             pass
 
         return passes
