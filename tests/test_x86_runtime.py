@@ -43,6 +43,7 @@ class TestX86Runtime:
         makefile = self.build_dir / "Makefile"
 
         # Generate Makefile
+        # Note: ASan disabled for shared library tests - causes hangs with ctypes
         makefile_content = f"""CC = gcc
 CFLAGS = -std=c11 -O2 -Wall -fPIC
 LDFLAGS = -lm

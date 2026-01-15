@@ -88,9 +88,11 @@ def test_overflow_compilation():
     onnx.save(model, onnx_path)
 
     # Compile with memory limit that forces overflow
-    print("\n1. Compiling with 512 byte fast memory limit...")
+    # Model needs ~1600 bytes total (input + 2 relus + add + mul + output)
+    # With 1600B limit, half goes to fast pool (512B), forcing spill
+    print("\n1. Compiling with 1600 byte total memory limit (fast pool = 512B)...")
     compiler = Compiler(target='x86', opt_level=2)
-    compiler.compile(onnx_path, output_dir, max_memory='512B')
+    compiler.compile(onnx_path, output_dir, max_memory='1600B')
 
     # Check generated files
     print("\n2. Checking generated files...")
@@ -187,6 +189,11 @@ def test_overflow_execution(tmpdir):
     makefile_content = makefile_content.replace(
         "NNC_RUNTIME ?= ../../runtime",
         f"NNC_RUNTIME = {runtime_dir}"
+    )
+    # Add address sanitizer for memory debugging
+    makefile_content = makefile_content.replace(
+        "CFLAGS = -std=c11 -O2",
+        "CFLAGS = -std=c11 -O2 -g -fsanitize=address"
     )
     with open(makefile, 'w') as f:
         f.write(makefile_content)
@@ -308,6 +315,11 @@ def test_overflow_no_limit():
         "NNC_RUNTIME ?= ../../runtime",
         f"NNC_RUNTIME = {runtime_dir}"
     )
+    # Add address sanitizer for memory debugging
+    makefile_content = makefile_content.replace(
+        "CFLAGS = -std=c11 -O2",
+        "CFLAGS = -std=c11 -O2 -g -fsanitize=address"
+    )
     with open(makefile, 'w') as f:
         f.write(makefile_content)
 
@@ -375,6 +387,11 @@ def test_exact_memory_bound():
     makefile_content = makefile_content.replace(
         "NNC_RUNTIME ?= ../../runtime",
         f"NNC_RUNTIME = {runtime_dir}"
+    )
+    # Add address sanitizer for memory debugging
+    makefile_content = makefile_content.replace(
+        "CFLAGS = -std=c11 -O2",
+        "CFLAGS = -std=c11 -O2 -g -fsanitize=address"
     )
     with open(makefile, 'w') as f:
         f.write(makefile_content)

@@ -415,34 +415,77 @@ run: model
         has_spill = spill_plan is not None and spill_plan.has_overflow
         pool_name = "_nnc_fast_pool" if has_spill else "_nnc_memory_pool"
 
-        # Calculate new offsets for ALL tensors in fast pool
-        # Spilled tensors still need fast pool addresses (for computation),
-        # spill/reload just moves data between pools
+        # When spill occurs, we need to recalculate memory layout.
+        # The key insight: spilled tensors are copied to slow memory after last use,
+        # so they DON'T need to occupy fast memory for their entire lifetime.
+        # We can reuse their fast memory space for other tensors.
+        #
+        # Strategy: Use the original memory plan's buffer sharing, but compact
+        # the buffers themselves since spilled tensors free up their buffers.
         fast_tensor_offsets = {}  # tensor_name -> offset in fast pool
 
         if has_spill:
-            # Re-calculate offsets for ALL tensors in fast memory
+            # Get original memory plan and spill info
+            from nnc_py.passes.memory_plan import get_memory_plan
+            plan = get_memory_plan(ctx)
+            spilled_names = set(spill_plan.spilled_tensors.keys())
+
+            # Collect buffers that contain ONLY spilled tensors
+            # These buffers can be completely freed for reuse
+            freed_buffer_ids = set()
+            for buf in plan.buffers:
+                # Check if ALL tensors in this buffer are spilled
+                all_spilled = all(t in spilled_names for t in buf.tensors)
+                if all_spilled and buf.tensors:
+                    freed_buffer_ids.add(buf.id)
+                    if ctx.debug:
+                        print(f"DEBUG: Buffer {buf.id} freed (all tensors spilled: {buf.tensors})")
+
+            # Re-assign offsets: compact all buffers, skipping freed ones
             current_offset = 0
             alignment = 16
 
-            # Get original memory plan
-            from nnc_py.passes.memory_plan import get_memory_plan
-            plan = get_memory_plan(ctx)
+            # Process buffers in order of their original offset
+            sorted_buffers = sorted(plan.buffers, key=lambda b: b.offset)
+            for buf in sorted_buffers:
+                if buf.id in freed_buffer_ids:
+                    # Skip freed buffers
+                    continue
 
-            # Sort tensors by their original offset (preserve order)
-            sorted_tensors = sorted(
-                plan.tensor_info.items(),
-                key=lambda x: x[1].pool_offset
-            )
+                # Check if this buffer is partially spilled (some tensors spilled, some not)
+                # If so, we still need the buffer, but only for non-spilled tensors
+                buf_tensors = [t for t in buf.tensors if t not in spilled_names]
 
-            for tensor_name, mem_info in sorted_tensors:
-                # Align offset
+                if not buf_tensors:
+                    # All tensors in this buffer are spilled, skip it
+                    continue
+
+                # Assign offset at current position
                 aligned_offset = ((current_offset + alignment - 1) // alignment) * alignment
-                fast_tensor_offsets[tensor_name] = aligned_offset
 
-                # Move to next position
-                tensor_size = mem_info.size
-                current_offset = aligned_offset + tensor_size
+                # All tensors in this buffer get the same offset (they share it)
+                for tensor_name in buf.tensors:
+                    if tensor_name in plan.tensor_info:
+                        fast_tensor_offsets[tensor_name] = aligned_offset
+
+                # Move past this buffer
+                current_offset = aligned_offset + buf.size
+
+                # Check if we've exceeded the limit
+                if current_offset > spill_plan.max_memory:
+                    # This shouldn't happen with proper spill selection
+                    import sys
+                    print(f"ERROR: Fast pool overflow after compaction!", file=sys.stderr)
+                    print(f"  Current: {current_offset}, Max: {spill_plan.max_memory}", file=sys.stderr)
+                    print(f"  Try increasing max_memory or using a smaller model.", file=sys.stderr)
+                    raise RuntimeError(
+                        f"Cannot fit model in {spill_plan.max_memory} bytes even with spill. "
+                        f"Need at least {current_offset} bytes."
+                    )
+
+            if ctx.debug:
+                print(f"DEBUG: Recalculated {len(fast_tensor_offsets)} tensor offsets")
+                print(f"DEBUG: Total fast memory used: {current_offset} / {spill_plan.max_memory}")
 
         # Define all non-constant tensors
         for tensor_name, tensor in ctx.graph.tensors.items():

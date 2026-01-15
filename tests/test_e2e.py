@@ -82,6 +82,11 @@ class E2ETestHelper:
                 "NNC_RUNTIME ?= ../../runtime",
                 f"NNC_RUNTIME = {self.runtime_dir}"
             )
+            # Add address sanitizer for memory debugging
+            makefile_content = makefile_content.replace(
+                "CFLAGS = -std=c11 -O2",
+                "CFLAGS = -std=c11 -O2 -g -fsanitize=address"
+            )
             makefile.write_text(makefile_content)
 
         try:
