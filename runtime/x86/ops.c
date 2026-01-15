@@ -1008,3 +1008,51 @@ void nnc_tile(Tensor* input, Tensor* output, int64_t* repeats, int ndim) {
         out_data[out_pos] = in_data[in_pos];
     }
 }
+
+/* ============================================================================
+ * Comparison Operations
+ * ============================================================================ */
+
+void nnc_equal(Tensor* a, Tensor* b, Tensor* out) {
+    /* Element-wise equality comparison
+     * Returns 1.0f where a == b, 0.0f otherwise
+     */
+    int64_t n = tensor_numel(out);
+    int64_t a_n = tensor_numel(a);
+    int64_t b_n = tensor_numel(b);
+
+    float* a_data = (float*)a->data;
+    float* b_data = (float*)b->data;
+    float* out_data = (float*)out->data;
+
+    /* Handle broadcasting - use minimum size */
+    int64_t compare_n = n;
+    if (a_n < compare_n) compare_n = a_n;
+    if (b_n < compare_n) compare_n = b_n;
+
+    /* Compare elements */
+    for (int64_t i = 0; i < compare_n; i++) {
+        out_data[i] = (a_data[i] == b_data[i]) ? 1.0f : 0.0f;
+    }
+
+    /* Handle broadcast: if one input is smaller, broadcast its value */
+    if (a_n == 1 && b_n == n) {
+        for (int64_t i = compare_n; i < n; i++) {
+            out_data[i] = (a_data[0] == b_data[i]) ? 1.0f : 0.0f;
+        }
+    } else if (a_n == n && b_n == 1) {
+        for (int64_t i = compare_n; i < n; i++) {
+            out_data[i] = (a_data[i] == b_data[0]) ? 1.0f : 0.0f;
+        }
+    } else if (a_n < n && b_n == n) {
+        /* Broadcast a (e.g., [6] to [2, 6]) */
+        for (int64_t i = compare_n; i < n; i++) {
+            out_data[i] = (a_data[i % a_n] == b_data[i]) ? 1.0f : 0.0f;
+        }
+    } else if (a_n == n && b_n < n) {
+        /* Broadcast b (e.g., [6] to [2, 6]) */
+        for (int64_t i = compare_n; i < n; i++) {
+            out_data[i] = (a_data[i] == b_data[i % b_n]) ? 1.0f : 0.0f;
+        }
+    }
+}

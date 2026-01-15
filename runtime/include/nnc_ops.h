@@ -24,6 +24,18 @@ void nnc_sub(Tensor* a, Tensor* b, Tensor* out);
 void nnc_div(Tensor* a, Tensor* b, Tensor* out);
 
 /* ============================================================================
+ * Comparison Operations
+ * ============================================================================ */
+
+/* Equal - element-wise equality comparison
+ * Args:
+ *   a: First input tensor
+ *   b: Second input tensor
+ *   out: Output tensor (1.0f where a == b, 0.0f otherwise)
+ */
+void nnc_equal(Tensor* a, Tensor* b, Tensor* out);
+
+/* ============================================================================
  * Neural Network Operations
  * ============================================================================ */
 

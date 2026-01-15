@@ -28,6 +28,11 @@ class OpType(Enum):
     DIV = "Div"
     POW = "Pow"
 
+    # Comparison ops
+    EQUAL = "Equal"
+    LESS = "Less"
+    GREATER = "Greater"
+
     # Matrix ops
     MATMUL = "MatMul"
     GEMM = "Gemm"
