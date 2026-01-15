@@ -191,8 +191,8 @@ def test_complex_model_compilation():
 
     # Compile
     print("\n1. Compiling model...")
-    compiler = Compiler(target="x86", opt_level=0)
-    compiler.compile(onnx_path, output_dir)
+    compiler = Compiler(target="x86", opt_level=3)
+    compiler.compile(onnx_path, output_dir, max_memory="512B")
     print("   Compilation successful!")
 
     # Check generated files
@@ -278,9 +278,6 @@ def test_complex_model_compilation():
 
 def test_complex_model_execution(tmpdir):
     """Test that the compiled model produces correct results."""
-    # Skip when run through pytest - this test is designed for standalone execution
-    # where the full test suite compiles the model first
-    pytest.skip("Skipping when run through pytest - designed for standalone execution")
 
     print("\n" + "=" * 60)
     print("Testing Model Execution")

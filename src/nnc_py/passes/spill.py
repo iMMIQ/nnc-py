@@ -116,6 +116,24 @@ class SpillAnalysisPass(PassBase):
         max_memory = ctx.metadata["max_memory"]
         plan = get_memory_plan(ctx)
 
+        # CRITICAL CHECK: Verify that max_memory is at least as large as
+        # the largest individual tensor. Each tensor must fit in fast memory
+        # when it is being computed (we don't support tensor chunking yet).
+        largest_tensor = max(
+            (tensor.byte_size() for tensor in ctx.graph.tensors.values()
+             if tensor.name not in ctx.graph.constants),
+            default=0
+        )
+
+        if max_memory < largest_tensor:
+            # Cannot fit even a single tensor in fast memory
+            raise RuntimeError(
+                f"Memory limit ({max_memory} bytes) is too small to fit "
+                f"the largest tensor ({largest_tensor} bytes). "
+                f"Each tensor must fit in fast memory when being computed. "
+                f"Minimum required: {largest_tensor} bytes."
+            )
+
         # Check if overflow occurs
         if plan.total_size <= max_memory:
             # No overflow needed
