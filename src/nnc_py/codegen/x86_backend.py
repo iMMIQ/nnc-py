@@ -7,6 +7,7 @@ import numpy as np
 from nnc_py.codegen.base import BackendBase, CodeGenResult
 from nnc_py.codegen.c_emitter import CEmitter
 from nnc_py.ir.context import CompileContext
+from nnc_py.ir.node import OpType
 from nnc_py.ir.types import DataType
 from nnc_py.utils.name_manager import NameManager
 
@@ -87,7 +88,7 @@ class X86Backend(BackendBase):
         # Generate forward declarations for node functions
         nodes = ctx.graph.topological_sort()
         for node in nodes:
-            if node.op_type.value == "constant":
+            if node.op_type == OpType.CONSTANT:
                 continue
             func_name = ctx.node_symbols.get(node.name, node.name)
             lines.append(f"static void {func_name}_body(void);")
@@ -106,7 +107,7 @@ class X86Backend(BackendBase):
         }
 
         for node in nodes:
-            if node.op_type.value == "constant":
+            if node.op_type == OpType.CONSTANT:
                 continue
 
             func_name = ctx.node_symbols.get(node.name, node.name)
