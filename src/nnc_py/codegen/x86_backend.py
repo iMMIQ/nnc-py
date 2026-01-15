@@ -415,6 +415,35 @@ run: model
         has_spill = spill_plan is not None and spill_plan.has_overflow
         pool_name = "_nnc_fast_pool" if has_spill else "_nnc_memory_pool"
 
+        # Calculate new offsets for ALL tensors in fast pool
+        # Spilled tensors still need fast pool addresses (for computation),
+        # spill/reload just moves data between pools
+        fast_tensor_offsets = {}  # tensor_name -> offset in fast pool
+
+        if has_spill:
+            # Re-calculate offsets for ALL tensors in fast memory
+            current_offset = 0
+            alignment = 16
+
+            # Get original memory plan
+            from nnc_py.passes.memory_plan import get_memory_plan
+            plan = get_memory_plan(ctx)
+
+            # Sort tensors by their original offset (preserve order)
+            sorted_tensors = sorted(
+                plan.tensor_info.items(),
+                key=lambda x: x[1].pool_offset
+            )
+
+            for tensor_name, mem_info in sorted_tensors:
+                # Align offset
+                aligned_offset = ((current_offset + alignment - 1) // alignment) * alignment
+                fast_tensor_offsets[tensor_name] = aligned_offset
+
+                # Move to next position
+                tensor_size = mem_info.size
+                current_offset = aligned_offset + tensor_size
+
         # Define all non-constant tensors
         for tensor_name, tensor in ctx.graph.tensors.items():
             if tensor_name in ctx.graph.constants:
@@ -432,9 +461,14 @@ run: model
                 from nnc_py.passes.memory_plan import get_memory_plan
                 plan = get_memory_plan(ctx)
                 if tensor_name in plan.tensor_info:
-                    mem_info = plan.tensor_info[tensor_name]
-                    # Point into memory pool
-                    data_init = f"{pool_name} + {mem_info.pool_offset}"
+                    # Use recalculated offset if spill is enabled
+                    if has_spill and tensor_name in fast_tensor_offsets:
+                        offset = fast_tensor_offsets[tensor_name]
+                        data_init = f"{pool_name} + {offset}"
+                    else:
+                        # No spill - use original offset
+                        mem_info = plan.tensor_info[tensor_name]
+                        data_init = f"{pool_name} + {mem_info.pool_offset}"
                 else:
                     # Tensor not in memory plan (e.g., constant)
                     data_init = "NULL"

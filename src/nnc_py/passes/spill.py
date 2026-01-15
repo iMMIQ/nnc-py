@@ -278,6 +278,7 @@ class SpillAnalysisPass(PassBase):
         # Select tensors to spill
         spilled: Dict[str, SpillSlot] = {}
         current_memory = total_memory
+        spilled_buffers = set()  # Track which buffers have had tensors spilled
 
         for tensor_name, _ in priorities:
             if current_memory <= max_memory:
@@ -300,8 +301,11 @@ class SpillAnalysisPass(PassBase):
             )
             spilled[tensor_name] = slot
 
-            # Reduce memory usage
-            current_memory -= buffer.size
+            # Reduce memory usage by tensor size, not buffer size
+            # Only count the buffer reduction once per buffer
+            if buffer.id not in spilled_buffers:
+                current_memory -= buffer.size
+                spilled_buffers.add(buffer.id)
 
         return spilled
 
