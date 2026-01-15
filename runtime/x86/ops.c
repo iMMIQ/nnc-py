@@ -26,45 +26,145 @@ static int64_t tensor_numel(Tensor* t) {
 
 void nnc_add(Tensor* a, Tensor* b, Tensor* out) {
     int64_t n = tensor_numel(out);
+    int64_t a_n = tensor_numel(a);
+    int64_t b_n = tensor_numel(b);
     float* a_data = (float*)a->data;
     float* b_data = (float*)b->data;
     float* out_data = (float*)out->data;
 
-    for (int64_t i = 0; i < n; i++) {
+    /* Handle broadcasting - use minimum size to avoid overflow */
+    int64_t copy_n = n;
+    if (a_n < copy_n) copy_n = a_n;
+    if (b_n < copy_n) copy_n = b_n;
+
+    for (int64_t i = 0; i < copy_n; i++) {
         out_data[i] = a_data[i] + b_data[i];
+    }
+
+    /* Handle broadcast: if one input is smaller, broadcast its value */
+    if (a_n == 1 && b_n == n) {
+        for (int64_t i = copy_n; i < n; i++) {
+            out_data[i] = a_data[0] + b_data[i];
+        }
+    } else if (a_n == n && b_n == 1) {
+        for (int64_t i = copy_n; i < n; i++) {
+            out_data[i] = a_data[i] + b_data[0];
+        }
+    } else if (a_n < n && b_n == n) {
+        /* Broadcast a (e.g., [6] to [2, 6]) */
+        for (int64_t i = copy_n; i < n; i++) {
+            out_data[i] = a_data[i % a_n] + b_data[i];
+        }
+    } else if (a_n == n && b_n < n) {
+        /* Broadcast b (e.g., [6] to [2, 6]) */
+        for (int64_t i = copy_n; i < n; i++) {
+            out_data[i] = a_data[i] + b_data[i % b_n];
+        }
     }
 }
 
 void nnc_mul(Tensor* a, Tensor* b, Tensor* out) {
     int64_t n = tensor_numel(out);
+    int64_t a_n = tensor_numel(a);
+    int64_t b_n = tensor_numel(b);
     float* a_data = (float*)a->data;
     float* b_data = (float*)b->data;
     float* out_data = (float*)out->data;
 
-    for (int64_t i = 0; i < n; i++) {
+    /* Handle broadcasting */
+    int64_t copy_n = (a_n < n) ? a_n : n;
+    copy_n = (b_n < copy_n) ? b_n : copy_n;
+
+    for (int64_t i = 0; i < copy_n; i++) {
         out_data[i] = a_data[i] * b_data[i];
+    }
+
+    if (a_n == 1 && b_n == n) {
+        for (int64_t i = copy_n; i < n; i++) {
+            out_data[i] = a_data[0] * b_data[i];
+        }
+    } else if (a_n == n && b_n == 1) {
+        for (int64_t i = copy_n; i < n; i++) {
+            out_data[i] = a_data[i] * b_data[0];
+        }
+    } else if (a_n < n && b_n == n) {
+        for (int64_t i = copy_n; i < n; i++) {
+            out_data[i] = a_data[i % a_n] * b_data[i];
+        }
+    } else if (a_n == n && b_n < n) {
+        for (int64_t i = copy_n; i < n; i++) {
+            out_data[i] = a_data[i] * b_data[i % b_n];
+        }
     }
 }
 
 void nnc_sub(Tensor* a, Tensor* b, Tensor* out) {
     int64_t n = tensor_numel(out);
+    int64_t a_n = tensor_numel(a);
+    int64_t b_n = tensor_numel(b);
     float* a_data = (float*)a->data;
     float* b_data = (float*)b->data;
     float* out_data = (float*)out->data;
 
-    for (int64_t i = 0; i < n; i++) {
+    /* Handle broadcasting */
+    int64_t copy_n = (a_n < n) ? a_n : n;
+    copy_n = (b_n < copy_n) ? b_n : copy_n;
+
+    for (int64_t i = 0; i < copy_n; i++) {
         out_data[i] = a_data[i] - b_data[i];
+    }
+
+    if (a_n == 1 && b_n == n) {
+        for (int64_t i = copy_n; i < n; i++) {
+            out_data[i] = a_data[0] - b_data[i];
+        }
+    } else if (a_n == n && b_n == 1) {
+        for (int64_t i = copy_n; i < n; i++) {
+            out_data[i] = a_data[i] - b_data[0];
+        }
+    } else if (a_n < n && b_n == n) {
+        for (int64_t i = copy_n; i < n; i++) {
+            out_data[i] = a_data[i % a_n] - b_data[i];
+        }
+    } else if (a_n == n && b_n < n) {
+        for (int64_t i = copy_n; i < n; i++) {
+            out_data[i] = a_data[i] - b_data[i % b_n];
+        }
     }
 }
 
 void nnc_div(Tensor* a, Tensor* b, Tensor* out) {
     int64_t n = tensor_numel(out);
+    int64_t a_n = tensor_numel(a);
+    int64_t b_n = tensor_numel(b);
     float* a_data = (float*)a->data;
     float* b_data = (float*)b->data;
     float* out_data = (float*)out->data;
 
-    for (int64_t i = 0; i < n; i++) {
+    /* Handle broadcasting */
+    int64_t copy_n = (a_n < n) ? a_n : n;
+    copy_n = (b_n < copy_n) ? b_n : copy_n;
+
+    for (int64_t i = 0; i < copy_n; i++) {
         out_data[i] = a_data[i] / b_data[i];
+    }
+
+    if (a_n == 1 && b_n == n) {
+        for (int64_t i = copy_n; i < n; i++) {
+            out_data[i] = a_data[0] / b_data[i];
+        }
+    } else if (a_n == n && b_n == 1) {
+        for (int64_t i = copy_n; i < n; i++) {
+            out_data[i] = a_data[i] / b_data[0];
+        }
+    } else if (a_n < n && b_n == n) {
+        for (int64_t i = copy_n; i < n; i++) {
+            out_data[i] = a_data[i % a_n] / b_data[i];
+        }
+    } else if (a_n == n && b_n < n) {
+        for (int64_t i = copy_n; i < n; i++) {
+            out_data[i] = a_data[i] / b_data[i % b_n];
+        }
     }
 }
 

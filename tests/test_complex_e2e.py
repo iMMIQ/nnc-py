@@ -216,6 +216,11 @@ def test_complex_model_compilation():
         "NNC_RUNTIME ?= ../../runtime",
         f"NNC_RUNTIME = {runtime_dir}"
     )
+    # Add address sanitizer to detect memory issues
+    makefile_content = makefile_content.replace(
+        "CFLAGS = -std=c11 -O2",
+        "CFLAGS = -std=c11 -O2 -g -fsanitize=address"
+    )
     makefile.write_text(makefile_content)
 
     result = subprocess.run(
