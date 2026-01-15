@@ -934,3 +934,77 @@ void nnc_clip(Tensor* input, Tensor* output, float min_val, float max_val) {
         out_data[i] = fminf(fmaxf(val, min_val), max_val);
     }
 }
+
+void nnc_tile(Tensor* input, Tensor* output, int64_t* repeats, int ndim) {
+    /* Tile operation - repeats input tensor along each axis
+     * repeats[i] specifies how many times to repeat axis i
+     * If repeats is NULL, treat as all 1s (no repetition)
+     */
+
+    float* in_data = (float*)input->data;
+    float* out_data = (float*)output->data;
+
+    /* If no repeats specified, just copy */
+    if (repeats == NULL) {
+        int64_t n = tensor_numel(output);
+        for (int64_t i = 0; i < n; i++) {
+            out_data[i] = in_data[i];
+        }
+        return;
+    }
+
+    /* Calculate strides for input and output tensors */
+    int64_t in_strides[8];  /* Max 8 dimensions */
+    int64_t out_strides[8];
+
+    /* Compute input strides (row-major) */
+    in_strides[input->ndim - 1] = 1;
+    for (int i = input->ndim - 2; i >= 0; i--) {
+        in_strides[i] = in_strides[i + 1] * input->shape[i + 1];
+    }
+
+    /* Compute output strides (row-major) */
+    out_strides[output->ndim - 1] = 1;
+    for (int i = output->ndim - 2; i >= 0; i--) {
+        out_strides[i] = out_strides[i + 1] * output->shape[i + 1];
+    }
+
+    /* Broadcast repeats to match input rank if needed */
+    int64_t tiled_repeats[8];
+    int repeats_offset = ndim > input->ndim ? ndim - input->ndim : 0;
+
+    for (int i = 0; i < input->ndim; i++) {
+        int repeats_idx = i + repeats_offset;
+        if (repeats_idx < ndim && repeats_idx >= 0) {
+            tiled_repeats[i] = repeats[repeats_idx];
+        } else {
+            tiled_repeats[i] = 1;
+        }
+    }
+
+    /* Copy data with tiling */
+    int64_t out_idx = 0;
+    int64_t total_out = tensor_numel(output);
+
+    /* Iterate through output positions */
+    for (int64_t out_pos = 0; out_pos < total_out; out_pos++) {
+        /* Calculate corresponding input position */
+        int64_t in_pos = 0;
+
+        /* Decompose output position to coordinates */
+        int64_t temp = out_pos;
+        int64_t out_coords[8];
+        for (int i = output->ndim - 1; i >= 0; i--) {
+            out_coords[i] = temp % output->shape[i];
+            temp /= output->shape[i];
+        }
+
+        /* Map output coordinates to input coordinates */
+        for (int i = 0; i < input->ndim; i++) {
+            int64_t coord = out_coords[i] % input->shape[i];
+            in_pos += coord * in_strides[i];
+        }
+
+        out_data[out_pos] = in_data[in_pos];
+    }
+}

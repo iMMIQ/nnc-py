@@ -93,6 +93,15 @@ void nnc_transpose(Tensor* input, Tensor* output, int64_t* perm, int ndim);
 void nnc_squeeze(Tensor* input, Tensor* output, int axis);
 void nnc_unsqueeze(Tensor* input, Tensor* output, int axis);
 
+/* Tile operation - repeats input tensor along each axis
+ * Args:
+ *   input:   Input tensor
+ *   output:  Output tensor
+ *   repeats: Array specifying repeat count for each axis (can be NULL)
+ *   ndim:    Number of dimensions in repeats array
+ */
+void nnc_tile(Tensor* input, Tensor* output, int64_t* repeats, int ndim);
+
 /* ============================================================================
  * Matrix Operations
  * ============================================================================ */

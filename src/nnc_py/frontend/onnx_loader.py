@@ -557,10 +557,64 @@ class ONNXFrontend:
                 name=output_name,
             )
 
+        elif op_type == "Tile":
+            # Tile operation - repeat tensor along axes
+            return self._infer_tile_type(onnx_node, output_name, graph, input_tensor)
+
         # Default: same shape as input (for other ops)
         return TensorType(
             dtype=input_tensor.dtype,
             shape=input_tensor.shape,
+            name=output_name,
+        )
+
+    def _infer_tile_type(self, onnx_node, output_name: str, graph: Graph, input_tensor) -> TensorType | None:
+        """Infer tensor type for Tile operation."""
+        # Tile has 2 inputs: data and repeats
+        if len(onnx_node.input) < 2:
+            return None
+
+        # Get repeats tensor (should be a constant 1D tensor of int64)
+        repeats_name = onnx_node.input[1]
+        if repeats_name not in graph.constants:
+            return None
+
+        repeats = graph.constants[repeats_name]
+        if not isinstance(repeats, list) and not hasattr(repeats, 'tolist'):
+            return None
+
+        # Convert to list if needed
+        if hasattr(repeats, 'tolist'):
+            repeats = repeats.tolist()
+        elif hasattr(repeats, 'flatten'):
+            repeats = repeats.flatten().tolist()
+
+        if not repeats:
+            return None
+
+        # Compute output shape: output[i] = input[i] * repeats[i]
+        input_shape = input_tensor.shape.dims
+        if not input_shape:
+            return None
+
+        # Broadcast repeats to match input rank
+        input_rank = len(input_shape)
+        repeats_rank = len(repeats)
+
+        if repeats_rank < input_rank:
+            # Pad repeats with 1s at the beginning
+            repeats = [1] * (input_rank - repeats_rank) + repeats
+        elif repeats_rank > input_rank:
+            # Invalid: repeats cannot have higher rank than input
+            return None
+
+        output_shape = []
+        for i in range(input_rank):
+            output_shape.append(input_shape[i] * repeats[i])
+
+        return TensorType(
+            dtype=input_tensor.dtype,
+            shape=TensorShape(dims=output_shape, layout=input_tensor.shape.layout),
             name=output_name,
         )
 

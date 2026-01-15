@@ -97,6 +97,8 @@ class CEmitter:
             self._emit_flatten_call(ctx, node)
         elif node.op_type == OpType.SOFTMAX:
             self._emit_softmax_call(ctx, node)
+        elif node.op_type == OpType.TILE:
+            self._emit_tile_call(ctx, node)
         else:
             # Generic handling for other operations
             self._emit_generic_call(ctx, node, op_name)
@@ -284,6 +286,25 @@ class CEmitter:
         axis = node.attrs.get("axis", -1)
 
         self.write_line(f"nnc_softmax(&{input_var}, &{output_var}, {axis});")
+
+    def _emit_tile_call(self, ctx: CompileContext, node: Node):
+        """Emit Tile operation call."""
+        input_var = ctx.tensor_symbols.get(node.inputs[0], node.inputs[0])
+        output_var = ctx.tensor_symbols.get(node.outputs[0], node.outputs[0])
+
+        # Get repeats from second input (should be a constant)
+        repeats_input = node.inputs[1] if len(node.inputs) > 1 else None
+
+        if repeats_input and repeats_input in ctx.graph.constants:
+            repeats_var = ctx.tensor_symbols.get(repeats_input, repeats_input)
+            repeats = ctx.graph.constants[repeats_input]
+            ndim = len(repeats) if hasattr(repeats, '__len__') else 1
+            self.write_line(f"nnc_tile(&{input_var}, &{output_var}, (int64_t*){repeats_var}_data, {ndim});")
+        else:
+            # Unknown repeats - use output tensor rank
+            output_tensor = ctx.graph.get_tensor(node.outputs[0])
+            ndim = output_tensor.shape.rank() if output_tensor.shape else 1
+            self.write_line(f"nnc_tile(&{input_var}, &{output_var}, NULL, {ndim});")
 
     def _emit_generic_call(self, ctx: CompileContext, node: Node, op_name: str):
         """Emit generic operation call."""

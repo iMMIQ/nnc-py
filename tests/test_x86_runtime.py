@@ -159,6 +159,10 @@ clean:
         self.lib.nnc_reducesum.argtypes = [ctypes.POINTER(Tensor), ctypes.POINTER(Tensor), ctypes.c_int, ctypes.c_int]
         self.lib.nnc_reducesum.restype = None
 
+        # nnc_tile(Tensor* input, Tensor* output, int64_t* repeats, int ndim)
+        self.lib.nnc_tile.argtypes = [ctypes.POINTER(Tensor), ctypes.POINTER(Tensor), ctypes.POINTER(ctypes.c_int64), ctypes.c_int]
+        self.lib.nnc_tile.restype = None
+
     def _make_tensor(self, np_array):
         """Create a Tensor from numpy array."""
         # Ensure C-contiguous and correct dtype
@@ -573,6 +577,46 @@ clean:
 
         max_diff = self._compare_results(data_out, expected)
         print(f"  reducesum_no_keepdims max_diff: {max_diff}")
+
+    def test_tile_2d(self):
+        """Test nnc_tile with 2D tensor."""
+        a = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)  # [2, 2]
+        repeats = np.array([2, 3], dtype=np.int64)  # Repeat 2x on axis 0, 3x on axis 1
+        expected = np.tile(a, repeats)  # [4, 6]
+
+        tensor_a, data_a = self._make_tensor(a)
+
+        out = np.zeros_like(expected, dtype=np.float32)
+        tensor_out, data_out = self._make_tensor(out)
+
+        # Keep references to prevent GC
+        self._tensor_refs.append(repeats)
+        repeats_ptr = repeats.ctypes.data_as(ctypes.POINTER(ctypes.c_int64))
+
+        self.lib.nnc_tile(ctypes.byref(tensor_a), ctypes.byref(tensor_out), repeats_ptr, 2)
+
+        max_diff = self._compare_results(data_out, expected)
+        print(f"  tile_2d max_diff: {max_diff}")
+
+    def test_tile_1d(self):
+        """Test nnc_tile with 1D tensor."""
+        a = np.array([1.0, 2.0, 3.0], dtype=np.float32)  # [3]
+        repeats = np.array([4], dtype=np.int64)  # Repeat 4x on axis 0
+        expected = np.tile(a, repeats)  # [12]
+
+        tensor_a, data_a = self._make_tensor(a)
+
+        out = np.zeros_like(expected, dtype=np.float32)
+        tensor_out, data_out = self._make_tensor(out)
+
+        # Keep references to prevent GC
+        self._tensor_refs.append(repeats)
+        repeats_ptr = repeats.ctypes.data_as(ctypes.POINTER(ctypes.c_int64))
+
+        self.lib.nnc_tile(ctypes.byref(tensor_a), ctypes.byref(tensor_out), repeats_ptr, 1)
+
+        max_diff = self._compare_results(data_out, expected)
+        print(f"  tile_1d max_diff: {max_diff}")
 
 
 if __name__ == "__main__":
