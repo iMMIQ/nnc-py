@@ -247,6 +247,14 @@ class ONNXFrontend:
                 name=output_name,
             )
 
+        elif op_type == "Identity":
+            # Identity preserves shape and type
+            return TensorType(
+                dtype=input_tensor.dtype,
+                shape=input_tensor.shape,
+                name=output_name,
+            )
+
         # Default: same shape as input (for other ops)
         return TensorType(
             dtype=input_tensor.dtype,

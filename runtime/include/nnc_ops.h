@@ -134,6 +134,9 @@ void nnc_layernorm(
     int axis, float epsilon
 );
 
+/* Identity operation - copies input to output */
+void nnc_identity(Tensor* input, Tensor* output);
+
 void nnc_clip(Tensor* input, Tensor* output, float min_val, float max_val);
 
 #ifdef __cplusplus

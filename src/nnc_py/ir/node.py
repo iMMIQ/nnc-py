@@ -47,6 +47,7 @@ class OpType(Enum):
     CONCAT = "Concat"
     BATCH_NORM = "BatchNormalization"
     LAYER_NORM = "LayerNormalization"
+    IDENTITY = "Identity"
     CLIP = "Clip"
     CAST = "Cast"
 
