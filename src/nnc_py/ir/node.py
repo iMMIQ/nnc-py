@@ -38,6 +38,7 @@ class OpType(Enum):
     TRANSPOSE = "Transpose"
     SQUEEZE = "Squeeze"
     UNSQUEEZE = "Unsqueeze"
+    SPLIT = "Split"
 
     # Reduction ops
     REDUCE_MEAN = "ReduceMean"

@@ -485,6 +485,54 @@ void nnc_identity(Tensor* input, Tensor* output) {
     }
 }
 
+void nnc_split(Tensor* input, Tensor** outputs, int num_outputs, int axis) {
+    /* Split operation - divide tensor along axis
+     * For simplicity, this implementation assumes equal splits
+     * A full implementation would handle variable split sizes
+     */
+
+    float* in_data = (float*)input->data;
+
+    /* Handle negative axis */
+    if (axis < 0) {
+        axis = input->ndim + axis;
+    }
+
+    /* Calculate dimensions before and after split axis */
+    int64_t outer_size = 1;
+    for (int i = 0; i < axis; i++) {
+        outer_size *= input->shape[i];
+    }
+
+    int64_t split_dim = input->shape[axis];
+    int64_t split_size = split_dim / num_outputs;
+
+    int64_t inner_size = 1;
+    for (int i = axis + 1; i < input->ndim; i++) {
+        inner_size *= input->shape[i];
+    }
+
+    /* Copy data to each output */
+    for (int out_idx = 0; out_idx < num_outputs; out_idx++) {
+        Tensor* out = outputs[out_idx];
+        float* out_data = (float*)out->data;
+
+        int64_t out_offset = 0;
+        for (int outer = 0; outer < outer_size; outer++) {
+            /* Calculate source offset for this output */
+            int64_t base_src = outer * split_dim * inner_size + out_idx * split_size * inner_size;
+
+            /* Copy this slice */
+            int64_t copy_size = split_size * inner_size;
+            int64_t dest_offset = outer * split_size * inner_size;
+
+            for (int64_t i = 0; i < copy_size; i++) {
+                out_data[dest_offset + i] = in_data[base_src + i];
+            }
+        }
+    }
+}
+
 void nnc_clip(Tensor* input, Tensor* output, float min_val, float max_val) {
     int64_t n = tensor_numel(output);
     float* in_data = (float*)input->data;

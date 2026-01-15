@@ -167,6 +167,10 @@ class ONNXFrontend:
                 attrs["epsilon"] = float(attr.f)
             elif attr.name == "stash_type":
                 attrs["stash_type"] = int(attr.i)
+            elif attr.name == "split":
+                attrs["split"] = [int(d) for d in attr.ints]
+            elif attr.name == "num_outputs":
+                attrs["num_outputs"] = int(attr.i)
 
         return attrs
 
@@ -296,6 +300,50 @@ class ONNXFrontend:
             return TensorType(
                 dtype=input_tensor.dtype,
                 shape=input_tensor.shape,
+                name=output_name,
+            )
+
+        elif op_type == "Split":
+            # Split divides tensor along axis into multiple outputs
+            # Need to find which output index this is and compute split size
+            axis = self._get_attr(onnx_node, "axis", 0)
+            split_attr = self._get_attr(onnx_node, "split", None)
+
+            # Handle negative axis
+            if axis < 0:
+                axis = len(input_tensor.shape.dims) + axis
+
+            # Find the output index
+            output_idx = -1
+            for i, out_name in enumerate(onnx_node.output):
+                if out_name == output_name:
+                    output_idx = i
+                    break
+
+            if output_idx < 0:
+                return None
+
+            # Determine split sizes
+            if split_attr:
+                # Explicit split sizes provided
+                split_sizes = split_attr
+            else:
+                # Equal split
+                num_outputs = len(onnx_node.output)
+                split_dim_size = input_tensor.shape.dims[axis]
+                split_size = split_dim_size // num_outputs
+                split_sizes = [split_size] * num_outputs
+
+            # Compute output shape
+            out_shape = list(input_tensor.shape.dims)
+            if output_idx < len(split_sizes):
+                out_shape[axis] = split_sizes[output_idx]
+            else:
+                out_shape[axis] = out_shape[axis] // len(onnx_node.output)
+
+            return TensorType(
+                dtype=input_tensor.dtype,
+                shape=TensorShape(dims=out_shape, layout=input_tensor.shape.layout),
                 name=output_name,
             )
 

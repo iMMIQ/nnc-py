@@ -137,6 +137,15 @@ void nnc_layernorm(
 /* Identity operation - copies input to output */
 void nnc_identity(Tensor* input, Tensor* output);
 
+/* Split operation - divides tensor along axis into multiple outputs
+ * Args:
+ *   input:      Input tensor to split
+ *   outputs:    Array of output tensors
+ *   num_outputs: Number of output tensors
+ *   axis:       Axis along which to split
+ */
+void nnc_split(Tensor* input, Tensor** outputs, int num_outputs, int axis);
+
 void nnc_clip(Tensor* input, Tensor* output, float min_val, float max_val);
 
 #ifdef __cplusplus
