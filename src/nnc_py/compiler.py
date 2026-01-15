@@ -1,5 +1,6 @@
 """Main compiler class."""
 
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -10,6 +11,54 @@ from nnc_py.codegen.x86_backend import X86Backend
 from nnc_py.frontend.onnx_loader import ONNXFrontend
 from nnc_py.ir.context import CompileContext
 from nnc_py.passes.base import PassManager
+
+
+def parse_memory_size(size_str: str) -> int:
+    """Parse a memory size string to bytes.
+
+    Args:
+        size_str: Size string like "256K", "1M", "16MB", "512"
+
+    Returns:
+        Size in bytes.
+
+    Examples:
+        >>> parse_memory_size("256K")
+        262144
+        >>> parse_memory_size("1M")
+        1048576
+        >>> parse_memory_size("16MB")
+        16777216
+    """
+    if size_str is None:
+        return None
+
+    size_str = size_str.strip().upper()
+
+    # Match pattern: number followed by optional unit
+    match = re.match(r'^(\d+(?:\.\d+)?)\s*([KMGT]?B?)?$', size_str)
+    if not match:
+        raise ValueError(f"Invalid memory size format: {size_str}")
+
+    value = float(match.group(1))
+    unit = match.group(2) or ""
+
+    # Convert to bytes
+    multipliers = {
+        "": 1,
+        "B": 1,
+        "KB": 1024,
+        "K": 1024,
+        "MB": 1024 * 1024,
+        "M": 1024 * 1024,
+        "GB": 1024 * 1024 * 1024,
+        "G": 1024 * 1024 * 1024,
+        "TB": 1024 * 1024 * 1024 * 1024,
+        "T": 1024 * 1024 * 1024 * 1024,
+    }
+
+    multiplier = multipliers.get(unit, 1)
+    return int(value * multiplier)
 
 
 class Compiler:
@@ -40,6 +89,7 @@ class Compiler:
         onnx_path: str,
         output_dir: str,
         entry_point: str = "main",
+        max_memory: str = None,
     ) -> None:
         """Compile an ONNX model to C code.
 
@@ -47,7 +97,16 @@ class Compiler:
             onnx_path: Path to the ONNX model file.
             output_dir: Directory to write generated code.
             entry_point: Name for the entry point function.
+            max_memory: Maximum fast memory size (e.g., "256K", "1M", "16MB").
         """
+        # Parse max_memory if provided
+        max_memory_bytes = None
+        if max_memory is not None:
+            max_memory_bytes = parse_memory_size(max_memory)
+            self.console.print(
+                f"  Max memory: {max_memory} ({max_memory_bytes:,} bytes)"
+            )
+
         # Stage 1: Frontend parsing
         with self.console.status("[bold green]Loading ONNX model..."):
             graph = self.frontend.load(onnx_path)
@@ -63,6 +122,9 @@ class Compiler:
 
         # Stage 2: Create compilation context
         ctx = CompileContext(graph, self.target, self.opt_level)
+        # Store max_memory in context for memory planning pass
+        if max_memory_bytes is not None:
+            ctx.metadata["max_memory"] = max_memory_bytes
 
         # Stage 3: Run optimization passes
         if self.opt_level > 0 and self.pass_manager.passes:

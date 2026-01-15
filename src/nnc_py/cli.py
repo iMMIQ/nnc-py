@@ -48,15 +48,25 @@ def main():
     help="Entry point function name",
 )
 @click.option("-v", "--verbose", is_flag=True, help="Verbose output")
-def compile(onnx_model, output, target, opt_level, entry_name, verbose):
+@click.option(
+    "--max-memory",
+    type=str,
+    default=None,
+    help="Maximum fast memory size (e.g., 256K, 1M, 16MB). "
+         "If model requires more, tensors will be spilled to slow memory.",
+)
+def compile(onnx_model, output, target, opt_level, entry_name, verbose, max_memory):
     """Compile an ONNX model to C code.
 
     Example:
         nnc compile model.onnx -o ./build -t x86 -O1
+        nnc compile model.onnx -o ./build -O2 --max-memory 256K
     """
     console.print(f"[bold blue]Compiling[/bold blue]: {onnx_model}")
     console.print(f"[bold blue]Target[/bold blue]: {target}")
     console.print(f"[bold blue]Optimization[/bold blue]: O{opt_level}")
+    if max_memory:
+        console.print(f"[bold blue]Max Memory[/bold blue]: {max_memory}")
     console.print()
 
     try:
@@ -65,6 +75,7 @@ def compile(onnx_model, output, target, opt_level, entry_name, verbose):
             onnx_path=onnx_model,
             output_dir=output,
             entry_point=entry_name,
+            max_memory=max_memory,
         )
 
     except Exception as e:

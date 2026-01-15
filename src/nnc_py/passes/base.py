@@ -77,6 +77,7 @@ class PassManager:
         from nnc_py.passes.constant_folding import ConstantFoldingPass
         from nnc_py.passes.liveness import LivenessAnalysisPass
         from nnc_py.passes.memory_plan import MemoryPlanningPass
+        from nnc_py.passes.spill import SpillAnalysisPass
 
         passes = []
 
@@ -92,6 +93,7 @@ class PassManager:
         if opt_level >= 2:
             passes.append(LivenessAnalysisPass())
             passes.append(MemoryPlanningPass())
+            passes.append(SpillAnalysisPass())  # Handles overflow if max_memory set
 
         # O3: Advanced optimizations
         if opt_level >= 3:
