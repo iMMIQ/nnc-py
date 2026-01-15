@@ -241,13 +241,10 @@ class CEmitter:
             shape_input = node.inputs[1] if len(node.inputs) > 1 else None
             if shape_input and shape_input in ctx.graph.constants:
                 shape_var = ctx.tensor_symbols.get(shape_input, shape_input)
-                # Remove _shape suffix if already present (constant names get tensor_ prefix)
-                shape_array_name = f"{shape_var}_shape"
-                # Check if the constant already has _shape in its sanitized name
-                if shape_var.endswith("_shape"):
-                    shape_array_name = f"{shape_var}_data"
+                # For INT64/INT32 constants (used as shapes), use _data array
+                # The constant's data array holds the actual shape values
                 ndim = len(ctx.graph.constants[shape_input])
-                self.write_line(f"nnc_reshape(&{input_var}, &{output_var}, (int64_t*){shape_array_name}, {ndim});")
+                self.write_line(f"nnc_reshape(&{input_var}, &{output_var}, (int64_t*){shape_var}_data, {ndim});")
             else:
                 # Unknown shape - use output tensor shape
                 output_tensor = ctx.graph.get_tensor(node.outputs[0])
