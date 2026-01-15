@@ -119,6 +119,21 @@ void nnc_batchnorm(
     Tensor* input, Tensor* scale, Tensor* bias, Tensor* mean, Tensor* var,
     Tensor* output, float epsilon, int momentum
 );
+
+/* Layer Normalization
+ * Args:
+ *   input:   Input tensor
+ *   scale:   Scale (gamma) tensor - can be NULL
+ *   bias:    Bias (beta) tensor - can be NULL
+ *   output:  Output tensor
+ *   axis:    Normalization axis (-1 for last dimension)
+ *   epsilon: Small constant for numerical stability
+ */
+void nnc_layernorm(
+    Tensor* input, Tensor* scale, Tensor* bias, Tensor* output,
+    int axis, float epsilon
+);
+
 void nnc_clip(Tensor* input, Tensor* output, float min_val, float max_val);
 
 #ifdef __cplusplus

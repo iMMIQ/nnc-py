@@ -103,6 +103,37 @@ class CEmitter:
             if len(node.outputs) >= 1:
                 var_name = ctx.tensor_symbols.get(node.outputs[0], node.outputs[0])
                 args.append(f"&{var_name}")  # output
+        elif node.op_type == OpType.LAYER_NORM:
+            # LayerNormalization: input, scale, bias, output
+            # scale and bias might be missing (use NULL)
+            if len(node.inputs) >= 1:
+                var_name = ctx.tensor_symbols.get(node.inputs[0], node.inputs[0])
+                args.append(f"&{var_name}")  # input
+
+            # scale (gamma) parameter
+            if len(node.inputs) >= 2:
+                var_name = ctx.tensor_symbols.get(node.inputs[1], node.inputs[1])
+                args.append(f"&{var_name}")  # scale
+            else:
+                args.append("NULL")
+
+            # bias (beta) parameter
+            if len(node.inputs) >= 3:
+                var_name = ctx.tensor_symbols.get(node.inputs[2], node.inputs[2])
+                args.append(f"&{var_name}")  # bias
+            else:
+                args.append("NULL")
+
+            # Output tensor
+            if len(node.outputs) >= 1:
+                var_name = ctx.tensor_symbols.get(node.outputs[0], node.outputs[0])
+                args.append(f"&{var_name}")  # output
+
+            # axis and epsilon parameters
+            axis = node.attrs.get("axis", -1)
+            epsilon = node.attrs.get("epsilon", 1e-5)
+            args.append(f"{axis}")
+            args.append(f"{epsilon}f")
         else:
             # Generic handling for other operations
             # Input tensors

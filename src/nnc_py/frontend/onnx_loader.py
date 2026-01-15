@@ -158,6 +158,10 @@ class ONNXFrontend:
             elif attr.name == "activation":
                 # Gemm activation (none, relu, etc.)
                 attrs["activation"] = attr.s.decode() if attr.s else None
+            elif attr.name == "epsilon":
+                attrs["epsilon"] = float(attr.f)
+            elif attr.name == "stash_type":
+                attrs["stash_type"] = int(attr.i)
 
         return attrs
 
@@ -229,6 +233,14 @@ class ONNXFrontend:
 
         elif op_type == "Relu":
             # Relu preserves shape
+            return TensorType(
+                dtype=input_tensor.dtype,
+                shape=input_tensor.shape,
+                name=output_name,
+            )
+
+        elif op_type == "LayerNormalization":
+            # LayerNormalization preserves shape
             return TensorType(
                 dtype=input_tensor.dtype,
                 shape=input_tensor.shape,

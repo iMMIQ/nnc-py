@@ -46,6 +46,7 @@ class OpType(Enum):
     # Other ops
     CONCAT = "Concat"
     BATCH_NORM = "BatchNormalization"
+    LAYER_NORM = "LayerNormalization"
     CLIP = "Clip"
     CAST = "Cast"
 

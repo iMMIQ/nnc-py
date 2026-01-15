@@ -394,6 +394,84 @@ void nnc_batchnorm(
     /* TODO: Implement actual batch normalization */
 }
 
+void nnc_layernorm(
+    Tensor* input, Tensor* scale, Tensor* bias, Tensor* output,
+    int axis, float epsilon
+) {
+    /* Layer Normalization implementation
+     * Normalizes over the specified axis (typically the last dimension)
+     * output = scale * (input - mean) / sqrt(var + epsilon) + bias
+     */
+
+    float* in_data = (float*)input->data;
+    float* scale_data = scale ? (float*)scale->data : NULL;
+    float* bias_data = bias ? (float*)bias->data : NULL;
+    float* out_data = (float*)output->data;
+
+    int ndim = input->ndim;
+
+    /* Handle negative axis */
+    if (axis < 0) {
+        axis = ndim + axis;
+    }
+
+    /* Calculate the size of the normalized dimension (feature size) */
+    int64_t norm_size = input->shape[axis];
+
+    /* Calculate outer dimensions (number of vectors to normalize) */
+    int64_t outer_size = 1;
+    for (int i = 0; i < axis; i++) {
+        outer_size *= input->shape[i];
+    }
+
+    /* Calculate stride between elements in the normalized dimension */
+    int64_t inner_size = 1;
+    for (int i = axis + 1; i < ndim; i++) {
+        inner_size *= input->shape[i];
+    }
+
+    /* Process each vector to normalize */
+    for (int64_t outer = 0; outer < outer_size; outer++) {
+        int64_t base_idx = outer * norm_size * inner_size;
+
+        /* Calculate mean */
+        float mean = 0.0f;
+        for (int64_t i = 0; i < norm_size; i++) {
+            int64_t idx = base_idx + i * inner_size;
+            for (int64_t j = 0; j < inner_size; j++) {
+                mean += in_data[idx + j];
+            }
+        }
+        mean /= (float)(norm_size * inner_size);
+
+        /* Calculate variance */
+        float var = 0.0f;
+        for (int64_t i = 0; i < norm_size; i++) {
+            int64_t idx = base_idx + i * inner_size;
+            for (int64_t j = 0; j < inner_size; j++) {
+                float diff = in_data[idx + j] - mean;
+                var += diff * diff;
+            }
+        }
+        var /= (float)(norm_size * inner_size);
+
+        /* Calculate standard deviation */
+        float std = sqrtf(var + epsilon);
+
+        /* Apply normalization: y = scale * (x - mean) / std + bias */
+        for (int64_t i = 0; i < norm_size; i++) {
+            int64_t idx = base_idx + i * inner_size;
+            float scale_val = scale_data ? scale_data[i] : 1.0f;
+            float bias_val = bias_data ? bias_data[i] : 0.0f;
+
+            for (int64_t j = 0; j < inner_size; j++) {
+                float normalized = (in_data[idx + j] - mean) / std;
+                out_data[idx + j] = scale_val * normalized + bias_val;
+            }
+        }
+    }
+}
+
 void nnc_clip(Tensor* input, Tensor* output, float min_val, float max_val) {
     int64_t n = tensor_numel(output);
     float* in_data = (float*)input->data;
