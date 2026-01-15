@@ -64,15 +64,23 @@ def parse_memory_size(size_str: str) -> int:
 class Compiler:
     """ONNX to C compiler main class."""
 
-    def __init__(self, target: str = "x86", opt_level: int = 0):
+    def __init__(
+        self,
+        target: str = "x86",
+        opt_level: int = 0,
+        memory_strategy: str = None,
+    ):
         """Initialize the compiler.
 
         Args:
             target: Target architecture ("x86" or "npu").
             opt_level: Optimization level (0-3).
+            memory_strategy: Memory allocation strategy (e.g., "liveness",
+                "unified", "graph_coloring", "graph_coloring:dsatur").
         """
         self.target = target
         self.opt_level = opt_level
+        self.memory_strategy = memory_strategy
         self.console = Console()
 
         # Initialize compiler stages
@@ -90,6 +98,7 @@ class Compiler:
         output_dir: str,
         entry_point: str = "main",
         max_memory: str = None,
+        memory_strategy: str = None,
     ) -> None:
         """Compile an ONNX model to C code.
 
@@ -98,6 +107,7 @@ class Compiler:
             output_dir: Directory to write generated code.
             entry_point: Name for the entry point function.
             max_memory: Maximum fast memory size (e.g., "256K", "1M", "16MB").
+            memory_strategy: Memory allocation strategy (overrides constructor).
         """
         # Parse max_memory if provided
         max_memory_bytes = None
@@ -120,11 +130,20 @@ class Compiler:
                 f"  Constants: {len(graph.constants)}"
             )
 
+        # Use method parameter if provided, otherwise use constructor value
+        strategy = memory_strategy or self.memory_strategy
+
         # Stage 2: Create compilation context
         ctx = CompileContext(graph, self.target, self.opt_level)
+
         # Store max_memory in context for memory planning pass
         if max_memory_bytes is not None:
             ctx.metadata["max_memory"] = max_memory_bytes
+
+        # Store memory strategy in context
+        if strategy is not None:
+            ctx.metadata["memory_strategy"] = strategy
+            self.console.print(f"  Memory strategy: {strategy}")
 
         # Stage 3: Run optimization passes
         if self.opt_level > 0 and self.pass_manager.passes:

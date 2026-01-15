@@ -4,11 +4,45 @@ from nnc_py.passes.base import PassBase, PassManager
 from nnc_py.passes.constant_folding import ConstantFoldingPass
 from nnc_py.passes.unified_memory import UnifiedMemoryPass, get_unified_memory_plan, UnifiedMemoryPlan
 
+# New memory strategy interface
+from nnc_py.passes.memory_strategy import (
+    AllocationStrategy,
+    MemoryAllocationPlan,
+    MemoryAllocationStrategy,
+    StrategyRegistry,
+    SpillPoint,
+    ReloadPoint,
+    TensorAllocation,
+    get_allocation_plan,
+    get_memory_strategy,
+)
+
+# New unified memory planning pass
+from nnc_py.passes.memory_planning import MemoryPlanningPassV2, get_memory_allocation_plan
+
 __all__ = [
+    # Core pass infrastructure
     "PassBase",
     "PassManager",
     "ConstantFoldingPass",
+
+    # Legacy unified memory pass (kept for compatibility)
     "UnifiedMemoryPass",
     "get_unified_memory_plan",
     "UnifiedMemoryPlan",
+
+    # New memory strategy interface
+    "AllocationStrategy",
+    "MemoryAllocationPlan",
+    "MemoryAllocationStrategy",
+    "StrategyRegistry",
+    "SpillPoint",
+    "ReloadPoint",
+    "TensorAllocation",
+    "get_allocation_plan",
+    "get_memory_strategy",
+
+    # New unified pass
+    "MemoryPlanningPassV2",
+    "get_memory_allocation_plan",
 ]
