@@ -20,6 +20,7 @@ typedef enum {
     NNC_DTYPE_INT8 = 3,
     NNC_DTYPE_UINT8 = 4,
     NNC_DTYPE_BOOL = 5,
+    NNC_DTYPE_INT64 = 6,
 } nnc_dtype_t;
 
 /* Tensor structure */

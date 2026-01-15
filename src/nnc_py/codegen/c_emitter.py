@@ -3,7 +3,7 @@
 from io import StringIO
 
 from nnc_py.ir.context import CompileContext
-from nnc_py.ir.node import Node
+from nnc_py.ir.node import Node, OpType
 from nnc_py.ir.types import DataType
 
 
@@ -28,7 +28,7 @@ class CEmitter:
         self.write_line()
         self.write_line("#include <stdio.h>")
         self.write_line("#include <stdlib.h>")
-        self.write_line('#include "nnc_runtime.h"')
+        self.write_line('#include "model.h"')
         self.write_line('#include "nnc_ops.h"')
         self.write_line()
 
@@ -61,6 +61,10 @@ class CEmitter:
         """Emit function for a single node."""
         func_name = ctx.node_symbols.get(node.name, node.name)
 
+        # Skip Constant nodes - they're already defined in constants.c
+        if node.op_type == OpType.CONSTANT:
+            return
+
         self.write_line(f"/* {node.op_type.value}: {node.name} */")
         self.write_line(f"void {func_name}(void) {{")
         self.indent += 1
@@ -74,140 +78,239 @@ class CEmitter:
 
     def _emit_operator_call(self, ctx: CompileContext, node: Node):
         """Emit operator function call."""
-        from nnc_py.ir.node import OpType
-
         op_name = f"nnc_{node.op_type.value.lower()}"
 
-        # Prepare arguments
-        args = []
-
-        # Special handling for Conv operation
+        # Special handling for different operations
         if node.op_type == OpType.CONV2D:
-            # Conv requires: input, weight, bias, output
-            # bias might be missing (use NULL)
-            if len(node.inputs) >= 1:
-                var_name = ctx.tensor_symbols.get(node.inputs[0], node.inputs[0])
-                args.append(f"&{var_name}")  # input
-            if len(node.inputs) >= 2:
-                var_name = ctx.tensor_symbols.get(node.inputs[1], node.inputs[1])
-                args.append(f"&{var_name}")  # weight
-
-            # bias parameter
-            if len(node.inputs) >= 3:
-                var_name = ctx.tensor_symbols.get(node.inputs[2], node.inputs[2])
-                args.append(f"&{var_name}")  # bias
-            else:
-                args.append("NULL")  # No bias
-
-            # Output tensor
-            if len(node.outputs) >= 1:
-                var_name = ctx.tensor_symbols.get(node.outputs[0], node.outputs[0])
-                args.append(f"&{var_name}")  # output
+            self._emit_conv_call(ctx, node)
         elif node.op_type == OpType.LAYER_NORM:
-            # LayerNormalization: input, scale, bias, output
-            # scale and bias might be missing (use NULL)
-            if len(node.inputs) >= 1:
-                var_name = ctx.tensor_symbols.get(node.inputs[0], node.inputs[0])
-                args.append(f"&{var_name}")  # input
-
-            # scale (gamma) parameter
-            if len(node.inputs) >= 2:
-                var_name = ctx.tensor_symbols.get(node.inputs[1], node.inputs[1])
-                args.append(f"&{var_name}")  # scale
-            else:
-                args.append("NULL")
-
-            # bias (beta) parameter
-            if len(node.inputs) >= 3:
-                var_name = ctx.tensor_symbols.get(node.inputs[2], node.inputs[2])
-                args.append(f"&{var_name}")  # bias
-            else:
-                args.append("NULL")
-
-            # Output tensor
-            if len(node.outputs) >= 1:
-                var_name = ctx.tensor_symbols.get(node.outputs[0], node.outputs[0])
-                args.append(f"&{var_name}")  # output
-
-            # axis and epsilon parameters
-            axis = node.attrs.get("axis", -1)
-            epsilon = node.attrs.get("epsilon", 1e-5)
-            args.append(f"{axis}")
-            args.append(f"{epsilon}f")
+            self._emit_layernorm_call(ctx, node)
         elif node.op_type == OpType.SPLIT:
-            # Split: input, outputs..., axis, (split_sizes)
-            if len(node.inputs) >= 1:
-                var_name = ctx.tensor_symbols.get(node.inputs[0], node.inputs[0])
-                args.append(f"&{var_name}")  # input
-
-            # Number of outputs
-            num_outputs = len(node.outputs)
-            args.append(f"{num_outputs}")
-
-            # Output tensors - pass as array or individual parameters
-            for output_name in node.outputs:
-                var_name = ctx.tensor_symbols.get(output_name, output_name)
-                args.append(f"&{var_name}")
-
-            # Axis parameter
-            axis = node.attrs.get("axis", 0)
-            args.append(f"{axis}")
-
-            # Optional split sizes
-            if "split" in node.attrs:
-                split_sizes = node.attrs["split"]
-                # For simplicity, we'll create a static array in code
-                # This would need enhancement for full implementation
-                args.append(f"/* split_sizes: {split_sizes} */")
+            self._emit_split_call(ctx, node)
+        elif node.op_type == OpType.CONCAT:
+            self._emit_concat_call(ctx, node)
+        elif node.op_type == OpType.RESHAPE:
+            self._emit_reshape_call(ctx, node)
+        elif node.op_type == OpType.TRANSPOSE:
+            self._emit_transpose_call(ctx, node)
+        elif node.op_type == OpType.FLATTEN:
+            self._emit_flatten_call(ctx, node)
+        elif node.op_type == OpType.SOFTMAX:
+            self._emit_softmax_call(ctx, node)
         else:
             # Generic handling for other operations
-            # Input tensors
-            for input_name in node.inputs:
-                var_name = ctx.tensor_symbols.get(input_name, input_name)
-                args.append(f"&{var_name}")
+            self._emit_generic_call(ctx, node, op_name)
 
-            # Output tensors
-            for output_name in node.outputs:
-                var_name = ctx.tensor_symbols.get(output_name, output_name)
-                args.append(f"&{var_name}")
-
-        # Add attribute parameters
-        attr_args = self._format_attributes(node)
-        args.extend(attr_args)
-
-        # Emit function call
-        self.write_line(f"{op_name}({', '.join(args)});")
-
-    def _format_attributes(self, node: Node) -> list[str]:
-        """Format node attributes as C arguments."""
+    def _emit_conv_call(self, ctx: CompileContext, node: Node):
+        """Emit Conv operation call."""
         args = []
 
-        # Handle common attributes
-        if "kernel_shape" in node.attrs:
-            kh, kw = node.attrs["kernel_shape"]
-            args.append(f"{kh}, {kw}")
+        if len(node.inputs) >= 1:
+            var_name = ctx.tensor_symbols.get(node.inputs[0], node.inputs[0])
+            args.append(f"&{var_name}")  # input
+        if len(node.inputs) >= 2:
+            var_name = ctx.tensor_symbols.get(node.inputs[1], node.inputs[1])
+            args.append(f"&{var_name}")  # weight
 
-        if "strides" in node.attrs:
-            sh, sw = node.attrs["strides"]
-            args.append(f"{sh}, {sw}")
+        # bias parameter
+        if len(node.inputs) >= 3:
+            var_name = ctx.tensor_symbols.get(node.inputs[2], node.inputs[2])
+            args.append(f"&{var_name}")  # bias
+        else:
+            args.append("NULL")  # No bias
 
-        if "pads" in node.attrs:
-            # ONNX pads: [pad_top, pad_left, pad_bottom, pad_right]
-            # Runtime expects: pad_h, pad_w (assuming symmetric padding)
-            pads = node.attrs["pads"]
-            if len(pads) == 4:
-                # Use top and left padding values
-                args.append(f"{pads[0]}, {pads[1]}")
-            elif len(pads) == 2:
-                args.append(f"{pads[0]}, {pads[1]}")
+        # Output tensor
+        if len(node.outputs) >= 1:
+            var_name = ctx.tensor_symbols.get(node.outputs[0], node.outputs[0])
+            args.append(f"&{var_name}")  # output
 
-        if "axis" in node.attrs:
-            args.append(str(node.attrs["axis"]))
+        # Conv attributes: kernel_h, kernel_w, stride_h, stride_w, pad_h, pad_w
+        kernel_shape = node.attrs.get("kernel_shape", [1, 1])
+        strides = node.attrs.get("strides", [1, 1])
+        pads = node.attrs.get("pads", [0, 0])
 
-        if "keepdims" in node.attrs:
-            args.append(str(node.attrs["keepdims"]))
+        args.extend([str(kernel_shape[0]), str(kernel_shape[1])])
+        args.extend([str(strides[0]), str(strides[1])])
 
-        return args
+        if len(pads) == 4:
+            args.append(str(pads[0]))  # pad_h (top)
+            args.append(str(pads[1]))  # pad_w (left)
+        elif len(pads) == 2:
+            args.extend([str(pads[0]), str(pads[1])])
+        else:
+            args.extend(["0", "0"])
+
+        self.write_line(f"nnc_conv({', '.join(args)});")
+
+    def _emit_layernorm_call(self, ctx: CompileContext, node: Node):
+        """Emit LayerNormalization operation call."""
+        args = []
+
+        if len(node.inputs) >= 1:
+            var_name = ctx.tensor_symbols.get(node.inputs[0], node.inputs[0])
+            args.append(f"&{var_name}")  # input
+
+        # scale (gamma) parameter
+        if len(node.inputs) >= 2:
+            var_name = ctx.tensor_symbols.get(node.inputs[1], node.inputs[1])
+            args.append(f"&{var_name}")  # scale
+        else:
+            args.append("NULL")
+
+        # bias (beta) parameter
+        if len(node.inputs) >= 3:
+            var_name = ctx.tensor_symbols.get(node.inputs[2], node.inputs[2])
+            args.append(f"&{var_name}")  # bias
+        else:
+            args.append("NULL")
+
+        # Output tensor
+        if len(node.outputs) >= 1:
+            var_name = ctx.tensor_symbols.get(node.outputs[0], node.outputs[0])
+            args.append(f"&{var_name}")  # output
+
+        # axis and epsilon parameters
+        axis = node.attrs.get("axis", -1)
+        epsilon = node.attrs.get("epsilon", 1e-5)
+        args.append(f"{axis}")
+        args.append(f"{epsilon}f")
+
+        self.write_line(f"nnc_layernorm({', '.join(args)});")
+
+    def _emit_split_call(self, ctx: CompileContext, node: Node):
+        """Emit Split operation call."""
+        # Split needs: input, &outputs_array, num_outputs, axis
+        # We need to create a static array of output pointers
+
+        input_var = ctx.tensor_symbols.get(node.inputs[0], node.inputs[0])
+        num_outputs = len(node.outputs)
+        axis = node.attrs.get("axis", 0)
+
+        # Create static array of output pointers
+        output_vars = [ctx.tensor_symbols.get(o, o) for o in node.outputs]
+        array_name = f"{ctx.node_symbols.get(node.name, node.name)}_outputs"
+
+        self.write_line(f"static Tensor* {array_name}[{num_outputs}] = {{")
+        self.indent += 1
+        for var in output_vars:
+            self.write_line(f"&{var},")
+        self.indent -= 1
+        self.write_line("};")
+
+        self.write_line(f"nnc_split(&{input_var}, {array_name}, {num_outputs}, {axis});")
+
+    def _emit_concat_call(self, ctx: CompileContext, node: Node):
+        """Emit Concat operation call."""
+        # Concat needs: &inputs_array, output, num_inputs, axis
+
+        num_inputs = len(node.inputs)
+        axis = node.attrs.get("axis", 0)
+        output_var = ctx.tensor_symbols.get(node.outputs[0], node.outputs[0])
+
+        # Create static array of input pointers
+        input_vars = [ctx.tensor_symbols.get(i, i) for i in node.inputs]
+        array_name = f"{ctx.node_symbols.get(node.name, node.name)}_inputs"
+
+        self.write_line(f"static Tensor* {array_name}[{num_inputs}] = {{")
+        self.indent += 1
+        for var in input_vars:
+            self.write_line(f"&{var},")
+        self.indent -= 1
+        self.write_line("};")
+
+        self.write_line(f"nnc_concat({array_name}, &{output_var}, {num_inputs}, {axis});")
+
+    def _emit_reshape_call(self, ctx: CompileContext, node: Node):
+        """Emit Reshape operation call."""
+        # Reshape: input, output, shape_array, ndim
+        input_var = ctx.tensor_symbols.get(node.inputs[0], node.inputs[0])
+        output_var = ctx.tensor_symbols.get(node.outputs[0], node.outputs[0])
+
+        # Get shape from second input (should be a constant)
+        shape = node.attrs.get("shape", None)
+
+        if shape:
+            # Shape is in attributes - create static array
+            shape_name = f"{ctx.node_symbols.get(node.name, node.name)}_shape"
+            ndim = len(shape)
+
+            self.write_line(f"static const int64_t {shape_name}[] = {{{', '.join(map(str, shape))}}};")
+            self.write_line(f"nnc_reshape(&{input_var}, &{output_var}, (int64_t*){shape_name}, {ndim});")
+        else:
+            # Shape is from input tensor (constant)
+            shape_input = node.inputs[1] if len(node.inputs) > 1 else None
+            if shape_input and shape_input in ctx.graph.constants:
+                shape_var = ctx.tensor_symbols.get(shape_input, shape_input)
+                # Remove _shape suffix if already present (constant names get tensor_ prefix)
+                shape_array_name = f"{shape_var}_shape"
+                # Check if the constant already has _shape in its sanitized name
+                if shape_var.endswith("_shape"):
+                    shape_array_name = f"{shape_var}_data"
+                ndim = len(ctx.graph.constants[shape_input])
+                self.write_line(f"nnc_reshape(&{input_var}, &{output_var}, (int64_t*){shape_array_name}, {ndim});")
+            else:
+                # Unknown shape - use output tensor shape
+                output_tensor = ctx.graph.get_tensor(node.outputs[0])
+                ndim = output_tensor.shape.rank()
+                shape_name = f"{output_var}_shape"
+                self.write_line(f"nnc_reshape(&{input_var}, &{output_var}, (int64_t*){shape_name}, {ndim});")
+
+    def _emit_transpose_call(self, ctx: CompileContext, node: Node):
+        """Emit Transpose operation call."""
+        input_var = ctx.tensor_symbols.get(node.inputs[0], node.inputs[0])
+        output_var = ctx.tensor_symbols.get(node.outputs[0], node.outputs[0])
+
+        perm = node.attrs.get("perm", None)
+        if perm:
+            perm_name = f"{ctx.node_symbols.get(node.name, node.name)}_perm"
+            ndim = len(perm)
+            self.write_line(f"static const int64_t {perm_name}[] = {{{', '.join(map(str, perm))}}};")
+            self.write_line(f"nnc_transpose(&{input_var}, &{output_var}, (int64_t*){perm_name}, {ndim});")
+        else:
+            # Reverse permutation
+            input_tensor = ctx.graph.get_tensor(node.inputs[0])
+            ndim = input_tensor.shape.rank()
+            self.write_line(f"nnc_transpose(&{input_var}, &{output_var}, NULL, {ndim});")
+
+    def _emit_flatten_call(self, ctx: CompileContext, node: Node):
+        """Emit Flatten operation call."""
+        input_var = ctx.tensor_symbols.get(node.inputs[0], node.inputs[0])
+        output_var = ctx.tensor_symbols.get(node.outputs[0], node.outputs[0])
+        axis = node.attrs.get("axis", 1)
+
+        self.write_line(f"nnc_flatten(&{input_var}, &{output_var}, {axis});")
+
+    def _emit_softmax_call(self, ctx: CompileContext, node: Node):
+        """Emit Softmax operation call."""
+        input_var = ctx.tensor_symbols.get(node.inputs[0], node.inputs[0])
+        output_var = ctx.tensor_symbols.get(node.outputs[0], node.outputs[0])
+        axis = node.attrs.get("axis", -1)
+
+        self.write_line(f"nnc_softmax(&{input_var}, &{output_var}, {axis});")
+
+    def _emit_generic_call(self, ctx: CompileContext, node: Node, op_name: str):
+        """Emit generic operation call."""
+        args = []
+
+        # Input tensors
+        for input_name in node.inputs:
+            var_name = ctx.tensor_symbols.get(input_name, input_name)
+            args.append(f"&{var_name}")
+
+        # Output tensors
+        for output_name in node.outputs:
+            var_name = ctx.tensor_symbols.get(output_name, output_name)
+            args.append(f"&{var_name}")
+
+        # Add specific attributes for certain ops
+        if node.op_type == OpType.REDUCE_MEAN:
+            axis = node.attrs.get("axis", None)
+            keepdims = node.attrs.get("keepdims", 1)
+            if axis is not None:
+                args.append(str(axis))
+                args.append(str(keepdims))
+
+        self.write_line(f"{op_name}({', '.join(args)});")
 
     def _emit_entry_point(self, ctx: CompileContext):
         """Emit main entry point function."""
@@ -215,8 +318,10 @@ class CEmitter:
         self.write_line("void nnc_run(void) {")
         self.indent += 1
 
-        # Call each node function in topological order
+        # Call each node function in topological order (skip Constant nodes)
         for node in ctx.graph.topological_sort():
+            if node.op_type == OpType.CONSTANT:
+                continue
             func_name = ctx.node_symbols.get(node.name, node.name)
             self.write_line(f"{func_name}();")
 

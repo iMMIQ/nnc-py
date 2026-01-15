@@ -1,5 +1,7 @@
 """x86 backend for simulation."""
 
+import numpy as np
+
 from nnc_py.codegen.base import BackendBase, CodeGenResult
 from nnc_py.codegen.c_emitter import CEmitter
 from nnc_py.ir.context import CompileContext
@@ -80,11 +82,21 @@ class X86Backend(BackendBase):
             if f"extern Tensor {var_name};" not in lines:
                 lines.append(f"extern Tensor {var_name};")
 
-        # Also declare constant tensors (defined in constants.c)
+        # Declare constant tensors (defined in constants.c)
         for tensor_name in ctx.graph.constants:
             var_name = ctx.tensor_symbols.get(tensor_name, tensor_name)
             if f"extern Tensor {var_name};" not in lines:
                 lines.append(f"extern Tensor {var_name};")
+
+        # Declare constant data arrays for use in shape operations
+        import numpy as np
+        for tensor_name, arr in ctx.graph.constants.items():
+            # Only declare INT64 arrays (used for shapes)
+            if arr.dtype == np.int64 or arr.dtype == np.int32:
+                var_name = ctx.tensor_symbols.get(tensor_name, tensor_name)
+                dtype = "int64_t" if arr.dtype == np.int64 else "int32_t"
+                size = arr.size
+                lines.append(f"extern const {dtype} {var_name}_data[{size}];")
 
         lines.extend([
             "",
@@ -108,19 +120,32 @@ class X86Backend(BackendBase):
 
         for name, arr in ctx.graph.constants.items():
             tensor = ctx.graph.get_tensor(name)
-            dtype = self._map_numpy_dtype(arr.dtype)
+            # Get correct dtype based on array type
+            dtype, element_size, nnc_dtype = self._get_constant_type_info(arr)
             size = arr.size
             data = arr.flatten().tolist()
             shape = list(arr.shape)
 
+            # Use sanitized C symbol name
+            var_name = ctx.tensor_symbols.get(name, name)
+
+            # For INT64/INT32 constants (used as shapes), make data array non-static
+            # so it can be accessed from model.c for reshape operations
+            is_shape_constant = (arr.dtype == np.int64 or arr.dtype == np.int32)
+            storage_class = "" if is_shape_constant else "static "
+
             lines.append(f"/* Constant: {name} */")
-            lines.append(f"static const {dtype} {name}_data[{size}] = {{")
+            lines.append(f"{storage_class}const {dtype} {var_name}_data[{size}] = {{")
 
             # Format data with multiple values per line
             values_per_line = 10
             for i in range(0, size, values_per_line):
                 chunk = data[i:i + values_per_line]
-                line_values = ", ".join(f"{x:.9g}" for x in chunk)
+                if dtype == "float":
+                    line_values = ", ".join(f"{x:.9g}" for x in chunk)
+                else:
+                    # Integer types - format as integers
+                    line_values = ", ".join(f"{int(x)}" for x in chunk)
                 if i + values_per_line < size:
                     line_values += ","
                 lines.append(f"    {line_values}")
@@ -130,43 +155,85 @@ class X86Backend(BackendBase):
 
             # Generate Tensor structure
             shape_str = ", ".join(str(s) for s in shape)
-            lines.append(f"static const int64_t {name}_shape[] = {{{shape_str}}};")
-            lines.append(f"Tensor {name} = {{")
-            lines.append(f"    .data = (void*){name}_data,")
-            lines.append(f"    .dtype = NNC_DTYPE_FLOAT32,")
-            lines.append(f"    .shape = (int64_t*){name}_shape,")
+            lines.append(f"static const int64_t {var_name}_shape[] = {{{shape_str}}};")
+            lines.append(f"Tensor {var_name} = {{")
+            lines.append(f"    .data = (void*){var_name}_data,")
+            lines.append(f"    .dtype = {nnc_dtype},")
+            lines.append(f"    .shape = (int64_t*){var_name}_shape,")
             lines.append(f"    .ndim = {len(shape)},")
-            lines.append(f"    .nbytes = {size * 4},")
+            lines.append(f"    .nbytes = {size * element_size},")
             lines.append("};")
             lines.append("")
 
         return "\n".join(lines)
 
+    def _get_constant_type_info(self, arr: np.ndarray) -> tuple[str, int, str]:
+        """Get C type, element size, and NNC dtype enum for a constant array.
+
+        Returns:
+            Tuple of (c_dtype, element_size, nnc_dtype_enum)
+        """
+        import numpy as np
+
+        if arr.dtype == np.float32:
+            return "float", 4, "NNC_DTYPE_FLOAT32"
+        elif arr.dtype == np.float64:
+            return "double", 8, "NNC_DTYPE_FLOAT32"
+        elif arr.dtype == np.float16:
+            return "uint16_t", 2, "NNC_DTYPE_FLOAT16"
+        elif arr.dtype == np.int64:
+            return "int64_t", 8, "NNC_DTYPE_INT64"
+        elif arr.dtype == np.int32:
+            return "int32_t", 4, "NNC_DTYPE_INT32"
+        elif arr.dtype == np.int8:
+            return "int8_t", 1, "NNC_DTYPE_INT8"
+        elif arr.dtype == np.uint8:
+            return "uint8_t", 1, "NNC_DTYPE_UINT8"
+        elif arr.dtype == np.bool_:
+            return "uint8_t", 1, "NNC_DTYPE_BOOL"
+        else:
+            # Default to float32
+            return "float", 4, "NNC_DTYPE_FLOAT32"
+
     def _generate_makefile(self, ctx: CompileContext) -> str:
         """Generate Makefile."""
-        return """# Auto-generated by NNC - DO NOT EDIT
+        has_constants = bool(ctx.graph.constants)
+        objs = "model.o tensors.o"
+        if has_constants:
+            objs += " constants.o"
+        objs += " test_runner.o ops.o"
+
+        # Determine runtime path relative to the output directory
+        # For installed package: use NNC_RUNTIME_PATH env var
+        # For development: relative path from output to project root
+        return f"""# Auto-generated by NNC - DO NOT EDIT
+# Set NNC_RUNTIME_PATH to point to the runtime directory if not in dev tree
 CC = gcc
-CFLAGS = -std=c11 -O2 -Wall -Wextra -I../../runtime/include
+CFLAGS = -std=c11 -O2 -Wall -Wextra
 LDFLAGS = -lm
+
+# Runtime include path - can be overridden by environment
+NNC_RUNTIME ?= ../../runtime
+CFLAGS += -I$(NNC_RUNTIME)/include
 
 .PHONY: all clean run
 
 all: model
 
-model: model.o tensors.o constants.o test_runner.o ops.o
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+model: {objs}
+\t$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 ops.o:
-	$(CC) $(CFLAGS) -c ../../runtime/x86/ops.c
+\t$(CC) $(CFLAGS) -c $(NNC_RUNTIME)/x86/ops.c
 
 %.o: %.c
-	$(CC) $(CFLAGS) -c $<
+\t$(CC) $(CFLAGS) -c $<
 
 clean:
-	rm -f *.o model
+\trm -f *.o model
 
 run: model
-	./model
+\t./model
 """
 
     def _generate_tensors(self, ctx: CompileContext) -> str:
@@ -262,6 +329,50 @@ run: model
         setup_code = "\n".join(tensor_setups)
         frees_code = "\n".join(tensor_frees)
 
+        # Get input and output tensor variable names
+        input_var = None
+        if ctx.graph.inputs:
+            input_name = ctx.graph.inputs[0]
+            input_var = ctx.tensor_symbols.get(input_name, input_name)
+
+        output_var = None
+        if ctx.graph.outputs:
+            output_name = ctx.graph.outputs[0]
+            output_var = ctx.tensor_symbols.get(output_name, output_name)
+
+        # Generate print code only if we have input/output tensors
+        print_code = ""
+        if input_var and output_var:
+            print_code = f"""
+    /* Print input info */
+    printf("Input data (first 10):\\\\n");
+    int64_t input_size = 1;
+    for (int i = 0; i < {input_var}.ndim; i++) {{
+        input_size *= {input_var}.shape[i];
+    }}
+    for (int i = 0; i < 10 && i < input_size; i++) {{
+        printf("  input[%d] = %f\\\\n", i, ((float*){input_var}.data)[i]);
+    }}
+
+    /* Run inference */
+    printf("\\\\nRunning inference...\\\\n");
+    nnc_run();
+
+    /* Print output results */
+    printf("\\\\nOutput results (first 10):\\\\n");
+    int64_t output_size = 1;
+    for (int i = 0; i < {output_var}.ndim; i++) {{
+        output_size *= {output_var}.shape[i];
+    }}
+    for (int i = 0; i < 10 && i < output_size; i++) {{
+        printf("  output[%d] = %f\\\\n", i, ((float*){output_var}.data)[i]);
+    }}"""
+        else:
+            print_code = """
+    /* Run inference */
+    printf("\\nRunning inference...\\n");
+    nnc_run();"""
+
         return f"""/* Auto-generated by NNC - DO NOT EDIT */
 #include <stdio.h>
 #include <stdlib.h>
@@ -275,30 +386,7 @@ int main(void) {{
 
     /* Setup all tensors */
 {setup_code}
-
-    /* Print input info */
-    printf("Input data (first 10):\\n");
-    int64_t input_size = 1;
-    for (int i = 0; i < input.ndim; i++) {{
-        input_size *= input.shape[i];
-    }}
-    for (int i = 0; i < 10 && i < input_size; i++) {{
-        printf("  input[%d] = %f\\n", i, ((float*)input.data)[i]);
-    }}
-
-    /* Run inference */
-    printf("\\nRunning inference...\\n");
-    nnc_run();
-
-    /* Print output results */
-    printf("\\nOutput results (first 10):\\n");
-    int64_t output_size = 1;
-    for (int i = 0; i < output.ndim; i++) {{
-        output_size *= output.shape[i];
-    }}
-    for (int i = 0; i < 10 && i < output_size; i++) {{
-        printf("  output[%d] = %f\\n", i, ((float*)output.data)[i]);
-    }}
+{print_code}
 
     /* Free memory */
 {frees_code}
