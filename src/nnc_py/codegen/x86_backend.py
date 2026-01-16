@@ -556,33 +556,35 @@ run: model
             fast_tensor_offsets = {}  # tensor_name -> offset in fast pool
 
             if has_spill and spill_plan is not None:
-                spilled_names = set(spill_plan.spilled_tensors.keys())
+                # Try to use pre-calculated offsets from spill plan
+                if hasattr(spill_plan, 'fast_tensor_offsets') and spill_plan.fast_tensor_offsets:
+                    # Use offsets calculated by SpillAnalysisPass
+                    fast_tensor_offsets = spill_plan.fast_tensor_offsets
+                else:
+                    # Recalculate: create compact layout for ALL tensors
+                    # Note: This may still exceed max_memory, but at least prevents data corruption
+                    current_offset = 0
+                    alignment = 16
 
-                # Re-assign offsets: create compact layout for ALL tensors
-                # (spilled tensors also need fast memory for computation, just shorter lifetime)
-                current_offset = 0
-                alignment = 16
+                    # Group tensors by buffer to preserve locality
+                    sorted_buffers = sorted(plan.buffers, key=lambda b: b.offset)
+                    for buf in sorted_buffers:
+                        # Skip empty buffers
+                        if not buf.tensors:
+                            continue
 
-                # Group tensors by buffer to preserve locality
-                sorted_buffers = sorted(plan.buffers, key=lambda b: b.offset)
-                for buf in sorted_buffers:
-                    # Skip empty buffers
-                    if not buf.tensors:
-                        continue
+                        # Get tensors in this buffer that are in the plan
+                        buf_tensors = [t for t in buf.tensors if t in plan.tensor_info]
+                        if not buf_tensors:
+                            continue
 
-                    # Get tensors in this buffer that are in the plan
-                    buf_tensors = [t for t in buf.tensors if t in plan.tensor_info]
-                    if not buf_tensors:
-                        continue
+                        aligned_offset = ((current_offset + alignment - 1) // alignment) * alignment
 
-                    aligned_offset = ((current_offset + alignment - 1) // alignment) * alignment
+                        # Assign the same offset to all tensors in this buffer
+                        for tensor_name in buf_tensors:
+                            fast_tensor_offsets[tensor_name] = aligned_offset
 
-                    # Assign the same offset to all tensors in this buffer
-                    # (they share the buffer, so same base offset)
-                    for tensor_name in buf_tensors:
-                        fast_tensor_offsets[tensor_name] = aligned_offset
-
-                    current_offset = aligned_offset + buf.size
+                        current_offset = aligned_offset + buf.size
 
                 tensor_offsets = fast_tensor_offsets
             else:
