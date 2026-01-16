@@ -76,7 +76,7 @@ class PassManager:
         """
         from nnc_py.passes.constant_folding import ConstantFoldingPass
         from nnc_py.passes.liveness import LivenessAnalysisPass
-        from nnc_py.passes.memory_plan import MemoryPlanningPass
+        from nnc_py.passes.memory_planning import MemoryPlanningPassV2
         from nnc_py.passes.split_analysis import SplitAnalysisPass
         from nnc_py.passes.split_transform import SplitTransformPass
         from nnc_py.passes.spill import SpillAnalysisPass
@@ -97,7 +97,7 @@ class PassManager:
             # Operator splitting passes (before memory planning)
             passes.append(SplitAnalysisPass())
             passes.append(SplitTransformPass())
-            passes.append(MemoryPlanningPass())
+            passes.append(MemoryPlanningPassV2())  # Use V2 for pluggable strategies
             passes.append(SpillAnalysisPass())  # Handles overflow if max_memory set
 
         # O3: Advanced optimizations

@@ -558,31 +558,29 @@ run: model
             if has_spill and spill_plan is not None:
                 spilled_names = set(spill_plan.spilled_tensors.keys())
 
-                # Collect buffers that contain ONLY spilled tensors
-                freed_buffer_ids = set()
-                for buf in plan.buffers:
-                    all_spilled = all(t in spilled_names for t in buf.tensors)
-                    if all_spilled and buf.tensors:
-                        freed_buffer_ids.add(buf.id)
-
-                # Re-assign offsets: compact all buffers, skipping freed ones
+                # Re-assign offsets: create compact layout for ALL tensors
+                # (spilled tensors also need fast memory for computation, just shorter lifetime)
                 current_offset = 0
                 alignment = 16
 
+                # Group tensors by buffer to preserve locality
                 sorted_buffers = sorted(plan.buffers, key=lambda b: b.offset)
                 for buf in sorted_buffers:
-                    if buf.id in freed_buffer_ids:
+                    # Skip empty buffers
+                    if not buf.tensors:
                         continue
 
-                    buf_tensors = [t for t in buf.tensors if t not in spilled_names]
+                    # Get tensors in this buffer that are in the plan
+                    buf_tensors = [t for t in buf.tensors if t in plan.tensor_info]
                     if not buf_tensors:
                         continue
 
                     aligned_offset = ((current_offset + alignment - 1) // alignment) * alignment
 
-                    for tensor_name in buf.tensors:
-                        if tensor_name in plan.tensor_info:
-                            fast_tensor_offsets[tensor_name] = aligned_offset
+                    # Assign the same offset to all tensors in this buffer
+                    # (they share the buffer, so same base offset)
+                    for tensor_name in buf_tensors:
+                        fast_tensor_offsets[tensor_name] = aligned_offset
 
                     current_offset = aligned_offset + buf.size
 

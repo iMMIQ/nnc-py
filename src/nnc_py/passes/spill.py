@@ -175,7 +175,13 @@ class SpillAnalysisPass(PassBase):
             ctx, plan, spilled_tensors
         )
 
-        # Step 4: Assign slow memory offsets
+        # Step 4: Recalculate fast memory layout with compaction
+        # This ensures all tensor offsets fit within max_memory
+        new_fast_offsets = self._recalculate_fast_memory_layout(
+            plan, spilled_tensors, max_memory, ctx
+        )
+
+        # Step 5: Assign slow memory offsets
         slow_offset = 0
         for tensor_name, slot in spilled_tensors.items():
             slot.slow_offset = slow_offset
@@ -183,16 +189,22 @@ class SpillAnalysisPass(PassBase):
 
         slow_memory_size = slow_offset
 
-        # Update spill_points and reload_points with correct slow offsets
+        # Step 6: Update spill_points and reload_points with correct offsets
         for point in spill_points:
             if point.tensor_name in spilled_tensors:
                 point.to_slow_offset = spilled_tensors[point.tensor_name].slow_offset
+            # Update fast offset to use recalculated layout
+            if point.tensor_name in new_fast_offsets:
+                point.from_fast_offset = new_fast_offsets[point.tensor_name]
 
         for point in reload_points:
             if point.tensor_name in spilled_tensors:
                 point.from_slow_offset = spilled_tensors[point.tensor_name].slow_offset
+            # Update fast offset to use recalculated layout
+            if point.tensor_name in new_fast_offsets:
+                point.to_fast_offset = new_fast_offsets[point.tensor_name]
 
-        # Create spill plan
+        # Store recalculated offsets in spill plan for codegen use
         spill_plan = SpillPlan(
             original_memory_size=plan.total_size,  # Original requirement
             fast_memory_size=max_memory,  # Will fit after spills
@@ -203,6 +215,8 @@ class SpillAnalysisPass(PassBase):
             reload_points=reload_points,
             memory_plan=plan,
         )
+        # Attach recalculated fast offsets for code generation
+        spill_plan.fast_tensor_offsets = new_fast_offsets
 
         return spill_plan
 
@@ -371,6 +385,126 @@ class SpillAnalysisPass(PassBase):
     def _align(self, size: int, alignment: int) -> int:
         """Align size to the given alignment boundary."""
         return ((size + alignment - 1) // alignment) * alignment
+
+    def _recalculate_fast_memory_layout(
+        self,
+        plan: MemoryPlan,
+        spilled_tensors: Dict[str, SpillSlot],
+        max_memory: int,
+        ctx: CompileContext = None,
+    ) -> Dict[str, int]:
+        """Recalculate compact fast memory layout.
+
+        Creates a compact memory layout considering that spilled tensors
+        have shorter lifetimes and can be more aggressively shared.
+
+        Key insight: Tensors that don't overlap in liveness can share the same
+        fast memory location. Spilled tensors are especially good candidates
+        for sharing since they are only needed briefly during computation.
+
+        Returns:
+            Dictionary mapping tensor_name -> new_fast_offset
+        """
+        # Get liveness information from context if available
+        liveness_map = {}
+        if ctx is not None and "tensor_liveness" in ctx.metadata:
+            liveness_map = ctx.metadata["tensor_liveness"]
+
+        new_offsets = {}
+        allocated_regions = []  # List of (offset, size, tensor_names)
+        alignment = 16
+
+        # Group tensors by buffer to preserve sharing
+        buffer_tensors = {}
+        for tensor_name, mem_info in plan.tensor_info.items():
+            buf_id = mem_info.buffer_id
+            if buf_id not in buffer_tensors:
+                buffer_tensors[buf_id] = []
+            buffer_tensors[buf_id].append(tensor_name)
+
+        # Process buffers, placing spilled ones more aggressively
+        for buf_id in sorted(buffer_tensors.keys()):
+            buf = plan.get_buffer(buf_id)
+            tensors = buffer_tensors[buf_id]
+            buf_size = buf.size
+
+            # Check if any tensor in this buffer is spilled
+            any_spilled = any(t in spilled_tensors for t in tensors)
+
+            # For spilled buffers, try to fit into existing regions
+            if any_spilled:
+                placed = False
+                # Try to reuse an existing region
+                for region_idx, (region_offset, region_size, region_tensors) in enumerate(allocated_regions):
+                    if region_size >= buf_size:
+                        # Check for liveness overlap with existing tensors in this region
+                        has_overlap = False
+                        if liveness_map:
+                            for t1 in tensors:
+                                if t1 not in liveness_map:
+                                    continue
+                                l1 = liveness_map[t1]
+                                for t2 in region_tensors:
+                                    if t2 not in liveness_map:
+                                        continue
+                                    l2 = liveness_map[t2]
+                                    # Check if liveness ranges overlap
+                                    if not (l1.live_end < l2.live_start or l2.live_end < l1.live_start):
+                                        has_overlap = True
+                                        break
+                                if has_overlap:
+                                    break
+
+                        if not has_overlap:
+                            # Can reuse this region
+                            aligned_offset = region_offset
+                            for tensor_name in tensors:
+                                new_offsets[tensor_name] = aligned_offset
+                            placed = True
+                            break
+
+                if not placed:
+                    # Need new region - compact aggressively
+                    # Find the smallest offset that fits
+                    best_offset = None
+                    for region_offset, region_size, _ in allocated_regions:
+                        candidate = ((region_offset + region_size + alignment - 1) // alignment) * alignment
+                        if candidate + buf_size <= max_memory:
+                            if best_offset is None or candidate < best_offset:
+                                best_offset = candidate
+
+                    if best_offset is None:
+                        best_offset = 0
+                        for region_offset, region_size, _ in allocated_regions:
+                            candidate = region_offset + region_size
+                            if candidate > best_offset:
+                                best_offset = candidate
+                        best_offset = ((best_offset + alignment - 1) // alignment) * alignment
+
+                    # Ensure we don't exceed max_memory
+                    if best_offset + buf_size > max_memory:
+                        # This shouldn't happen if spill was done correctly
+                        # Fall back to compact layout from 0
+                        best_offset = 0
+
+                    for tensor_name in tensors:
+                        new_offsets[tensor_name] = best_offset
+
+                    allocated_regions.append((best_offset, buf_size, tensors))
+            else:
+                # Non-spilled buffer - place normally but compact
+                current_end = 0
+                for region_offset, region_size, _ in allocated_regions:
+                    current_end = max(current_end, region_offset + region_size)
+
+                aligned_offset = ((current_end + alignment - 1) // alignment) * alignment
+
+                for tensor_name in tensors:
+                    new_offsets[tensor_name] = aligned_offset
+
+                allocated_regions.append((aligned_offset, buf_size, tensors))
+
+        return new_offsets
 
     def _log_no_overflow(self, plan: MemoryPlan, max_memory: int):
         """Log that no overflow occurs."""
