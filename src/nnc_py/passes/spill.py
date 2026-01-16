@@ -391,48 +391,117 @@ class SpillAnalysisPass(PassBase):
         max_memory: int,
         ctx: CompileContext = None,
     ) -> Dict[str, int]:
-        """Recalculate compact fast memory layout.
+        """Recalculate fast memory layout with lifetime-aware reuse.
 
-        Creates a compact memory layout where buffers are placed sequentially
-        starting from 0. If the total size exceeds max_memory, buffers
-        are wrapped around to stay within the limit (modulo-based).
+        Uses tensor liveness information to allow non-overlapping tensors
+        to share the same memory locations. This ensures all offsets stay
+        within max_memory without wraparound.
 
-        This is a temporary solution to prevent hardcoded overflow.
-        A proper solution requires more sophisticated lifetime analysis.
+        Note: spilled_tensors is ignored for now. All tensors are allocated
+        in fast memory using lifetime-aware placement. The spilled_tensors
+        mechanism would require generating spill/reload code, which is
+        a more complex feature.
 
         Returns:
             Dictionary mapping tensor_name -> new_fast_offset
         """
+        if ctx is None:
+            # Fallback to simple sequential layout if no context
+            return self._sequential_layout(plan, spilled_tensors, max_memory)
+
+        new_offsets = {}
+        alignment = 16
+
+        # Get liveness information
+        liveness_map = ctx.metadata.get("tensor_liveness", {})
+
+        # Build interval map: tensor -> (live_start, live_end)
+        intervals = {}
+        for tensor_name, mem_info in plan.tensor_info.items():
+            if tensor_name in liveness_map:
+                liv = liveness_map[tensor_name]
+                intervals[tensor_name] = (liv.live_start, liv.live_end)
+            else:
+                intervals[tensor_name] = (0, float("inf"))
+
+        # Assign offsets using first-fit with lifetime checking
+        # Track each allocation: (offset, size, live_start, live_end, tensor_name)
+        allocations = []
+
+        # Process tensors in order of their live_start to avoid ordering issues
+        # Large tensors first within each live_start group to avoid fragmentation
+        tensor_list = [
+            (name, mem_info, intervals.get(name, (0, float("inf"))))
+            for name, mem_info in plan.tensor_info.items()
+        ]
+        # Sort by live_start, then by size (descending), then by name
+        tensor_list.sort(key=lambda x: (x[2][0], -x[1].size, x[0]))
+
+        for tensor_name, mem_info, (live_start, live_end) in tensor_list:
+            size = mem_info.size
+
+            # Find first non-overlapping position
+            offset = 0
+            while True:
+                # Check if this position conflicts with any existing allocation
+                conflict = False
+                for alloc_offset, alloc_size, alloc_start, alloc_end, _ in allocations:
+                    # Check memory overlap
+                    if offset < alloc_offset + alloc_size and offset + size > alloc_offset:
+                        # Check lifetime overlap
+                        if not (live_end <= alloc_start or live_start >= alloc_end):
+                            conflict = True
+                            break
+
+                if not conflict and offset + size <= max_memory:
+                    break
+
+                # Try next aligned position
+                offset = ((offset + alignment - 1) // alignment) * alignment
+                offset += ((size + alignment - 1) // alignment) * alignment
+
+                if offset >= max_memory:
+                    raise RuntimeError(
+                        f"Cannot fit tensor {tensor_name} (size={size}) "
+                        f"in fast memory (limit={max_memory}). "
+                        f"This tensor overlaps with {len(allocations)} other tensors that need "
+                        f"to be alive simultaneously. "
+                        f"Consider increasing max_memory or restructuring the model."
+                    )
+
+            allocations.append((offset, size, live_start, live_end, tensor_name))
+            new_offsets[tensor_name] = offset
+
+        return new_offsets
+
+    def _sequential_layout(
+        self,
+        plan: MemoryPlan,
+        spilled_tensors: Dict[str, SpillSlot],
+        max_memory: int,
+    ) -> Dict[str, int]:
+        """Fallback sequential layout without liveness analysis."""
         new_offsets = {}
         current_offset = 0
         alignment = 16
 
-        # Group tensors by buffer to preserve sharing
-        # Only process buffers that actually have tensors in the plan
-        buffer_list = []
-        for buf_id, buf in enumerate(plan.buffers):
+        for buf in plan.buffers:
             buf_tensors = [t for t in buf.tensors if t in plan.tensor_info]
-            if buf_tensors:
-                buffer_list.append((buf_id, buf, buf_tensors))
+            if not buf_tensors:
+                continue
 
-        # Sort buffers by original offset to preserve some locality
-        buffer_list.sort(key=lambda x: x[1].offset)
-
-        # Assign compact offsets to each buffer
-        for buf_id, buf, buf_tensors in buffer_list:
-            # Align current offset
             aligned_offset = ((current_offset + alignment - 1) // alignment) * alignment
 
-            # Wrap around if we exceed max_memory
-            # This ensures all offsets stay within the pool
-            if aligned_offset >= max_memory:
-                aligned_offset = 0
+            if aligned_offset + buf.size > max_memory:
+                raise RuntimeError(
+                    f"Sequential layout exceeds max_memory ({max_memory}). "
+                    f"Need {aligned_offset + buf.size} bytes. "
+                    f"Pass CompileContext to enable lifetime-aware reuse."
+                )
 
-            # All tensors in this buffer share the same offset
             for tensor_name in buf_tensors:
                 new_offsets[tensor_name] = aligned_offset
 
-            # Move to next buffer position
             current_offset = aligned_offset + buf.size
 
         return new_offsets

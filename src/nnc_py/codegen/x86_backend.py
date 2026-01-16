@@ -561,30 +561,70 @@ run: model
                     # Use offsets calculated by SpillAnalysisPass
                     fast_tensor_offsets = spill_plan.fast_tensor_offsets
                 else:
-                    # Recalculate: create compact layout for ALL tensors
-                    # Note: This may still exceed max_memory, but at least prevents data corruption
-                    current_offset = 0
+                    # Recalculate with lifetime-aware memory reuse
+                    # This allows tensors with non-overlapping lifetimes to share memory
+                    max_memory = ctx.metadata.get("max_memory", float("inf"))
+
+                    # Get liveness information
+                    liveness_map = ctx.metadata.get("tensor_liveness", {})
+
+                    # Build interval map: tensor -> (live_start, live_end)
+                    intervals = {}
+                    for tensor_name, info in plan.tensor_info.items():
+                        if tensor_name in liveness_map:
+                            liv = liveness_map[tensor_name]
+                            intervals[tensor_name] = (liv.live_start, liv.live_end)
+                        else:
+                            intervals[tensor_name] = (0, float("inf"))
+
+                    # Assign offsets using first-fit with lifetime checking
+                    # Track each allocation: (offset, size, live_start, live_end, tensor_name)
+                    allocations = []
                     alignment = 16
 
-                    # Group tensors by buffer to preserve locality
-                    sorted_buffers = sorted(plan.buffers, key=lambda b: b.offset)
-                    for buf in sorted_buffers:
-                        # Skip empty buffers
-                        if not buf.tensors:
-                            continue
+                    # Process tensors in order of their live_start to avoid ordering issues
+                    # Large tensors first within each live_start group to avoid fragmentation
+                    tensor_list = [
+                        (name, mem_info, intervals.get(name, (0, float("inf"))))
+                        for name, mem_info in plan.tensor_info.items()
+                    ]
+                    # Sort by live_start, then by size (descending), then by name
+                    tensor_list.sort(key=lambda x: (x[2][0], -x[1].size, x[0]))
 
-                        # Get tensors in this buffer that are in the plan
-                        buf_tensors = [t for t in buf.tensors if t in plan.tensor_info]
-                        if not buf_tensors:
-                            continue
+                    for tensor_name, mem_info, (live_start, live_end) in tensor_list:
+                        size = mem_info.size
 
-                        aligned_offset = ((current_offset + alignment - 1) // alignment) * alignment
+                        # Find first non-overlapping position
+                        offset = 0
+                        while True:
+                            # Check if this position conflicts with any existing allocation
+                            conflict = False
+                            for alloc_offset, alloc_size, alloc_start, alloc_end, _ in allocations:
+                                # Check memory overlap
+                                if offset < alloc_offset + alloc_size and offset + size > alloc_offset:
+                                    # Check lifetime overlap
+                                    if not (live_end <= alloc_start or live_start >= alloc_end):
+                                        conflict = True
+                                        break
 
-                        # Assign the same offset to all tensors in this buffer
-                        for tensor_name in buf_tensors:
-                            fast_tensor_offsets[tensor_name] = aligned_offset
+                            if not conflict and offset + size <= max_memory:
+                                break
 
-                        current_offset = aligned_offset + buf.size
+                            # Try next aligned position
+                            offset = ((offset + alignment - 1) // alignment) * alignment
+                            offset += ((size + alignment - 1) // alignment) * alignment
+
+                            if offset >= max_memory:
+                                raise RuntimeError(
+                                    f"Cannot fit tensor {tensor_name} (size={size}) "
+                                    f"in fast memory (limit={max_memory}). "
+                                    f"This tensor overlaps with {len(allocations)} other tensors that need "
+                                    f"to be alive simultaneously. "
+                                    f"Consider increasing max_memory or restructuring the model."
+                                )
+
+                        allocations.append((offset, size, live_start, live_end, tensor_name))
+                        fast_tensor_offsets[tensor_name] = offset
 
                 tensor_offsets = fast_tensor_offsets
             else:
