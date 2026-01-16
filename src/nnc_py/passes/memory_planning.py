@@ -4,7 +4,7 @@ This pass provides a single entry point for memory allocation with
 runtime-selectable strategies.
 """
 
-from typing import Optional, Union
+from typing import Optional
 
 from nnc_py.ir.context import CompileContext
 from nnc_py.passes.base import PassBase
@@ -14,7 +14,6 @@ from nnc_py.passes.memory_strategy import (
     MemoryAllocationPlan,
     MemoryAllocationStrategy,
     StrategyRegistry,
-    get_memory_strategy,
 )
 
 
@@ -22,20 +21,17 @@ class MemoryPlanningPassV2(PassBase):
     """Unified memory planning pass with pluggable strategies.
 
     This pass replaces the original MemoryPlanningPass and provides
-    a single entry point for all memory allocation strategies.
+    a single entry point for memory allocation using the LLVM-style
+    register allocation algorithm.
 
     Usage:
-        ctx.metadata["memory_strategy"] = "graph_coloring"  # or "unified", "liveness"
-        ctx.metadata["memory_coloring_heuristic"] = "dsatur"  # optional
+        ctx.metadata["memory_strategy"] = "llvm_allocator"
         pass = MemoryPlanningPassV2()
         pass.run(ctx)
         plan = ctx.metadata["memory_allocation_plan"]  # MemoryAllocationPlan
-
-    The strategy can also be specified with a heuristic:
-        ctx.metadata["memory_strategy"] = "graph_coloring:dsatur"
     """
 
-    DEFAULT_STRATEGY = AllocationStrategy.AGGRESSIVE_SPILL
+    DEFAULT_STRATEGY = AllocationStrategy.GRAPH_COLORING
 
     @property
     def name(self) -> str:
@@ -75,25 +71,14 @@ class MemoryPlanningPassV2(PassBase):
 
     def _get_strategy(
         self,
-        strategy_config: Union[str, AllocationStrategy, MemoryAllocationStrategy],
+        strategy_config: Optional[str],
     ) -> MemoryAllocationStrategy:
         """Get strategy instance from config."""
+        if strategy_config is None:
+            strategy_config = self.DEFAULT_STRATEGY
+
         if isinstance(strategy_config, str):
-            # Support "strategy:heuristic" format
-            if ":" in strategy_config:
-                parts = strategy_config.split(":", 1)
-                base_strategy = parts[0]
-                heuristic = parts[1]
-
-                # Get base strategy and configure heuristic
-                from nnc_py.passes.strategies.graph_coloring import GraphColoringStrategy, ColoringHeuristic
-
-                strategy_instance = StrategyRegistry.get(base_strategy)
-                if isinstance(strategy_instance, GraphColoringStrategy):
-                    strategy_instance.heuristic = ColoringHeuristic(heuristic)
-                    return strategy_instance
-            else:
-                return StrategyRegistry.get(strategy_config)
+            return StrategyRegistry.get(strategy_config)
         elif isinstance(strategy_config, AllocationStrategy):
             return StrategyRegistry.get(strategy_config)
         elif isinstance(strategy_config, MemoryAllocationStrategy):
@@ -168,15 +153,9 @@ class MemoryPlanningPassV2(PassBase):
 # Register default strategies when this module is imported
 def _initialize_strategies() -> None:
     """Import and register default strategies."""
-    from nnc_py.passes.strategies.liveness_strategy import LivenessAllocationStrategy
-    from nnc_py.passes.strategies.unified_strategy import UnifiedAllocationStrategy
-    from nnc_py.passes.strategies.graph_coloring import GraphColoringStrategy
-    from nnc_py.passes.strategies.aggressive_spill_strategy import AggressiveSpillStrategy
+    from nnc_py.passes.strategies.graph_coloring_allocator import GraphColoringAllocator
 
-    StrategyRegistry.register(LivenessAllocationStrategy)
-    StrategyRegistry.register(UnifiedAllocationStrategy)
-    StrategyRegistry.register(GraphColoringStrategy)
-    StrategyRegistry.register(AggressiveSpillStrategy)
+    StrategyRegistry.register(GraphColoringAllocator)
 
 
 # Auto-initialize on import

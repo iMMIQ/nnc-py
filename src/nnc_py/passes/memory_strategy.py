@@ -15,12 +15,7 @@ from nnc_py.passes.memory_plan import MemoryBuffer
 
 class AllocationStrategy(Enum):
     """Available memory allocation strategies."""
-    LIVENESS_BASED = "liveness"          # Original interval-based (MemoryPlanningPass)
-    UNIFIED = "unified"                  # Use-point based (UnifiedMemoryPass)
-    GRAPH_COLORING = "graph_coloring"    # Graph coloring based
-    FIRST_FIT = "first_fit"              # Simple first-fit
-    BEST_FIT = "best_fit"                # Best-fit decreasing
-    AGGRESSIVE_SPILL = "aggressive_spill"  # Aggressive spill to slow memory
+    GRAPH_COLORING = "graph_coloring"    # Graph coloring with spill support
 
 
 @dataclass
@@ -194,34 +189,21 @@ class StrategyRegistry:
     def get(cls, strategy: Union[AllocationStrategy, str]) -> MemoryAllocationStrategy:
         """Get a strategy instance by enum or name."""
         if isinstance(strategy, str):
-            # Support "strategy:heuristic" format
-            base_strategy = strategy
-            heuristic = None
-            if ":" in strategy:
-                base_strategy, heuristic = strategy.split(":", 1)
-
-            if base_strategy in cls._aliases:
-                strategy_type = cls._aliases[base_strategy]
+            if strategy in cls._aliases:
+                strategy_type = cls._aliases[strategy]
             else:
                 try:
-                    strategy_type = AllocationStrategy(base_strategy)
+                    strategy_type = AllocationStrategy(strategy)
                 except ValueError:
-                    raise ValueError(f"Unknown strategy: {base_strategy}")
+                    raise ValueError(f"Unknown strategy: {strategy}")
         else:
             strategy_type = strategy
-            heuristic = None
 
         strategy_cls = cls._strategies.get(strategy_type)
         if strategy_cls is None:
             raise ValueError(f"Strategy not registered: {strategy_type}")
 
-        # Create instance with optional heuristic
-        instance = strategy_cls()
-        if heuristic is not None and hasattr(instance, 'heuristic'):
-            from nnc_py.passes.strategies.graph_coloring import ColoringHeuristic
-            instance.heuristic = ColoringHeuristic(heuristic)
-
-        return instance
+        return strategy_cls()
 
     @classmethod
     def list_strategies(cls) -> List[str]:
@@ -245,15 +227,9 @@ class StrategyRegistry:
 # Import and register built-in strategies
 def _register_default_strategies() -> None:
     """Import and register default strategies."""
-    from nnc_py.passes.strategies.liveness_strategy import LivenessAllocationStrategy
-    from nnc_py.passes.strategies.unified_strategy import UnifiedAllocationStrategy
-    from nnc_py.passes.strategies.graph_coloring import GraphColoringStrategy
-    from nnc_py.passes.strategies.aggressive_spill_strategy import AggressiveSpillStrategy
+    from nnc_py.passes.strategies.graph_coloring_allocator import GraphColoringAllocator
 
-    StrategyRegistry.register(LivenessAllocationStrategy)
-    StrategyRegistry.register(UnifiedAllocationStrategy)
-    StrategyRegistry.register(GraphColoringStrategy)
-    StrategyRegistry.register(AggressiveSpillStrategy)
+    StrategyRegistry.register(GraphColoringAllocator)
 
 
 def get_allocation_plan(ctx: CompileContext) -> Optional[MemoryAllocationPlan]:
@@ -280,7 +256,7 @@ def get_memory_strategy(ctx: CompileContext) -> Optional[MemoryAllocationStrateg
     strategy_config = ctx.metadata.get("memory_strategy")
 
     if strategy_config is None:
-        # Default to aggressive spill for better memory efficiency
-        strategy_config = AllocationStrategy.AGGRESSIVE_SPILL
+        # Default to LLVM allocator
+        strategy_config = AllocationStrategy.GRAPH_COLORING
 
     return StrategyRegistry.get(strategy_config)

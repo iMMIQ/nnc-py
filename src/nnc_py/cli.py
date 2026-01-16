@@ -58,10 +58,8 @@ def main():
 @click.option(
     "--memory-strategy",
     type=str,
-    default="aggressive_spill",
-    help="Memory allocation strategy: aggressive_spill (default), liveness, unified, "
-         "graph_coloring[:heuristic]. Heuristics: welsh_powell, dsatur, "
-         "largest_first, smallest_last. Example: graph_coloring:dsatur",
+    default="graph_coloring",
+    help="Memory allocation strategy: graph_coloring (default) - Graph coloring with spill support",
 )
 def compile(onnx_model, output, target, opt_level, entry_name, verbose, max_memory, memory_strategy):
     """Compile an ONNX model to C code.
