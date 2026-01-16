@@ -20,6 +20,7 @@ class AllocationStrategy(Enum):
     GRAPH_COLORING = "graph_coloring"    # Graph coloring based
     FIRST_FIT = "first_fit"              # Simple first-fit
     BEST_FIT = "best_fit"                # Best-fit decreasing
+    AGGRESSIVE_SPILL = "aggressive_spill"  # Aggressive spill to slow memory
 
 
 @dataclass
@@ -247,10 +248,12 @@ def _register_default_strategies() -> None:
     from nnc_py.passes.strategies.liveness_strategy import LivenessAllocationStrategy
     from nnc_py.passes.strategies.unified_strategy import UnifiedAllocationStrategy
     from nnc_py.passes.strategies.graph_coloring import GraphColoringStrategy
+    from nnc_py.passes.strategies.aggressive_spill_strategy import AggressiveSpillStrategy
 
     StrategyRegistry.register(LivenessAllocationStrategy)
     StrategyRegistry.register(UnifiedAllocationStrategy)
     StrategyRegistry.register(GraphColoringStrategy)
+    StrategyRegistry.register(AggressiveSpillStrategy)
 
 
 def get_allocation_plan(ctx: CompileContext) -> Optional[MemoryAllocationPlan]:
@@ -277,7 +280,7 @@ def get_memory_strategy(ctx: CompileContext) -> Optional[MemoryAllocationStrateg
     strategy_config = ctx.metadata.get("memory_strategy")
 
     if strategy_config is None:
-        # Default to liveness-based
-        strategy_config = AllocationStrategy.LIVENESS_BASED
+        # Default to aggressive spill for better memory efficiency
+        strategy_config = AllocationStrategy.AGGRESSIVE_SPILL
 
     return StrategyRegistry.get(strategy_config)

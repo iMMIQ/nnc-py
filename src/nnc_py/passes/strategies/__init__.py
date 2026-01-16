@@ -11,11 +11,13 @@ from nnc_py.passes.strategies.graph_coloring import (
     ColoringHeuristic,
     InterferenceGraph,
 )
+from nnc_py.passes.strategies.aggressive_spill_strategy import AggressiveSpillStrategy
 
 __all__ = [
     "LivenessAllocationStrategy",
     "UnifiedAllocationStrategy",
     "GraphColoringStrategy",
+    "AggressiveSpillStrategy",
     "ColoringHeuristic",
     "InterferenceGraph",
 ]

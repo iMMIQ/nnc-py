@@ -271,5 +271,7 @@ class TestMemoryLimitEnforcement:
         compiler = Compiler(target='x86', opt_level=2)
 
         # This should fail because we need ~10 * 1600 = 16000 bytes but only have 2048
-        with pytest.raises(RuntimeError, match="Cannot fit tensor.*in fast memory"):
+        # The aggressive spill strategy checks per-operator memory, so it fails
+        # when a single operator's inputs+outputs exceed max_memory
+        with pytest.raises(RuntimeError, match="Cannot fit.*in fast memory"):
             compiler.compile(onnx_path, output_dir, max_memory='2048')

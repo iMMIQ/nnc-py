@@ -35,7 +35,7 @@ class MemoryPlanningPassV2(PassBase):
         ctx.metadata["memory_strategy"] = "graph_coloring:dsatur"
     """
 
-    DEFAULT_STRATEGY = AllocationStrategy.LIVENESS_BASED
+    DEFAULT_STRATEGY = AllocationStrategy.AGGRESSIVE_SPILL
 
     @property
     def name(self) -> str:
@@ -171,10 +171,12 @@ def _initialize_strategies() -> None:
     from nnc_py.passes.strategies.liveness_strategy import LivenessAllocationStrategy
     from nnc_py.passes.strategies.unified_strategy import UnifiedAllocationStrategy
     from nnc_py.passes.strategies.graph_coloring import GraphColoringStrategy
+    from nnc_py.passes.strategies.aggressive_spill_strategy import AggressiveSpillStrategy
 
     StrategyRegistry.register(LivenessAllocationStrategy)
     StrategyRegistry.register(UnifiedAllocationStrategy)
     StrategyRegistry.register(GraphColoringStrategy)
+    StrategyRegistry.register(AggressiveSpillStrategy)
 
 
 # Auto-initialize on import

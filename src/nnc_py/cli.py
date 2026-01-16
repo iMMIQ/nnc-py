@@ -58,8 +58,8 @@ def main():
 @click.option(
     "--memory-strategy",
     type=str,
-    default="liveness",
-    help="Memory allocation strategy: liveness (default), unified, "
+    default="aggressive_spill",
+    help="Memory allocation strategy: aggressive_spill (default), liveness, unified, "
          "graph_coloring[:heuristic]. Heuristics: welsh_powell, dsatur, "
          "largest_first, smallest_last. Example: graph_coloring:dsatur",
 )
