@@ -54,6 +54,7 @@ class ReloadPoint:
     to_buffer_id: int                     # Destination buffer ID
     to_fast_offset: int                   # Destination offset in fast memory
     size: int
+    reload_slot_id: int = -1              # Which reload slot to use in fast memory
 
 
 @dataclass
@@ -113,6 +114,35 @@ class MemoryAllocationPlan:
     def get_reload_points_before(self, node_idx: int) -> List[ReloadPoint]:
         """Get reload points before a specific node."""
         return [rp for rp in self.reload_points if rp.before_node_idx == node_idx]
+
+    @property
+    def spilled_tensors(self) -> Set[str]:
+        """Get set of spilled tensor names."""
+        return {
+            alloc.tensor_name
+            for alloc in self.tensor_allocations.values()
+            if alloc.is_spilled
+        }
+
+    def get_max_reload_slots(self) -> int:
+        """Get maximum number of concurrent reload slots needed.
+
+        This is the maximum number of inputs to any single node that
+        may be spilled and need to be reloaded.
+        """
+        from nnc_py.ir.context import CompileContext
+
+        # Group reload points by node
+        reloads_by_node: Dict[int, List[ReloadPoint]] = {}
+        for rp in self.reload_points:
+            reloads_by_node.setdefault(rp.before_node_idx, []).append(rp)
+
+        # Find the maximum concurrent reloads
+        max_slots = 0
+        for node_reloads in reloads_by_node.values():
+            max_slots = max(max_slots, len(node_reloads))
+
+        return max_slots
 
 
 class MemoryAllocationStrategy(ABC):

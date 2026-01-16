@@ -81,28 +81,38 @@ class PassManager:
         from nnc_py.passes.split_transform import SplitTransformPass
         from nnc_py.passes.spill import SpillAnalysisPass
 
-        passes = []
-
-        # O0: No optimization
+        # O0: Essential passes only (liveness + memory planning)
+        # These are needed for code generation even without optimization
         if opt_level == 0:
-            return passes
+            return [LivenessAnalysisPass(), MemoryPlanningPassV2()]
 
         # O1: Basic optimizations
-        if opt_level >= 1:
-            passes.append(ConstantFoldingPass())
+        if opt_level == 1:
+            return [
+                LivenessAnalysisPass(),
+                MemoryPlanningPassV2(),
+                ConstantFoldingPass(),
+            ]
 
-        # O2: Intermediate optimizations (with memory planning and operator splitting)
-        if opt_level >= 2:
-            passes.append(LivenessAnalysisPass())
-            # Operator splitting passes (before memory planning)
-            passes.append(SplitAnalysisPass())
-            passes.append(SplitTransformPass())
-            passes.append(MemoryPlanningPassV2())  # Use V2 for pluggable strategies
-            passes.append(SpillAnalysisPass())  # Handles overflow if max_memory set
+        # O2: Intermediate optimizations (with operator splitting)
+        if opt_level == 2:
+            return [
+                LivenessAnalysisPass(),
+                SplitAnalysisPass(),
+                SplitTransformPass(),
+                MemoryPlanningPassV2(),
+                SpillAnalysisPass(),  # Handles overflow if max_memory set
+            ]
 
         # O3: Advanced optimizations
         if opt_level >= 3:
             # TODO: Add advanced passes (operator fusion, etc.)
-            pass
+            return [
+                LivenessAnalysisPass(),
+                SplitAnalysisPass(),
+                SplitTransformPass(),
+                MemoryPlanningPassV2(),
+                SpillAnalysisPass(),
+            ]
 
-        return passes
+        return []

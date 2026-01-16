@@ -283,6 +283,8 @@ class GraphColoringAllocator(MemoryAllocationStrategy):
         Each color becomes one buffer. Tensors with the same color share
         that buffer (at different times, since they don't interfere).
 
+        Spilled tensors are NOT allocated in fast memory - they use slow memory.
+
         Args:
             ig: Interference graph with tensor sizes
             colors: Tensor -> color mapping (-1 for spilled)
@@ -291,24 +293,15 @@ class GraphColoringAllocator(MemoryAllocationStrategy):
         Returns:
             (buffers, tensor_allocations)
         """
-        # Group tensors by color
-        # For spilled tensors (color=-1), assign them to additional colors after K
+        # Group non-spilled tensors by color
         color_groups: Dict[int, List[str]] = {}
-        max_color = max([c for c in colors.values() if c >= 0], default=-1)
 
         for tensor, color in colors.items():
-            if color >= 0:
+            # Only allocate non-spilled tensors in fast memory
+            if color >= 0 and tensor not in spilled:
                 color_groups.setdefault(color, []).append(tensor)
-            else:
-                # Spilled tensors get their own colors (buffer positions)
-                # Assign sequentially after max_color
-                spill_color = max_color + 1 + list(spilled).index(tensor) if tensor in spilled else -1
-                if spill_color >= 0:
-                    color_groups[spill_color] = [tensor]
-                    # Update color for this tensor so we can track it
-                    colors[tensor] = spill_color
 
-        # Create buffers
+        # Create fast memory buffers
         buffers: List[MemoryBuffer] = []
         tensor_allocations: Dict[str, TensorAllocation] = {}
         current_offset = 0
@@ -333,16 +326,28 @@ class GraphColoringAllocator(MemoryAllocationStrategy):
             buffers.append(buffer)
 
             for tensor in tensors:
-                is_spilled = tensor in spilled
                 tensor_allocations[tensor] = TensorAllocation(
                     tensor_name=tensor,
                     buffer_id=len(buffers) - 1,
-                    offset=current_offset,
+                    offset=0,  # Offset within buffer is 0 (tensors share buffer)
                     size=ig['tensor_sizes'].get(tensor, 0),
-                    is_spilled=is_spilled,
+                    is_spilled=False,
                 )
 
             current_offset += buffer_size
+
+        # Create allocations for spilled tensors (in slow memory, buffer_id=-1)
+        slow_offset = 0
+        for tensor in spilled:
+            size = ig['tensor_sizes'].get(tensor, 0)
+            tensor_allocations[tensor] = TensorAllocation(
+                tensor_name=tensor,
+                buffer_id=-1,  # Slow memory
+                offset=slow_offset,
+                size=size,
+                is_spilled=True,
+            )
+            slow_offset += size
 
         return buffers, tensor_allocations
 
@@ -404,6 +409,51 @@ class GraphColoringAllocator(MemoryAllocationStrategy):
                         to_buffer_id=-1,  # Will get temp buffer
                         to_fast_offset=0,  # Will get temp offset
                         size=alloc.size,
+                        reload_slot_id=-1,  # Will be assigned later
                     ))
 
+        # Assign reload slot IDs to each reload point
+        # Reloads at the same node need different slots if they're for different tensors
+        reload_points = self._assign_reload_slots(reload_points)
+
         return spill_points, reload_points
+
+    def _assign_reload_slots(
+        self,
+        reload_points: List[ReloadPoint],
+    ) -> List[ReloadPoint]:
+        """Assign reload slot IDs to reload points.
+
+        For each node, assigns unique slot IDs to concurrent reloads.
+        Slot IDs are per-node (0, 1, 2, ...) to allow temp buffer allocation.
+
+        Args:
+            reload_points: List of reload points
+
+        Returns:
+            List of reload points with slot IDs assigned
+        """
+        # Group reloads by node
+        reloads_by_node: Dict[int, List[ReloadPoint]] = {}
+        for rp in reload_points:
+            reloads_by_node.setdefault(rp.before_node_idx, []).append(rp)
+
+        # Assign slot IDs within each node
+        result = []
+        for rp in reload_points:
+            node_reloads = reloads_by_node[rp.before_node_idx]
+            # Find the index of this reload point in the node's reload list
+            slot_id = node_reloads.index(rp)
+            # Create a new ReloadPoint with the slot_id assigned
+            result.append(ReloadPoint(
+                tensor_name=rp.tensor_name,
+                before_node=rp.before_node,
+                before_node_idx=rp.before_node_idx,
+                from_slow_offset=rp.from_slow_offset,
+                to_buffer_id=rp.to_buffer_id,
+                to_fast_offset=rp.to_fast_offset,
+                size=rp.size,
+                reload_slot_id=slot_id,
+            ))
+
+        return result

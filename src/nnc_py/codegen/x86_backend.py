@@ -52,12 +52,16 @@ class X86Backend(BackendBase):
     def _generate_source(self, ctx: CompileContext) -> str:
         """Generate main source file with spill/reload support."""
         from nnc_py.codegen.c_emitter import CEmitter
+        from nnc_py.passes.memory_planning import get_memory_allocation_plan
         from nnc_py.passes.spill import get_spill_plan
         from nnc_py.passes.unified_memory import get_unified_memory_plan
 
-        # Check for unified memory plan first
+        # Check for new MemoryAllocationPlan first
+        alloc_plan = get_memory_allocation_plan(ctx)
+
+        # Check for unified memory plan (legacy)
         unified_plan = None
-        if "unified_memory_plan" in ctx.metadata:
+        if alloc_plan is None and "unified_memory_plan" in ctx.metadata:
             try:
                 unified_plan = get_unified_memory_plan(ctx)
             except RuntimeError:
@@ -67,8 +71,11 @@ class X86Backend(BackendBase):
         spill_plan = get_spill_plan(ctx)
 
         # Determine which plan to use
-        if unified_plan is not None and unified_plan.has_spill:
-            # Use new unified memory plan
+        if alloc_plan is not None and alloc_plan.has_spill:
+            # Use new MemoryAllocationPlan with reload code generation
+            return self._generate_source_with_unified_spill(ctx, alloc_plan)
+        elif unified_plan is not None and unified_plan.has_spill:
+            # Use legacy unified memory plan
             return self._generate_source_with_unified_spill(ctx, unified_plan)
         elif spill_plan is not None and spill_plan.has_overflow:
             # Use legacy spill plan
@@ -224,7 +231,14 @@ class X86Backend(BackendBase):
         return "\n".join(output)
 
     def _generate_source_with_unified_spill(self, ctx: CompileContext, plan) -> str:
-        """Generate source file with spill/reload wrapper functions using UnifiedMemoryPlan."""
+        """Generate source file with spill/reload wrapper functions using UnifiedMemoryPlan.
+
+        The key requirement: ALL operators must execute with inputs/outputs in fast memory.
+        When tensors are spilled to slow memory, they must be:
+        1. Reloaded to fast memory before operator execution
+        2. Used via temp Tensor structs pointing to fast memory
+        3. Spilled back to slow memory after operator execution
+        """
         from nnc_py.codegen.c_emitter import CEmitter
 
         lines = [
@@ -240,16 +254,78 @@ class X86Backend(BackendBase):
             "extern uint8_t _nnc_fast_pool[];",
             "extern uint8_t _nnc_slow_pool[];",
             "",
-            "/* Forward declarations for spill/reload functions */",
         ]
 
-        # Generate forward declarations for node functions
+        # Calculate reload buffer requirements
+        # Need buffers for:
+        # 1. Inputs to reload
+        # 2. Outputs that are spilled (need temp buffers in fast memory)
+        max_reload_slots = plan.get_max_reload_slots()
+
+        # Count max total buffers needed at any node (inputs + spilled outputs)
+        nodes = ctx.graph.topological_sort()
+        max_total_slots = 0
+        for node in nodes:
+            if node.op_type == OpType.CONSTANT:
+                continue
+            node_idx = next(i for i, n in enumerate(nodes) if n == node)
+
+            # Count inputs that need reload
+            reloads_before = plan.get_reload_points_before(node_idx)
+            input_slots = len(reloads_before)
+
+            # Count outputs that are spilled (need temp buffers)
+            output_slots = sum(
+                1 for o in node.outputs
+                if plan.tensor_allocations.get(o) and plan.tensor_allocations.get(o).is_spilled
+            )
+
+            max_total_slots = max(max_total_slots, input_slots + output_slots)
+
+        # Use the larger of the two calculations
+        max_reload_slots = max(max_reload_slots, max_total_slots)
+
+        spilled_tensors = plan.spilled_tensors
+
+        # Get max tensor size for reload buffer sizing
+        max_tensor_size = 0
+        for tensor_name, alloc in plan.tensor_allocations.items():
+            if alloc.is_spilled:
+                max_tensor_size = max(max_tensor_size, alloc.size)
+
+        # If no spilled tensors, fall back to standard emitter
+        if not spilled_tensors:
+            emitter = CEmitter()
+            return emitter.emit(ctx)
+
+        # Generate reload buffers in fast memory
+        if max_reload_slots > 0 and max_tensor_size > 0:
+            lines.append("/* Reload buffers in fast memory for spilled tensors */")
+            lines.append(f"/* Max reload slots: {max_reload_slots}, Slot size: {max_tensor_size} */")
+            for i in range(max_reload_slots):
+                lines.append(f"static uint8_t _nnc_reload_buffer_{i}[{max_tensor_size}];")
+            lines.append("")
+
+        # Generate forward declarations for node functions (only for those without spill/reload)
         nodes = ctx.graph.topological_sort()
         for node in nodes:
             if node.op_type == OpType.CONSTANT:
                 continue
+
             func_name = ctx.node_symbols.get(node.name, node.name)
-            lines.append(f"static void {func_name}_body(void);")
+            node_idx = next(i for i, n in enumerate(nodes) if n == node)
+
+            # Check if this node needs spill/reload
+            has_spill = len(plan.get_spill_points_after(node_idx)) > 0
+            has_reload = len(plan.get_reload_points_before(node_idx)) > 0
+            has_spilled_output = any(
+                plan.tensor_allocations.get(o) and plan.tensor_allocations.get(o).is_spilled
+                for o in node.outputs
+            )
+
+            # Only declare _body if no spill/reload needed
+            if not has_spill and not has_reload and not has_spilled_output:
+                lines.append(f"static void {func_name}_body(void);")
 
         lines.append("")
         lines.append("/* Spill/Reload wrapper functions */")
@@ -268,47 +344,188 @@ class X86Backend(BackendBase):
             # Collect reloads before this node
             reloads_before = plan.get_reload_points_before(node_idx)
 
+            # Determine which inputs need reload (have reload points before this node)
+            inputs_need_reload = {rp.tensor_name: rp for rp in reloads_before}
+
+            # Also check if any input tensors are spilled (allocated in slow memory)
+            # This handles model inputs that happen to be in slow memory
+            additional_inputs = []
+            for input_name in node.inputs:
+                if input_name in inputs_need_reload:
+                    continue  # Already has a reload point
+                alloc = plan.tensor_allocations.get(input_name)
+                if alloc and alloc.is_spilled:
+                    # Input is spilled but no reload point - create a synthetic one
+                    from nnc_py.passes.memory_strategy import ReloadPoint
+                    additional_inputs.append((input_name, alloc))
+                    inputs_need_reload[input_name] = ReloadPoint(
+                        tensor_name=input_name,
+                        before_node=node.name,
+                        before_node_idx=node_idx,
+                        from_slow_offset=alloc.offset,
+                        to_buffer_id=alloc.buffer_id,
+                        to_fast_offset=0,
+                        size=alloc.size,
+                        reload_slot_id=-1,  # Will assign below
+                    )
+
+            # Assign slot IDs to synthetic reload points
+            current_slot = max([rp.reload_slot_id for rp in inputs_need_reload.values()], default=-1) + 1
+            for input_name, _ in additional_inputs:
+                inputs_need_reload[input_name].reload_slot_id = current_slot
+                current_slot += 1
+
+            # Determine which outputs need temp tensors
+            # An output needs a temp tensor if:
+            # 1. It's spilled (allocated in slow memory), OR
+            # 2. There's a spill point after this node for it
+            outputs_need_temp = {}
+            for output_name in node.outputs:
+                alloc = plan.tensor_allocations.get(output_name)
+                if alloc and alloc.is_spilled:
+                    # Output lives in slow memory - need temp tensor
+                    # Find the spill point for this output
+                    sp = next((s for s in spills_after if s.tensor_name == output_name), None)
+                    if sp:
+                        outputs_need_temp[output_name] = sp
+                    else:
+                        # Create a synthetic spill point for temp allocation
+                        from nnc_py.passes.memory_strategy import SpillPoint
+                        outputs_need_temp[output_name] = SpillPoint(
+                            tensor_name=output_name,
+                            after_node=node.name,
+                            after_node_idx=node_idx,
+                            from_buffer_id=alloc.buffer_id,
+                            from_fast_offset=0,
+                            to_slow_offset=alloc.offset,
+                            size=alloc.size,
+                        )
+
             lines.append(f"/* {func_name}: {node.op_type.value} */")
             lines.append(f"static void {func_name}(void) {{")
 
-            # Reload before node
-            for reload in reloads_before:
-                lines.extend([
-                    f"    /* Reload {reload.tensor_name} from slow memory */",
-                    f"    memcpy(",
-                    f"        _nnc_fast_pool + {reload.to_fast_offset},",
-                    f"        _nnc_slow_pool + {reload.from_slow_offset},",
-                    f"        {reload.size}",
-                    f"    );",
-                    "",
-                ])
+            # Declare temp tensors for spilled inputs
+            temp_tensor_decls = []
+            for input_name in node.inputs:
+                if input_name in inputs_need_reload:
+                    rp = inputs_need_reload[input_name]
+                    temp_name = f"temp_{ctx.tensor_symbols.get(input_name, input_name)}"
+                    slot_id = rp.reload_slot_id
+                    temp_tensor_decls.append((temp_name, slot_id, input_name, rp.size, 'input'))
 
-            # Call the body
-            lines.append(f"    {func_name}_body();")
+            # Declare temp tensors for spilled outputs
+            output_slot_idx = len(inputs_need_reload)
+            for output_name in node.outputs:
+                if output_name in outputs_need_temp:
+                    sp = outputs_need_temp[output_name]
+                    temp_name = f"temp_{ctx.tensor_symbols.get(output_name, output_name)}"
+                    slot_id = output_slot_idx
+                    temp_tensor_decls.append((temp_name, slot_id, output_name, sp.size, 'output'))
+                    output_slot_idx += 1
 
-            # Spill after node
-            for spill in spills_after:
-                lines.extend([
-                    "",
-                    f"    /* Spill {spill.tensor_name} to slow memory */",
-                    f"    memcpy(",
-                    f"        _nnc_slow_pool + {spill.to_slow_offset},",
-                    f"        _nnc_fast_pool + {spill.from_fast_offset},",
-                    f"        {spill.size}",
-                    f"    );",
-                ])
+            # Generate temp tensor declarations
+            if temp_tensor_decls:
+                lines.append("    /* Temp tensors pointing to fast memory */")
+                for temp_name, slot_id, orig_name, size, _ in temp_tensor_decls:
+                    lines.append(f"    static Tensor {temp_name};")
+
+            # Reload spilled inputs to fast memory
+            for input_name in node.inputs:
+                if input_name in inputs_need_reload:
+                    rp = inputs_need_reload[input_name]
+                    temp_name = f"temp_{ctx.tensor_symbols.get(input_name, input_name)}"
+                    var_name = ctx.tensor_symbols.get(input_name, input_name)
+                    lines.extend([
+                        f"    /* Reload {input_name} from slow to fast memory */",
+                        f"    memcpy(_nnc_reload_buffer_{rp.reload_slot_id},",
+                        f"           _nnc_slow_pool + {rp.from_slow_offset}, {rp.size});",
+                        f"    {temp_name}.data = _nnc_reload_buffer_{rp.reload_slot_id};",
+                        f"    {temp_name}.dtype = {var_name}.dtype;",
+                        f"    {temp_name}.shape = {var_name}.shape;",
+                        f"    {temp_name}.ndim = {var_name}.ndim;",
+                        f"    {temp_name}.nbytes = {rp.size};",
+                        "",
+                    ])
+
+            # Setup temp outputs
+            output_slot_idx = len(inputs_need_reload)
+            for output_name in node.outputs:
+                if output_name in outputs_need_temp:
+                    sp = outputs_need_temp[output_name]
+                    temp_name = f"temp_{ctx.tensor_symbols.get(output_name, output_name)}"
+                    var_name = ctx.tensor_symbols.get(output_name, output_name)
+                    # Get the slot_id from temp_tensor_decls
+                    slot_id = next((s for tn, s, _, _, _ in temp_tensor_decls if tn == temp_name), output_slot_idx)
+                    lines.extend([
+                        f"    /* Setup temp output for {output_name} */",
+                        f"    {temp_name}.data = _nnc_reload_buffer_{slot_id};",
+                        f"    {temp_name}.dtype = {var_name}.dtype;",
+                        f"    {temp_name}.shape = {var_name}.shape;",
+                        f"    {temp_name}.ndim = {var_name}.ndim;",
+                        f"    {temp_name}.nbytes = {sp.size};",
+                        "",
+                    ])
+
+            # Generate operator call with potentially swapped arguments
+            lines.append("    /* Execute operator in fast memory */")
+            op_call = self._generate_operator_call_with_temps(
+                ctx, node, inputs_need_reload, outputs_need_temp
+            )
+            lines.append(f"    {op_call}")
+
+            # Spill outputs back to slow memory
+            output_slot_idx = len(inputs_need_reload)
+            for output_name in node.outputs:
+                if output_name in outputs_need_temp:
+                    sp = outputs_need_temp[output_name]
+                    temp_name = f"temp_{ctx.tensor_symbols.get(output_name, output_name)}"
+                    # Get the slot_id from temp_tensor_decls
+                    slot_id = next((s for tn, s, _, _, _ in temp_tensor_decls if tn == temp_name), output_slot_idx)
+                    lines.extend([
+                        "",
+                        f"    /* Spill {output_name} from fast to slow memory */",
+                        f"    memcpy(_nnc_slow_pool + {sp.to_slow_offset},",
+                        f"           _nnc_reload_buffer_{slot_id}, {sp.size});",
+                    ])
 
             lines.append("}")
             lines.append("")
 
-        lines.append("/* Node body functions */")
+        # Generate body functions for nodes without spill/reload
+        lines.append("/* Node body functions (no spill/reload needed) */")
 
-        # Generate body functions (using standard emitter)
-        emitter = CEmitter()
-        body_code = emitter.emit(ctx)
+        # Generate operator calls for all nodes (for reference)
+        # We generate simplified versions that don't need spill/reload
+        for node in nodes:
+            if node.op_type == OpType.CONSTANT:
+                continue
 
-        # Process the body code
-        lines.append(self._process_body_code(body_code, ctx))
+            func_name = ctx.node_symbols.get(node.name, node.name)
+            node_idx = next(i for i, n in enumerate(nodes) if n == node)
+
+            # Check if this node needs spill/reload
+            # A node needs spill/reload wrapper if:
+            # 1. It has reload points before it (inputs to reload), OR
+            # 2. Any of its outputs are spilled (live in slow memory)
+            has_spill = len(plan.get_spill_points_after(node_idx)) > 0
+            has_reload = len(plan.get_reload_points_before(node_idx)) > 0
+            has_spilled_output = any(
+                plan.tensor_allocations.get(o) and plan.tensor_allocations.get(o).is_spilled
+                for o in node.outputs
+            )
+
+            if not has_spill and not has_reload and not has_spilled_output:
+                # No spill/reload needed, generate standard operator call
+                lines.append(f"/* {func_name}: {node.op_type.value} */")
+                lines.append(f"static void {func_name}_body(void) {{")
+                op_call = self._generate_operator_call(ctx, node, use_temps=False)
+                lines.append(f"    {op_call}")
+                lines.append("}")
+                lines.append("")
+            else:
+                # Has spill/reload, don't generate _body function
+                # The wrapper handles everything
+                pass
 
         # Generate main entry point
         lines.append("")
@@ -324,6 +541,129 @@ class X86Backend(BackendBase):
         lines.append("}")
 
         return "\n".join(lines)
+
+    def _generate_operator_call_with_temps(
+        self,
+        ctx: CompileContext,
+        node: "Node",
+        inputs_need_reload: dict,
+        outputs_need_temp: dict,
+    ) -> str:
+        """Generate operator call using temp tensors for spilled inputs/outputs.
+
+        Args:
+            ctx: Compilation context
+            node: Node to generate call for
+            inputs_need_reload: Map of input_name -> ReloadPoint
+            outputs_need_temp: Map of output_name -> SpillPoint (for spilled outputs)
+
+        Returns:
+            C code line for the operator call
+        """
+        op_name = f"nnc_{node.op_type.value.lower()}"
+        args = []
+
+        # Input tensors
+        for input_name in node.inputs:
+            var_name = ctx.tensor_symbols.get(input_name, input_name)
+            if input_name in inputs_need_reload:
+                # Use temp tensor
+                temp_name = f"temp_{var_name}"
+                args.append(f"&{temp_name}")
+            else:
+                # Use original tensor
+                args.append(f"&{var_name}")
+
+        # Output tensors
+        for output_name in node.outputs:
+            var_name = ctx.tensor_symbols.get(output_name, output_name)
+            if output_name in outputs_need_temp:
+                # Use temp tensor
+                temp_name = f"temp_{var_name}"
+                args.append(f"&{temp_name}")
+            else:
+                # Use original tensor
+                args.append(f"&{var_name}")
+
+        # Add operation-specific attributes
+        if node.op_type == OpType.CONV2D:
+            kernel_shape = node.attrs.get("kernel_shape", [1, 1])
+            strides = node.attrs.get("strides", [1, 1])
+            pads = node.attrs.get("pads", [0, 0])
+            args.extend([str(kernel_shape[0]), str(kernel_shape[1])])
+            args.extend([str(strides[0]), str(strides[1])])
+            if len(pads) == 4:
+                args.append(str(pads[0]))
+                args.append(str(pads[1]))
+            elif len(pads) == 2:
+                args.extend([str(pads[0]), str(pads[1])])
+            else:
+                args.extend(["0", "0"])
+        elif node.op_type == OpType.LAYER_NORM:
+            axis = node.attrs.get("axis", -1)
+            epsilon = node.attrs.get("epsilon", 1e-5)
+            args.append(f"{axis}")
+            args.append(f"{epsilon}f")
+        elif node.op_type == OpType.REDUCE_MEAN:
+            axis = node.attrs.get("axis", None)
+            keepdims = node.attrs.get("keepdims", 1)
+            if axis is not None:
+                args.append(str(axis))
+                args.append(str(keepdims))
+
+        return f"{op_name}({', '.join(args)});"
+
+    def _generate_operator_call(self, ctx: CompileContext, node: "Node", use_temps: bool = False) -> str:
+        """Generate operator call (for non-spill nodes).
+
+        Args:
+            ctx: Compilation context
+            node: Node to generate call for
+            use_temps: Whether to use temp tensors (not used here, for compatibility)
+
+        Returns:
+            C code line for the operator call
+        """
+        op_name = f"nnc_{node.op_type.value.lower()}"
+        args = []
+
+        # Input tensors
+        for input_name in node.inputs:
+            var_name = ctx.tensor_symbols.get(input_name, input_name)
+            args.append(f"&{var_name}")
+
+        # Output tensors
+        for output_name in node.outputs:
+            var_name = ctx.tensor_symbols.get(output_name, output_name)
+            args.append(f"&{var_name}")
+
+        # Add operation-specific attributes
+        if node.op_type == OpType.CONV2D:
+            kernel_shape = node.attrs.get("kernel_shape", [1, 1])
+            strides = node.attrs.get("strides", [1, 1])
+            pads = node.attrs.get("pads", [0, 0])
+            args.extend([str(kernel_shape[0]), str(kernel_shape[1])])
+            args.extend([str(strides[0]), str(strides[1])])
+            if len(pads) == 4:
+                args.append(str(pads[0]))
+                args.append(str(pads[1]))
+            elif len(pads) == 2:
+                args.extend([str(pads[0]), str(pads[1])])
+            else:
+                args.extend(["0", "0"])
+        elif node.op_type == OpType.LAYER_NORM:
+            axis = node.attrs.get("axis", -1)
+            epsilon = node.attrs.get("epsilon", 1e-5)
+            args.append(f"{axis}")
+            args.append(f"{epsilon}f")
+        elif node.op_type == OpType.REDUCE_MEAN:
+            axis = node.attrs.get("axis", None)
+            keepdims = node.attrs.get("keepdims", 1)
+            if axis is not None:
+                args.append(str(axis))
+                args.append(str(keepdims))
+
+        return f"{op_name}({', '.join(args)});"
 
     def _generate_header(self, ctx: CompileContext) -> str:
         """Generate header file."""
@@ -516,7 +856,11 @@ run: model
             "",
         ]
 
-        # Check for unified memory plan first
+        # Check for new memory allocation plan
+        from nnc_py.passes.memory_planning import get_memory_allocation_plan
+        alloc_plan = get_memory_allocation_plan(ctx)
+
+        # Check for unified memory plan (legacy)
         from nnc_py.passes.unified_memory import get_unified_memory_plan
         unified_plan = None
         if "unified_memory_plan" in ctx.metadata:
@@ -525,115 +869,79 @@ run: model
             except RuntimeError:
                 pass
 
+        # Determine if we have spill
+        has_spill = alloc_plan is not None and alloc_plan.has_spill
+        if not has_spill and unified_plan is not None:
+            has_spill = unified_plan.has_spill
+
+        # Also check if any tensors are allocated in slow memory
+        has_slow_memory_tensors = False
+        if alloc_plan is not None:
+            has_slow_memory_tensors = any(
+                alloc.is_spilled for alloc in alloc_plan.tensor_allocations.values()
+            )
+        elif unified_plan is not None:
+            has_slow_memory_tensors = any(
+                alloc.in_slow_memory for alloc in unified_plan.tensor_allocations.values()
+            )
+
+        # Generate slow pool if we have spill points OR slow memory tensors
+        needs_slow_pool = has_spill or has_slow_memory_tensors
+
         # Check if memory planning was performed
-        has_memory_plan = unified_plan is not None or "memory_plan" in ctx.metadata
+        has_memory_plan = alloc_plan is not None or unified_plan is not None or "memory_plan" in ctx.metadata
 
         if has_memory_plan:
             # Generate static memory pool(s)
             lines.extend(self._generate_memory_pool(ctx))
             lines.append("")
 
-        # Determine which pool name to use and get offsets
-        from nnc_py.passes.spill import get_spill_plan
-        spill_plan = get_spill_plan(ctx)
-        has_spill = (spill_plan is not None and spill_plan.has_overflow) or \
-                   (unified_plan is not None and unified_plan.has_spill)
-        pool_name = "_nnc_fast_pool" if has_spill else "_nnc_memory_pool"
+        # Determine which pool names to use
+        if has_spill:
+            fast_pool_name = "_nnc_fast_pool"
+            slow_pool_name = "_nnc_slow_pool"
+        else:
+            fast_pool_name = "_nnc_memory_pool"
+            slow_pool_name = None
 
-        # Get tensor offsets
-        if unified_plan is not None:
+        # Get tensor offsets from allocation plan
+        tensor_offsets = {}
+        spilled_tensors = set()
+
+        if alloc_plan is not None:
+            # Use new MemoryAllocationPlan
+            for tensor_name, alloc in alloc_plan.tensor_allocations.items():
+                if alloc.is_spilled:
+                    # Spilled tensors go to slow memory
+                    tensor_offsets[tensor_name] = ("slow", alloc.offset)
+                    spilled_tensors.add(tensor_name)
+                else:
+                    # Non-spilled tensors go to fast memory
+                    # Use buffer.offset as the pool offset
+                    buffer = alloc_plan.buffers[alloc.buffer_id] if 0 <= alloc.buffer_id < len(alloc_plan.buffers) else None
+                    if buffer:
+                        tensor_offsets[tensor_name] = ("fast", buffer.offset)
+                    else:
+                        tensor_offsets[tensor_name] = ("fast", alloc.offset)
+        elif unified_plan is not None:
             # Use unified memory plan for offsets
-            tensor_offsets = {}
             for buf in unified_plan.buffers:
                 for tensor_name in buf.tensors:
-                    tensor_offsets[tensor_name] = buf.offset
+                    tensor_offsets[tensor_name] = ("fast", buf.offset)
         elif "memory_plan" in ctx.metadata:
             # Use legacy memory plan
             from nnc_py.passes.memory_plan import get_memory_plan
+            from nnc_py.passes.spill import get_spill_plan
             plan = get_memory_plan(ctx)
+            spill_plan = get_spill_plan(ctx)
 
-            # When spill occurs, we need to recalculate memory layout
-            fast_tensor_offsets = {}  # tensor_name -> offset in fast pool
+            if spill_plan is not None and spill_plan.has_overflow:
+                # Has spill from legacy plan
+                spilled_tensors = set(spill_plan.spilled_tensors)
 
-            if has_spill and spill_plan is not None:
-                # Try to use pre-calculated offsets from spill plan
-                if hasattr(spill_plan, 'fast_tensor_offsets') and spill_plan.fast_tensor_offsets:
-                    # Use offsets calculated by SpillAnalysisPass
-                    fast_tensor_offsets = spill_plan.fast_tensor_offsets
-                else:
-                    # Recalculate with lifetime-aware memory reuse
-                    # This allows tensors with non-overlapping lifetimes to share memory
-                    max_memory = ctx.metadata.get("max_memory", float("inf"))
-
-                    # Get liveness information
-                    liveness_map = ctx.metadata.get("tensor_liveness", {})
-
-                    # Build interval map: tensor -> (live_start, live_end)
-                    intervals = {}
-                    for tensor_name, info in plan.tensor_info.items():
-                        if tensor_name in liveness_map:
-                            liv = liveness_map[tensor_name]
-                            intervals[tensor_name] = (liv.live_start, liv.live_end)
-                        else:
-                            intervals[tensor_name] = (0, float("inf"))
-
-                    # Assign offsets using first-fit with lifetime checking
-                    # Track each allocation: (offset, size, live_start, live_end, tensor_name)
-                    allocations = []
-                    alignment = 16
-
-                    # Process tensors in order of their live_start to avoid ordering issues
-                    # Large tensors first within each live_start group to avoid fragmentation
-                    tensor_list = [
-                        (name, mem_info, intervals.get(name, (0, float("inf"))))
-                        for name, mem_info in plan.tensor_info.items()
-                    ]
-                    # Sort by live_start, then by size (descending), then by name
-                    tensor_list.sort(key=lambda x: (x[2][0], -x[1].size, x[0]))
-
-                    for tensor_name, mem_info, (live_start, live_end) in tensor_list:
-                        size = mem_info.size
-
-                        # Find first non-overlapping position
-                        offset = 0
-                        while True:
-                            # Check if this position conflicts with any existing allocation
-                            conflict = False
-                            for alloc_offset, alloc_size, alloc_start, alloc_end, _ in allocations:
-                                # Check memory overlap
-                                if offset < alloc_offset + alloc_size and offset + size > alloc_offset:
-                                    # Check lifetime overlap
-                                    if not (live_end <= alloc_start or live_start >= alloc_end):
-                                        conflict = True
-                                        break
-
-                            if not conflict and offset + size <= max_memory:
-                                break
-
-                            # Try next aligned position
-                            offset = ((offset + alignment - 1) // alignment) * alignment
-                            offset += ((size + alignment - 1) // alignment) * alignment
-
-                            if offset >= max_memory:
-                                raise RuntimeError(
-                                    f"Cannot fit tensor {tensor_name} (size={size}) "
-                                    f"in fast memory (limit={max_memory}). "
-                                    f"This tensor overlaps with {len(allocations)} other tensors that need "
-                                    f"to be alive simultaneously. "
-                                    f"Consider increasing max_memory or restructuring the model."
-                                )
-
-                        allocations.append((offset, size, live_start, live_end, tensor_name))
-                        fast_tensor_offsets[tensor_name] = offset
-
-                tensor_offsets = fast_tensor_offsets
-            else:
-                tensor_offsets = {
-                    name: info.pool_offset
-                    for name, info in plan.tensor_info.items()
-                }
-        else:
-            tensor_offsets = {}
+            for tensor_name, mem_info in plan.tensor_info.items():
+                pool_type = "slow" if tensor_name in spilled_tensors else "fast"
+                tensor_offsets[tensor_name] = (pool_type, mem_info.pool_offset)
 
         # Define all non-constant tensors
         for tensor_name, tensor in ctx.graph.tensors.items():
@@ -649,8 +957,12 @@ run: model
 
             # Get memory info if available
             if tensor_name in tensor_offsets:
-                offset = tensor_offsets[tensor_name]
-                data_init = f"{pool_name} + {offset}"
+                pool_type, offset = tensor_offsets[tensor_name]
+                if pool_type == "slow":
+                    pool_to_use = slow_pool_name
+                else:
+                    pool_to_use = fast_pool_name
+                data_init = f"{pool_to_use} + {offset}" if pool_to_use else "NULL"
             else:
                 # Tensor not in memory plan (e.g., constant)
                 data_init = "NULL"
@@ -671,11 +983,36 @@ run: model
 
     def _generate_memory_pool(self, ctx: CompileContext) -> List[str]:
         """Generate static memory pool declaration."""
+        from nnc_py.passes.memory_planning import get_memory_allocation_plan
         from nnc_py.passes.memory_plan import get_memory_plan
         from nnc_py.passes.spill import get_spill_plan
         from nnc_py.passes.unified_memory import get_unified_memory_plan
 
-        # Check for unified memory plan first
+        # Check for new memory allocation plan first
+        alloc_plan = get_memory_allocation_plan(ctx)
+
+        if alloc_plan is not None and (alloc_plan.has_spill or any(alloc.is_spilled for alloc in alloc_plan.tensor_allocations.values())):
+            # Generate dual memory pools using new MemoryAllocationPlan
+            return [
+                "/* Dual Memory Pools (Fast + Slow for spilled tensors) */",
+                f"/* Fast memory: {alloc_plan.total_fast_memory} bytes ({alloc_plan.total_fast_memory / 1024:.2f} KB) */",
+                f"/* Slow memory: {alloc_plan.total_slow_memory} bytes ({alloc_plan.total_slow_memory / 1024:.2f} KB) */",
+                f"/* Buffers: {alloc_plan.num_buffers}, Spill points: {alloc_plan.spill_count}, Reload points: {alloc_plan.reload_count} */",
+                "",
+                f"/* Fast Memory Pool (SRAM/On-chip) */",
+                f"#define NNC_FAST_MEMORY_SIZE {alloc_plan.total_fast_memory}",
+                f"#define NNC_MEMORY_ALIGNMENT 16",
+                f"static uint8_t _nnc_fast_pool[NNC_FAST_MEMORY_SIZE] "
+                f"__attribute__((aligned(NNC_MEMORY_ALIGNMENT))) = {{0}};",
+                "",
+                f"/* Slow Memory Pool (DRAM/External) */",
+                f"#define NNC_SLOW_MEMORY_SIZE {alloc_plan.total_slow_memory}",
+                f"uint8_t _nnc_slow_pool[NNC_SLOW_MEMORY_SIZE] "
+                f"__attribute__((aligned(NNC_MEMORY_ALIGNMENT))) = {{0}};",
+                "",
+            ]
+
+        # Check for unified memory plan (legacy)
         unified_plan = None
         if "unified_memory_plan" in ctx.metadata:
             try:
@@ -733,6 +1070,7 @@ run: model
                 f"__attribute__((aligned(NNC_MEMORY_ALIGNMENT))) = {{0}};",
                 "",
             ]
+            return lines
         else:
             # Single memory pool (no overflow)
             lines = [
@@ -745,27 +1083,7 @@ run: model
                 f"__attribute__((aligned(NNC_MEMORY_ALIGNMENT))) = {{0}};",
                 "",
             ]
-
-        # Optional: generate memory layout descriptor for debugging
-        if ctx.debug:
-            lines.append("/* Memory Layout (for debugging) */")
-            lines.append("typedef struct {")
-            lines.append("    const char* name;")
-            lines.append("    size_t offset;")
-            lines.append("    size_t size;")
-            lines.append("} TensorMemoryLayout;")
-            lines.append("")
-            lines.append("static const TensorMemoryLayout _nnc_memory_layout[] = {")
-
-            for tensor_name in sorted(plan.tensor_info.keys(), key=lambda n: plan.tensor_info[n].pool_offset):
-                mem_info = plan.tensor_info[tensor_name]
-                lines.append(f"    {{\"{tensor_name}\", {mem_info.pool_offset}, {mem_info.size}}},")
-
-            lines.append("    {NULL, 0, 0}  /* Sentinel */")
-            lines.append("};")
-            lines.append("")
-
-        return lines
+            return lines
 
     def _map_dtype_to_enum(self, dtype: "DataType") -> str:
         """Map IR dtype to NNC dtype enum."""

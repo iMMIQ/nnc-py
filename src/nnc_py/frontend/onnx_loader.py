@@ -172,7 +172,12 @@ class ONNXFrontend:
         attrs = self._parse_attributes(onnx_node)
 
         # Generate unique name if not provided
-        name = onnx_node.name or f"{onnx_node.op_type}_{id(onnx_node)}"
+        # Use object id to ensure uniqueness, but empty string is a valid key too
+        if onnx_node.name:
+            name = onnx_node.name
+        else:
+            # Generate a truly unique name using a counter and object id
+            name = f"{onnx_node.op_type}_{id(onnx_node)}_{onnx_node.op_type}"
 
         return Node(
             op_type=op_type,

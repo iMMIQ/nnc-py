@@ -146,7 +146,7 @@ class Compiler:
             self.console.print(f"  Memory strategy: {strategy}")
 
         # Stage 3: Run optimization passes
-        if self.opt_level > 0 and self.pass_manager.passes:
+        if self.pass_manager.passes:
             with self.console.status(
                 "[bold yellow]Running optimization passes..."
             ):
@@ -155,7 +155,7 @@ class Compiler:
                     f"✓ Applied {len(self.pass_manager.applied_passes)} passes"
                 )
         else:
-            self.console.print("ℹ Skipping optimization passes (O0)")
+            self.console.print("ℹ No passes registered")
 
         # Stage 4: Code generation
         with self.console.status("[bold blue]Generating C code..."):

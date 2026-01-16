@@ -97,8 +97,15 @@ class MemoryPlanningPassV2(PassBase):
 
         legacy_tensor_info = {}
         for tensor_name, alloc in plan.tensor_allocations.items():
+            # Spilled tensors have buffer_id=-1, skip them for fast memory pool
+            if alloc.buffer_id < 0:
+                continue
+
             buffer = plan.buffers[alloc.buffer_id] if 0 <= alloc.buffer_id < len(plan.buffers) else None
             if buffer:
+                # pool_offset is the absolute offset from memory pool start
+                # = buffer.offset (where this buffer starts)
+                # Note: alloc.offset is 0 for non-spilled tensors (they share the buffer)
                 legacy_tensor_info[tensor_name] = TensorMemoryInfo(
                     tensor_name=tensor_name,
                     buffer_id=alloc.buffer_id,
@@ -118,7 +125,7 @@ class MemoryPlanningPassV2(PassBase):
             tensor_info=legacy_tensor_info,
             total_size=plan.total_fast_memory,
             alignment=16,
-            num_tensors=len(plan.tensor_allocations),
+            num_tensors=len(legacy_tensor_info),
             num_buffers=plan.num_buffers,
             savings_without_sharing=savings,
         )

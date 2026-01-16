@@ -152,8 +152,8 @@ class TestPipelineIntegration:
         assert pass_names.index("LivenessAnalysis") < pass_names.index("split_analysis")
         # Split analysis should be before split transform
         assert pass_names.index("split_analysis") < pass_names.index("split_transform")
-        # Split transform should be before memory planning
-        assert pass_names.index("split_transform") < pass_names.index("MemoryPlanning")
+        # Split transform should be before memory planning (MemoryPlanningV2)
+        assert pass_names.index("split_transform") < pass_names.index("MemoryPlanningV2")
 
     def test_split_passes_not_in_o0_or_o1(self):
         """Test that split passes are not in O0 or O1 pipelines."""

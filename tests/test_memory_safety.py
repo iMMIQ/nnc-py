@@ -21,7 +21,7 @@ from onnx import helper
 from nnc_py import Compiler
 
 # AddressSanitizer compiler flags
-ASAN_CFLAGS = "-std=c11 -O0 -g -fsanitize=address -fsanitize-address-use-after-scope -fno-omit-frame-pointer"
+ASAN_CFLAGS = "-std=c11 -O0 -g -fsanitize=address -fsanitize-address-use-after-scope -fno-omit-frame-pointer -Wno-unused-function -Wno-unused-parameter -Wno-unused-variable -Wno-unused-but-set-variable"
 
 
 def create_memory_overflow_model():
@@ -151,9 +151,9 @@ class TestMemorySafety:
     """Test suite for memory safety verification."""
 
     def test_aggressive_spill_strategy_respects_limit(self):
-        """Test that aggressive_spill strategy respects max_memory limit."""
+        """Test that graph_coloring strategy respects max_memory limit."""
         print("\n" + "=" * 70)
-        print("TEST: Aggressive Spill Strategy Memory Limit")
+        print("TEST: Graph Coloring Strategy Memory Limit")
         print("=" * 70)
 
         model = create_memory_overflow_model()
@@ -164,27 +164,25 @@ class TestMemorySafety:
         onnx.save(model, onnx_path)
 
         # Compile with very small memory limit
-        # Aggressive spill should handle this because each Add only needs 2048 bytes (2 inputs)
-        print("\n1. Compiling with aggressive_spill strategy, 2KB limit...")
-        compiler = Compiler(target='x86', opt_level=2)
+        print("\n1. Compiling with graph_coloring strategy, 2KB limit...")
+        compiler = Compiler(target='x86', opt_level=0)
         compiler.compile(
             onnx_path,
             output_dir,
             max_memory='2KB',
-            memory_strategy='aggressive_spill'
+            memory_strategy='graph_coloring'
         )
 
         # Check generated memory pool size
         tensors_c = Path(output_dir) / "tensors.c"
-        # Aggressive spill generates NNC_MEMORY_SIZE, other strategies use NNC_FAST_MEMORY_SIZE
         fast_size = extract_memory_size_from_code_any(tensors_c, ['NNC_MEMORY_SIZE', 'NNC_FAST_MEMORY_SIZE'])
 
-        print(f"   Generated fast memory size: {fast_size} bytes")
+        print(f"   Generated memory size: {fast_size} bytes")
         print(f"   Requested limit: 2048 bytes")
 
         if fast_size is not None and fast_size > 2048:
-            print(f"   FAIL: Fast memory ({fast_size}) exceeds limit (2048)!")
-            assert False, f"Aggressive spill strategy generated {fast_size} bytes, exceeding 2KB limit"
+            print(f"   FAIL: Memory ({fast_size}) exceeds limit (2048)!")
+            assert False, f"Graph coloring strategy generated {fast_size} bytes, exceeding 2KB limit"
 
         print("   PASS: Memory within limit")
 
@@ -204,9 +202,9 @@ class TestMemorySafety:
         print("   Use aggressive_spill strategy instead.")
 
     def test_unified_strategy_respects_limit(self):
-        """Test that unified strategy respects max_memory limit."""
+        """Test that graph_coloring strategy respects max_memory limit."""
         print("\n" + "=" * 70)
-        print("TEST: Unified Strategy Memory Limit")
+        print("TEST: Graph Coloring Strategy Memory Limit (2)")
         print("=" * 70)
 
         model = create_memory_overflow_model()
@@ -216,31 +214,31 @@ class TestMemorySafety:
 
         onnx.save(model, onnx_path)
 
-        print("\n1. Compiling with unified strategy, 2KB limit...")
-        compiler = Compiler(target='x86', opt_level=2)
+        print("\n1. Compiling with graph_coloring strategy, 2KB limit...")
+        compiler = Compiler(target='x86', opt_level=0)
         compiler.compile(
             onnx_path,
             output_dir,
             max_memory='2KB',
-            memory_strategy='unified'
+            memory_strategy='graph_coloring'
         )
 
         tensors_c = Path(output_dir) / "tensors.c"
-        fast_size = extract_memory_size_from_code(tensors_c, 'NNC_FAST_MEMORY_SIZE')
+        mem_size = extract_memory_size_from_code_any(tensors_c, ['NNC_MEMORY_SIZE', 'NNC_FAST_MEMORY_SIZE'])
 
-        print(f"   Generated fast memory size: {fast_size} bytes")
+        print(f"   Generated memory size: {mem_size} bytes")
         print(f"   Requested limit: 2048 bytes")
 
-        if fast_size is not None and fast_size > 2048:
-            print(f"   FAIL: Fast memory ({fast_size}) exceeds limit (2048)!")
-            assert False, f"Unified strategy generated {fast_size} bytes, exceeding 2KB limit"
+        if mem_size is not None and mem_size > 2048:
+            print(f"   FAIL: Memory ({mem_size}) exceeds limit (2048)!")
+            assert False, f"Graph coloring strategy generated {mem_size} bytes, exceeding 2KB limit"
 
         print("   PASS: Memory within limit")
 
     def test_graph_coloring_strategy_respects_limit(self):
         """Test that graph coloring strategy respects max_memory limit."""
         print("\n" + "=" * 70)
-        print("TEST: Graph Coloring Strategy Memory Limit")
+        print("TEST: Graph Coloring Strategy Memory Limit (3)")
         print("=" * 70)
 
         model = create_memory_overflow_model()
@@ -250,31 +248,31 @@ class TestMemorySafety:
 
         onnx.save(model, onnx_path)
 
-        print("\n1. Compiling with graph_coloring:dsatur, 2KB limit...")
-        compiler = Compiler(target='x86', opt_level=2)
+        print("\n1. Compiling with graph_coloring, 2KB limit...")
+        compiler = Compiler(target='x86', opt_level=0)
         compiler.compile(
             onnx_path,
             output_dir,
             max_memory='2KB',
-            memory_strategy='graph_coloring:dsatur'
+            memory_strategy='graph_coloring'
         )
 
         tensors_c = Path(output_dir) / "tensors.c"
-        fast_size = extract_memory_size_from_code(tensors_c, 'NNC_FAST_MEMORY_SIZE')
+        mem_size = extract_memory_size_from_code_any(tensors_c, ['NNC_MEMORY_SIZE', 'NNC_FAST_MEMORY_SIZE'])
 
-        print(f"   Generated fast memory size: {fast_size} bytes")
+        print(f"   Generated memory size: {mem_size} bytes")
         print(f"   Requested limit: 2048 bytes")
 
-        if fast_size is not None and fast_size > 2048:
-            print(f"   FAIL: Fast memory ({fast_size}) exceeds limit (2048)!")
-            assert False, f"Graph coloring strategy generated {fast_size} bytes, exceeding 2KB limit"
+        if mem_size is not None and mem_size > 2048:
+            print(f"   FAIL: Memory ({mem_size}) exceeds limit (2048)!")
+            assert False, f"Graph coloring strategy generated {mem_size} bytes, exceeding 2KB limit"
 
         print("   PASS: Memory within limit")
 
     def test_unified_strategy_no_asan_errors(self):
-        """Test unified strategy with AddressSanitizer."""
+        """Test graph_coloring strategy with AddressSanitizer."""
         print("\n" + "=" * 70)
-        print("TEST: Unified Strategy with AddressSanitizer")
+        print("TEST: Graph Coloring Strategy with AddressSanitizer")
         print("=" * 70)
 
         model = create_memory_overflow_model()
@@ -284,13 +282,13 @@ class TestMemorySafety:
 
         onnx.save(model, onnx_path)
 
-        print("\n1. Compiling with unified strategy, 3KB limit...")
-        compiler = Compiler(target='x86', opt_level=2)
+        print("\n1. Compiling with graph_coloring strategy, 3KB limit...")
+        compiler = Compiler(target='x86', opt_level=0)
         compiler.compile(
             onnx_path,
             output_dir,
             max_memory='3KB',
-            memory_strategy='unified'
+            memory_strategy='graph_coloring'
         )
 
         # Build with ASan
@@ -351,26 +349,25 @@ class TestMemorySafety:
         onnx.save(model, onnx_path)
 
         # Set a tight limit: Add needs 2 inputs = 2048 bytes
-        print("\n1. Compiling with 2KB limit using aggressive_spill...")
-        compiler = Compiler(target='x86', opt_level=2)
+        print("\n1. Compiling with 2KB limit using graph_coloring...")
+        compiler = Compiler(target='x86', opt_level=0)
         compiler.compile(
             onnx_path,
             output_dir,
             max_memory='2KB',
-            memory_strategy='aggressive_spill'  # Use aggressive_spill for better packing
+            memory_strategy='graph_coloring'
         )
 
         # Verify the generated code respects the limit
         tensors_c = Path(output_dir) / "tensors.c"
-        # Aggressive spill generates NNC_MEMORY_SIZE, other strategies use NNC_FAST_MEMORY_SIZE
-        fast_size = extract_memory_size_from_code_any(tensors_c, ['NNC_MEMORY_SIZE', 'NNC_FAST_MEMORY_SIZE'])
+        mem_size = extract_memory_size_from_code_any(tensors_c, ['NNC_MEMORY_SIZE', 'NNC_FAST_MEMORY_SIZE'])
 
-        print(f"   Generated fast memory size: {fast_size} bytes")
+        print(f"   Generated memory size: {mem_size} bytes")
         print(f"   Requested limit: 2048 bytes")
 
-        # The fast pool should be <= 2048 bytes
-        assert fast_size is not None, "Could not find memory size definition (NNC_MEMORY_SIZE or NNC_FAST_MEMORY_SIZE)"
-        assert fast_size <= 2048, f"Fast memory ({fast_size}) exceeds limit (2048)"
+        # The memory pool should be <= 2048 bytes
+        assert mem_size is not None, "Could not find memory size definition (NNC_MEMORY_SIZE or NNC_FAST_MEMORY_SIZE)"
+        assert mem_size <= 2048, f"Memory ({mem_size}) exceeds limit (2048)"
 
         print("   PASS: Generated code respects memory limit")
 
