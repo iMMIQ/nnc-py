@@ -55,16 +55,26 @@ def main():
     help="Maximum fast memory size (e.g., 256K, 1M, 16MB). "
          "If model requires more, tensors will be spilled to slow memory.",
 )
-def compile(onnx_model, output, target, opt_level, entry_name, verbose, max_memory):
+@click.option(
+    "--memory-strategy",
+    type=str,
+    default="liveness",
+    help="Memory allocation strategy: liveness (default), unified, "
+         "graph_coloring[:heuristic]. Heuristics: welsh_powell, dsatur, "
+         "largest_first, smallest_last. Example: graph_coloring:dsatur",
+)
+def compile(onnx_model, output, target, opt_level, entry_name, verbose, max_memory, memory_strategy):
     """Compile an ONNX model to C code.
 
     Example:
         nnc compile model.onnx -o ./build -t x86 -O1
         nnc compile model.onnx -o ./build -O2 --max-memory 256K
+        nnc compile model.onnx --memory-strategy graph_coloring:dsatur
     """
     console.print(f"[bold blue]Compiling[/bold blue]: {onnx_model}")
     console.print(f"[bold blue]Target[/bold blue]: {target}")
     console.print(f"[bold blue]Optimization[/bold blue]: O{opt_level}")
+    console.print(f"[bold blue]Memory Strategy[/bold blue]: {memory_strategy}")
     if max_memory:
         console.print(f"[bold blue]Max Memory[/bold blue]: {max_memory}")
     console.print()
@@ -76,6 +86,7 @@ def compile(onnx_model, output, target, opt_level, entry_name, verbose, max_memo
             output_dir=output,
             entry_point=entry_name,
             max_memory=max_memory,
+            memory_strategy=memory_strategy,
         )
 
     except Exception as e:
