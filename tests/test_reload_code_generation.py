@@ -327,7 +327,7 @@ def test_reload_buffer_generation():
                 output_dir,
                 entry_point='test_reload_buffer',
                 max_memory='2KB',  # 2KB limit with 1KB tensors forces spill
-                memory_strategy='graph_coloring',
+                memory_strategy='basic',
             )
 
             model_c_path = output_dir / "model.c"
@@ -384,7 +384,7 @@ def test_reload_with_asan():
                 output_dir,
                 entry_point='test_asan',
                 max_memory='2KB',  # 2KB limit with 1KB tensors forces spill
-                memory_strategy='graph_coloring',
+                memory_strategy='basic',
             )
 
             # Build with ASAN
@@ -444,7 +444,7 @@ def test_reload_slot_assignment():
 
         # Set metadata for memory planning
         ctx.metadata["max_memory"] = 1024
-        ctx.metadata["memory_strategy"] = "graph_coloring"
+        ctx.metadata["memory_strategy"] = "basic"
 
         # Run liveness analysis
         liveness_pass = LivenessAnalysisPass()
@@ -506,7 +506,7 @@ def test_verify_correctness_with_spill():
                 output_dir,
                 entry_point='test_correctness',
                 max_memory='1KB',  # 1KB limit with 256 byte tensors forces spill
-                memory_strategy='graph_coloring',
+                memory_strategy='basic',
             )
 
             # Verify spill happened
@@ -568,7 +568,7 @@ def test_operators_only_use_fast_memory():
                 output_dir,
                 entry_point='test_fast_mem',
                 max_memory='2KB',  # 2KB limit with 1KB tensors should force spill
-                memory_strategy='graph_coloring',
+                memory_strategy='basic',
             )
 
             model_c_path = output_dir / "model.c"

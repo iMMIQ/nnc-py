@@ -58,8 +58,8 @@ def main():
 @click.option(
     "--memory-strategy",
     type=str,
-    default="graph_coloring",
-    help="Memory allocation strategy: graph_coloring (default) - Graph coloring with spill support",
+    default="basic",
+    help="Memory allocation strategy: basic (default) - Simple sequential allocation with spill-all",
 )
 def compile(onnx_model, output, target, opt_level, entry_name, verbose, max_memory, memory_strategy):
     """Compile an ONNX model to C code.
@@ -67,7 +67,7 @@ def compile(onnx_model, output, target, opt_level, entry_name, verbose, max_memo
     Example:
         nnc compile model.onnx -o ./build -t x86 -O1
         nnc compile model.onnx -o ./build -O2 --max-memory 256K
-        nnc compile model.onnx --memory-strategy graph_coloring:dsatur
+        nnc compile model.onnx --memory-strategy basic
     """
     console.print(f"[bold blue]Compiling[/bold blue]: {onnx_model}")
     console.print(f"[bold blue]Target[/bold blue]: {target}")

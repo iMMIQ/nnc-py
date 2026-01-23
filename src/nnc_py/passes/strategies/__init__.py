@@ -1,8 +1,8 @@
 """Memory allocation strategy implementations.
 
-This package contains the graph coloring allocator for memory allocation.
+This package contains the basic allocator for memory allocation.
 """
 
-from nnc_py.passes.strategies.graph_coloring_allocator import GraphColoringAllocator
+from nnc_py.passes.strategies.basic_allocator import BasicAllocator
 
-__all__ = ["GraphColoringAllocator"]
+__all__ = ["BasicAllocator"]

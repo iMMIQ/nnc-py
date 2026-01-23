@@ -288,7 +288,7 @@ def test_spill_with_linear_model():
                 output_dir=output_dir,
                 entry_point='test_linear',
                 max_memory=max_memory,
-                memory_strategy='graph_coloring',
+                memory_strategy='basic',
             )
 
             # Check for spill
@@ -391,7 +391,7 @@ def test_spill_with_parallel_model():
                 output_dir=output_dir,
                 entry_point='test_parallel',
                 max_memory=max_memory,
-                memory_strategy='graph_coloring',
+                memory_strategy='basic',
             )
 
             # Check for spill
@@ -477,7 +477,7 @@ def test_memory_no_overlaps():
                 output_dir=output_dir,
                 entry_point='test_overlaps',
                 max_memory=max_memory,
-                memory_strategy='graph_coloring',
+                memory_strategy='basic',
             )
 
             # Parse allocations

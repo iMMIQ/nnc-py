@@ -75,8 +75,7 @@ class Compiler:
         Args:
             target: Target architecture ("x86" or "npu").
             opt_level: Optimization level (0-3).
-            memory_strategy: Memory allocation strategy (e.g., "liveness",
-                "unified", "graph_coloring", "graph_coloring:dsatur").
+            memory_strategy: Memory allocation strategy (e.g., "basic").
         """
         self.target = target
         self.opt_level = opt_level

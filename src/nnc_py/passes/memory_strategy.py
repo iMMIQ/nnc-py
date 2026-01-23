@@ -15,7 +15,7 @@ from nnc_py.passes.memory_plan import MemoryBuffer
 
 class AllocationStrategy(Enum):
     """Available memory allocation strategies."""
-    GRAPH_COLORING = "graph_coloring"    # Graph coloring with spill support
+    BASIC = "basic"    # Basic sequential allocation with spill-all
 
 
 @dataclass
@@ -257,9 +257,9 @@ class StrategyRegistry:
 # Import and register built-in strategies
 def _register_default_strategies() -> None:
     """Import and register default strategies."""
-    from nnc_py.passes.strategies.graph_coloring_allocator import GraphColoringAllocator
+    from nnc_py.passes.strategies.basic_allocator import BasicAllocator
 
-    StrategyRegistry.register(GraphColoringAllocator)
+    StrategyRegistry.register(BasicAllocator)
 
 
 def get_allocation_plan(ctx: CompileContext) -> Optional[MemoryAllocationPlan]:
@@ -286,7 +286,7 @@ def get_memory_strategy(ctx: CompileContext) -> Optional[MemoryAllocationStrateg
     strategy_config = ctx.metadata.get("memory_strategy")
 
     if strategy_config is None:
-        # Default to LLVM allocator
-        strategy_config = AllocationStrategy.GRAPH_COLORING
+        # Default to basic allocator
+        strategy_config = AllocationStrategy.BASIC
 
     return StrategyRegistry.get(strategy_config)

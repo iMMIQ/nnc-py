@@ -113,7 +113,7 @@ def compile_with_custom_runner(
         output_dir,
         entry_point='test_correctness',
         max_memory='2KB',
-        memory_strategy='graph_coloring',
+        memory_strategy='basic',
     )
 
     # Create a custom test runner that prints output
@@ -225,7 +225,7 @@ def test_spill_correctness_with_onnxruntime():
                 output_dir,
                 entry_point='test_correctness',
                 max_memory='2KB',
-                memory_strategy='graph_coloring',
+                memory_strategy='basic',
             )
 
             # Check if spill happened
@@ -420,7 +420,7 @@ def test_simple_add_correctness_with_spill():
                 output_dir,
                 entry_point='test_simple',
                 max_memory='512B',
-                memory_strategy='graph_coloring',
+                memory_strategy='basic',
             )
 
             # Check for spill

@@ -21,17 +21,17 @@ class MemoryPlanningPassV2(PassBase):
     """Unified memory planning pass with pluggable strategies.
 
     This pass replaces the original MemoryPlanningPass and provides
-    a single entry point for memory allocation using the LLVM-style
-    register allocation algorithm.
+    a single entry point for memory allocation using the basic
+    sequential allocation algorithm.
 
     Usage:
-        ctx.metadata["memory_strategy"] = "llvm_allocator"
+        ctx.metadata["memory_strategy"] = "basic"
         pass = MemoryPlanningPassV2()
         pass.run(ctx)
         plan = ctx.metadata["memory_allocation_plan"]  # MemoryAllocationPlan
     """
 
-    DEFAULT_STRATEGY = AllocationStrategy.GRAPH_COLORING
+    DEFAULT_STRATEGY = AllocationStrategy.BASIC
 
     @property
     def name(self) -> str:
@@ -160,9 +160,9 @@ class MemoryPlanningPassV2(PassBase):
 # Register default strategies when this module is imported
 def _initialize_strategies() -> None:
     """Import and register default strategies."""
-    from nnc_py.passes.strategies.graph_coloring_allocator import GraphColoringAllocator
+    from nnc_py.passes.strategies.basic_allocator import BasicAllocator
 
-    StrategyRegistry.register(GraphColoringAllocator)
+    StrategyRegistry.register(BasicAllocator)
 
 
 # Auto-initialize on import

@@ -151,7 +151,7 @@ class TestMemorySafety:
     """Test suite for memory safety verification."""
 
     def test_aggressive_spill_strategy_respects_limit(self):
-        """Test that graph_coloring strategy respects max_memory limit."""
+        """Test that basic strategy respects max_memory limit."""
         print("\n" + "=" * 70)
         print("TEST: Graph Coloring Strategy Memory Limit")
         print("=" * 70)
@@ -164,13 +164,13 @@ class TestMemorySafety:
         onnx.save(model, onnx_path)
 
         # Compile with very small memory limit
-        print("\n1. Compiling with graph_coloring strategy, 2KB limit...")
+        print("\n1. Compiling with basic strategy, 2KB limit...")
         compiler = Compiler(target='x86', opt_level=0)
         compiler.compile(
             onnx_path,
             output_dir,
             max_memory='2KB',
-            memory_strategy='graph_coloring'
+            memory_strategy='basic'
         )
 
         # Check generated memory pool size
@@ -202,7 +202,7 @@ class TestMemorySafety:
         print("   Use aggressive_spill strategy instead.")
 
     def test_unified_strategy_respects_limit(self):
-        """Test that graph_coloring strategy respects max_memory limit."""
+        """Test that basic strategy respects max_memory limit."""
         print("\n" + "=" * 70)
         print("TEST: Graph Coloring Strategy Memory Limit (2)")
         print("=" * 70)
@@ -214,13 +214,13 @@ class TestMemorySafety:
 
         onnx.save(model, onnx_path)
 
-        print("\n1. Compiling with graph_coloring strategy, 2KB limit...")
+        print("\n1. Compiling with basic strategy, 2KB limit...")
         compiler = Compiler(target='x86', opt_level=0)
         compiler.compile(
             onnx_path,
             output_dir,
             max_memory='2KB',
-            memory_strategy='graph_coloring'
+            memory_strategy='basic'
         )
 
         tensors_c = Path(output_dir) / "tensors.c"
@@ -235,7 +235,7 @@ class TestMemorySafety:
 
         print("   PASS: Memory within limit")
 
-    def test_graph_coloring_strategy_respects_limit(self):
+    def test_basic_strategy_respects_limit(self):
         """Test that graph coloring strategy respects max_memory limit."""
         print("\n" + "=" * 70)
         print("TEST: Graph Coloring Strategy Memory Limit (3)")
@@ -248,13 +248,13 @@ class TestMemorySafety:
 
         onnx.save(model, onnx_path)
 
-        print("\n1. Compiling with graph_coloring, 2KB limit...")
+        print("\n1. Compiling with basic strategy, 2KB limit...")
         compiler = Compiler(target='x86', opt_level=0)
         compiler.compile(
             onnx_path,
             output_dir,
             max_memory='2KB',
-            memory_strategy='graph_coloring'
+            memory_strategy='basic'
         )
 
         tensors_c = Path(output_dir) / "tensors.c"
@@ -270,7 +270,7 @@ class TestMemorySafety:
         print("   PASS: Memory within limit")
 
     def test_unified_strategy_no_asan_errors(self):
-        """Test graph_coloring strategy with AddressSanitizer."""
+        """Test basic strategy with AddressSanitizer."""
         print("\n" + "=" * 70)
         print("TEST: Graph Coloring Strategy with AddressSanitizer")
         print("=" * 70)
@@ -282,13 +282,13 @@ class TestMemorySafety:
 
         onnx.save(model, onnx_path)
 
-        print("\n1. Compiling with graph_coloring strategy, 3KB limit...")
+        print("\n1. Compiling with basic strategy, 3KB limit...")
         compiler = Compiler(target='x86', opt_level=0)
         compiler.compile(
             onnx_path,
             output_dir,
             max_memory='3KB',
-            memory_strategy='graph_coloring'
+            memory_strategy='basic'
         )
 
         # Build with ASan
@@ -349,13 +349,13 @@ class TestMemorySafety:
         onnx.save(model, onnx_path)
 
         # Set a tight limit: Add needs 2 inputs = 2048 bytes
-        print("\n1. Compiling with 2KB limit using graph_coloring...")
+        print("\n1. Compiling with 2KB limit using basic strategy...")
         compiler = Compiler(target='x86', opt_level=0)
         compiler.compile(
             onnx_path,
             output_dir,
             max_memory='2KB',
-            memory_strategy='graph_coloring'
+            memory_strategy='basic'
         )
 
         # Verify the generated code respects the limit
@@ -384,7 +384,7 @@ def run_all_memory_safety_tests():
     tests = [
         ('Liveness Strategy Limit', test_class.test_liveness_strategy_respects_limit),
         ('Unified Strategy Limit', test_class.test_unified_strategy_respects_limit),
-        ('Graph Coloring Limit', test_class.test_graph_coloring_strategy_respects_limit),
+        ('Graph Coloring Limit', test_class.test_basic_strategy_respects_limit),
         ('Unified ASan Check', test_class.test_unified_strategy_no_asan_errors),
         ('Runtime Verification', test_class.test_verify_memory_limit_is_actually_enforced),
     ]
