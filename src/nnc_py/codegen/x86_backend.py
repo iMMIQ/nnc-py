@@ -610,6 +610,23 @@ class X86Backend(BackendBase):
             if axis is not None:
                 args.append(str(axis))
                 args.append(str(keepdims))
+        elif node.op_type == OpType.GEMM:
+            # Gemm has optional bias (3rd input), need to add attributes
+            # nnc_gemm(Tensor* a, Tensor* b, Tensor* c, Tensor* output,
+            #          float alpha, float beta, int trans_a, int trans_b)
+            # Check if bias (C) is present
+            if len(node.inputs) < 3:
+                # No bias tensor, insert NULL
+                args.insert(2, "NULL")
+            # Add attributes
+            alpha = node.attrs.get("alpha", 1.0)
+            beta = node.attrs.get("beta", 1.0)
+            trans_a = node.attrs.get("transA", 0)
+            trans_b = node.attrs.get("transB", 0)
+            args.append(f"{alpha}f")
+            args.append(f"{beta}f")
+            args.append(str(trans_a))
+            args.append(str(trans_b))
 
         return f"{op_name}({', '.join(args)});"
 
@@ -662,6 +679,23 @@ class X86Backend(BackendBase):
             if axis is not None:
                 args.append(str(axis))
                 args.append(str(keepdims))
+        elif node.op_type == OpType.GEMM:
+            # Gemm has optional bias (3rd input), need to add attributes
+            # nnc_gemm(Tensor* a, Tensor* b, Tensor* c, Tensor* output,
+            #          float alpha, float beta, int trans_a, int trans_b)
+            # Check if bias (C) is present
+            if len(node.inputs) < 3:
+                # No bias tensor, insert NULL
+                args.insert(2, "NULL")
+            # Add attributes
+            alpha = node.attrs.get("alpha", 1.0)
+            beta = node.attrs.get("beta", 1.0)
+            trans_a = node.attrs.get("transA", 0)
+            trans_b = node.attrs.get("transB", 0)
+            args.append(f"{alpha}f")
+            args.append(f"{beta}f")
+            args.append(str(trans_a))
+            args.append(str(trans_b))
 
         return f"{op_name}({', '.join(args)});"
 

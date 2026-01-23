@@ -629,12 +629,113 @@ void nnc_gemm(
     Tensor* a, Tensor* b, Tensor* c, Tensor* output,
     float alpha, float beta, int trans_a, int trans_b
 ) {
-    /* TODO: Implement actual GEMM */
-    int64_t n = tensor_numel(output);
+    /* General Matrix Multiply: output = alpha * (A @ B) + beta * C
+     *
+     * A: input tensor [M, K] or [K, M] if trans_a
+     * B: weight tensor [K, N] or [N, K] if trans_b
+     * C: bias tensor [N] or [M, N], can be NULL
+     * output: [M, N]
+     */
+
+    /* Get data pointers */
+    float* a_data = (float*)a->data;
+    float* b_data = (float*)b->data;
+    float* c_data = c ? (float*)c->data : NULL;
     float* out_data = (float*)output->data;
 
-    for (int64_t i = 0; i < n; i++) {
-        out_data[i] = 0.0f;
+    /* Determine dimensions
+     * For 2D tensors:
+     * - A: [M, K] (or [K, M] if trans_a)
+     * - B: [K, N] (or [N, K] if trans_b)
+     * - C: [M, N] (broadcast if 1D)
+     * - output: [M, N]
+     */
+    int M, K, N;
+
+    if (a->ndim == 2 && b->ndim == 2) {
+        /* Standard 2D case */
+        if (trans_a) {
+            K = a->shape[0];
+            M = a->shape[1];
+        } else {
+            M = a->shape[0];
+            K = a->shape[1];
+        }
+
+        if (trans_b) {
+            N = b->shape[0];
+            /* K should match: K == b->shape[1] */
+        } else {
+            N = b->shape[1];
+            /* K should match: K == b->shape[0] */
+        }
+    } else if (a->ndim == 1 && b->ndim == 2) {
+        /* Vector x Matrix: [K] x [K, N] -> [N] */
+        M = 1;
+        K = a->shape[0];
+        N = b->shape[1];
+        trans_a = 0;  /* Already a vector, no transpose needed */
+    } else if (a->ndim == 2 && b->ndim == 1) {
+        /* Matrix x Vector: [M, K] x [K] -> [M] */
+        M = a->shape[0];
+        K = a->shape[1];
+        N = 1;
+        trans_b = 0;  /* Already a vector, no transpose needed */
+    } else {
+        /* Fallback: flatten and compute as 2D */
+        int64_t a_size = tensor_numel(a);
+        int64_t b_size = tensor_numel(b);
+        M = 1;
+        K = a_size;
+        N = b_size;
+    }
+
+    /* Compute matrix multiplication
+     * output[i][j] = alpha * sum(A[i][k] * B[k][j]) + beta * C[i][j]
+     */
+    for (int i = 0; i < M; i++) {
+        for (int j = 0; j < N; j++) {
+            float sum = 0.0f;
+
+            /* Compute dot product: A[i,:] @ B[:,j] */
+            for (int k = 0; k < K; k++) {
+                float a_val, b_val;
+
+                /* Get A[i][k] */
+                if (trans_a) {
+                    a_val = a_data[k * M + i];  /* [K][M] */
+                } else {
+                    a_val = a_data[i * K + k];  /* [M][K] */
+                }
+
+                /* Get B[k][j] */
+                if (trans_b) {
+                    b_val = b_data[j * K + k];  /* [N][K] */
+                } else {
+                    b_val = b_data[k * N + j];  /* [K][N] */
+                }
+
+                sum += a_val * b_val;
+            }
+
+            /* Apply alpha scaling */
+            sum *= alpha;
+
+            /* Add bias (if present) with beta scaling */
+            if (c_data != NULL) {
+                float c_val;
+                if (c->ndim == 1) {
+                    /* 1D bias: broadcast along output dimension */
+                    c_val = c_data[j];
+                } else {
+                    /* 2D bias: [M, N] */
+                    c_val = c_data[i * N + j];
+                }
+                sum += beta * c_val;
+            }
+
+            out_data[i * N + j] = sum;
+        }
     }
 }
 

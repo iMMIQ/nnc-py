@@ -216,6 +216,10 @@ class ONNXFrontend:
                 attrs["alpha"] = float(attr.f)
             elif attr.name == "beta":
                 attrs["beta"] = float(attr.f)
+            elif attr.name == "transA":
+                attrs["transA"] = int(attr.i)
+            elif attr.name == "transB":
+                attrs["transB"] = int(attr.i)
             elif attr.name == "activation":
                 # Gemm activation (none, relu, etc.)
                 attrs["activation"] = attr.s.decode() if attr.s else None

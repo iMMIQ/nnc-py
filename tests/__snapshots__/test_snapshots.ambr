@@ -72,7 +72,7 @@
   
   /* Gemm: /fc1/Gemm */
   void node_fc1_Gemm(void) {
-      nnc_gemm(&tensor_Flatten_output_0, &tensor_fc1_weight, &tensor_fc1_bias, &tensor_fc1_Gemm_output_0);
+      nnc_gemm(&tensor_Flatten_output_0, &tensor_fc1_weight, &tensor_fc1_bias, &tensor_fc1_Gemm_output_0, 1.0f, 1.0f, 0, 1);
   }
   
   /* Relu: /relu3/Relu */
@@ -82,7 +82,7 @@
   
   /* Gemm: /fc2/Gemm */
   void node_fc2_Gemm(void) {
-      nnc_gemm(&tensor_relu3_Relu_output_0, &tensor_fc2_weight, &tensor_fc2_bias, &tensor_fc2_Gemm_output_0);
+      nnc_gemm(&tensor_relu3_Relu_output_0, &tensor_fc2_weight, &tensor_fc2_bias, &tensor_fc2_Gemm_output_0, 1.0f, 1.0f, 0, 1);
   }
   
   /* Relu: /relu4/Relu */
@@ -92,7 +92,7 @@
   
   /* Gemm: /fc3/Gemm */
   void node_fc3_Gemm(void) {
-      nnc_gemm(&tensor_relu4_Relu_output_0, &tensor_fc3_weight, &tensor_fc3_bias, &tensor_output);
+      nnc_gemm(&tensor_relu4_Relu_output_0, &tensor_fc3_weight, &tensor_fc3_bias, &tensor_output, 1.0f, 1.0f, 0, 1);
   }
   
   /* Main inference entry point */
@@ -330,7 +330,7 @@
   
   /* Gemm: /net/net.1/Gemm */
   void node_net_net_1_Gemm(void) {
-      nnc_gemm(&tensor_net_net_0_Flatten_output_0, &tensor_net_1_weight, &tensor_net_1_bias, &tensor_net_net_1_Gemm_output_0);
+      nnc_gemm(&tensor_net_net_0_Flatten_output_0, &tensor_net_1_weight, &tensor_net_1_bias, &tensor_net_net_1_Gemm_output_0, 1.0f, 1.0f, 0, 1);
   }
   
   /* Relu: /net/net.2/Relu */
@@ -340,7 +340,7 @@
   
   /* Gemm: /net/net.3/Gemm */
   void node_net_net_3_Gemm(void) {
-      nnc_gemm(&tensor_net_net_2_Relu_output_0, &tensor_net_3_weight, &tensor_net_3_bias, &tensor_net_net_3_Gemm_output_0);
+      nnc_gemm(&tensor_net_net_2_Relu_output_0, &tensor_net_3_weight, &tensor_net_3_bias, &tensor_net_net_3_Gemm_output_0, 1.0f, 1.0f, 0, 1);
   }
   
   /* Relu: /net/net.4/Relu */
@@ -350,7 +350,7 @@
   
   /* Gemm: /net/net.5/Gemm */
   void node_net_net_5_Gemm(void) {
-      nnc_gemm(&tensor_net_net_4_Relu_output_0, &tensor_net_5_weight, &tensor_net_5_bias, &tensor_output);
+      nnc_gemm(&tensor_net_net_4_Relu_output_0, &tensor_net_5_weight, &tensor_net_5_bias, &tensor_output, 1.0f, 1.0f, 0, 1);
   }
   
   /* Main inference entry point */

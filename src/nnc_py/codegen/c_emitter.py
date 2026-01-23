@@ -99,6 +99,8 @@ class CEmitter:
             self._emit_softmax_call(ctx, node)
         elif node.op_type == OpType.TILE:
             self._emit_tile_call(ctx, node)
+        elif node.op_type == OpType.GEMM:
+            self._emit_gemm_call(ctx, node)
         else:
             # Generic handling for other operations
             self._emit_generic_call(ctx, node, op_name)
@@ -143,6 +145,47 @@ class CEmitter:
             args.extend(["0", "0"])
 
         self.write_line(f"nnc_conv({', '.join(args)});")
+
+    def _emit_gemm_call(self, ctx: CompileContext, node: Node):
+        """Emit Gemm operation call."""
+        # nnc_gemm(Tensor* a, Tensor* b, Tensor* c, Tensor* output,
+        #          float alpha, float beta, int trans_a, int trans_b)
+        args = []
+
+        # Input A
+        if len(node.inputs) >= 1:
+            var_name = ctx.tensor_symbols.get(node.inputs[0], node.inputs[0])
+            args.append(f"&{var_name}")
+
+        # Input B (weight)
+        if len(node.inputs) >= 2:
+            var_name = ctx.tensor_symbols.get(node.inputs[1], node.inputs[1])
+            args.append(f"&{var_name}")
+
+        # Input C (bias, optional)
+        if len(node.inputs) >= 3:
+            var_name = ctx.tensor_symbols.get(node.inputs[2], node.inputs[2])
+            args.append(f"&{var_name}")
+        else:
+            args.append("NULL")
+
+        # Output tensor
+        if len(node.outputs) >= 1:
+            var_name = ctx.tensor_symbols.get(node.outputs[0], node.outputs[0])
+            args.append(f"&{var_name}")
+
+        # Gemm attributes: alpha, beta, trans_a, trans_b
+        alpha = node.attrs.get("alpha", 1.0)
+        beta = node.attrs.get("beta", 1.0)
+        trans_a = node.attrs.get("transA", 0)
+        trans_b = node.attrs.get("transB", 0)
+
+        args.append(f"{alpha}f")
+        args.append(f"{beta}f")
+        args.append(str(trans_a))
+        args.append(str(trans_b))
+
+        self.write_line(f"nnc_gemm({', '.join(args)});")
 
     def _emit_layernorm_call(self, ctx: CompileContext, node: Node):
         """Emit LayerNormalization operation call."""
