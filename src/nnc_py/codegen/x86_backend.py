@@ -917,12 +917,8 @@ run: model
                     spilled_tensors.add(tensor_name)
                 else:
                     # Non-spilled tensors go to fast memory
-                    # Use buffer.offset as the pool offset
-                    buffer = alloc_plan.buffers[alloc.buffer_id] if 0 <= alloc.buffer_id < len(alloc_plan.buffers) else None
-                    if buffer:
-                        tensor_offsets[tensor_name] = ("fast", buffer.offset)
-                    else:
-                        tensor_offsets[tensor_name] = ("fast", alloc.offset)
+                    # Use alloc.offset which is the tensor's offset within the buffer
+                    tensor_offsets[tensor_name] = ("fast", alloc.offset)
         elif unified_plan is not None:
             # Use unified memory plan for offsets
             for buf in unified_plan.buffers:

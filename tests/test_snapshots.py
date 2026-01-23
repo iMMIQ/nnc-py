@@ -733,20 +733,9 @@ class TestCodegenSnapshots:
             c_output_flat = self._parse_c_output(stdout)
             print(f"  C output size: {len(c_output_flat)} values")
 
-            # Check for known bug: if all outputs are zero, it indicates a memory allocation bug
-            # where all tensors are assigned the same memory offset
-            if np.all(c_output_flat == 0):
-                print(f"  WARNING: C output is all zeros!")
-                print(f"  This indicates a known memory allocation bug in the compiler.")
-                print(f"  The generated tensors.c has all tensors pointing to the same")
-                print(f"  memory offset (_nnc_fast_pool + 0), causing them to overlap.")
-                print(f"  Test passes for compilation/execution, but output comparison is skipped.")
-                # Don't fail the test - the code compiles and runs without crashing
-                # which is still valuable for catching memory safety issues
-            else:
-                # Compare only the values that C outputs (first 10)
-                ref_output_flat = ref_output.flatten()[:len(c_output_flat)]
-                match, msg = self._compare_outputs(c_output_flat, ref_output_flat)
-                assert match, f"Output mismatch: {msg}\\nC output:\\n{c_output_flat}\\nReference:\\n{ref_output_flat}"
-                print(f"  Output comparison: {msg}")
-                print(f"  C output matches PyTorch reference!")
+            # Compare only the values that C outputs (first 10)
+            ref_output_flat = ref_output.flatten()[:len(c_output_flat)]
+            match, msg = self._compare_outputs(c_output_flat, ref_output_flat)
+            assert match, f"Output mismatch: {msg}\\nC output:\\n{c_output_flat}\\nReference:\\n{ref_output_flat}"
+            print(f"  Output comparison: {msg}")
+            print(f"  C output matches PyTorch reference!")
