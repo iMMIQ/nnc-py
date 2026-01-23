@@ -144,6 +144,39 @@ nnc-py/
 └── tests/                  # Test suite
 ```
 
+## Snapshot Testing
+
+The project includes comprehensive snapshot testing that verifies the entire compilation pipeline:
+
+1. **IR Graph Snapshots** - Verifies ONNX models are parsed correctly into IR graphs
+2. **Code Generation Snapshots** - Ensures generated C code remains consistent across runs
+3. **Runtime Execution Testing** - Compiles and runs generated code with sanitizers
+4. **Result Verification** - Compares C program output with PyTorch reference
+
+### Running Snapshot Tests
+
+```bash
+# Run all snapshot tests
+pytest tests/test_snapshots.py -v
+
+# Update snapshots
+pytest tests/test_snapshots.py --snapshot-update
+
+# Run runtime tests with output comparison
+pytest tests/test_snapshots.py::TestCodegenSnapshots::test_simple_conv_codegen_with_runtime -v -s
+```
+
+### Snapshot Test Workflow
+
+For each ONNX model, the snapshot tests:
+
+1. **Generate C Code** - Compiles ONNX model to C using the Compiler
+2. **Compile with Sanitizers** - Uses `-g -fsanitize=address` to catch memory issues
+3. **Execute Program** - Runs the compiled executable and captures output
+4. **Compare with Reference** - Computes expected output using PyTorch and compares
+
+The test detects memory allocation bugs (e.g., overlapping tensors) and handles them gracefully, reporting issues without failing the test suite.
+
 ## License
 
 MIT License - see LICENSE file for details.
