@@ -288,8 +288,13 @@ class TestIRSnapshots:
 class TestCodegenSnapshots:
     """Snapshot tests for generated C code."""
 
-    def _compile_with_sanitizer(self, tmpdir: str, runtime_dir: Path) -> str:
+    def _compile_with_sanitizer(self, tmpdir: str, runtime_dir: Path, opt_level: str = "O0") -> str:
         """Compile the generated code with -g -fsanitize=address.
+
+        Args:
+            tmpdir: Temporary directory path
+            runtime_dir: Runtime directory path
+            opt_level: Optimization level (e.g., "O0", "O2", "O3")
 
         Returns:
             Path to the compiled executable.
@@ -302,7 +307,7 @@ class TestCodegenSnapshots:
         runtime_ops = runtime_dir / "x86" / "ops.c"
 
         # Compile flags with sanitizers
-        cflags = ["-g", "-O0", "-Wall", "-Wextra", "-fsanitize=address",
+        cflags = ["-g", f"-{opt_level}", "-Wall", "-Wextra", "-fsanitize=address",
                   "-fno-common", "-std=c11", "-fPIC"]
 
         # Compile each source file
@@ -455,13 +460,30 @@ class TestCodegenSnapshots:
         for init in onnx_model.graph.initializer:
             weights[init.name] = torch.from_numpy(onnx.numpy_helper.to_array(init))
 
-        # Execute operations in topological order
-        output = input_tensor
+        # Track tensors by name for complex models
+        tensors = {}
+        tensors[onnx_model.graph.input[0].name] = input_tensor
+
         output_names = [out.name for out in onnx_model.graph.output]
         outputs = {}
 
         for node in onnx_model.graph.node:
             op_type = node.op_type
+
+            # Get input tensor(s)
+            if len(node.input) == 0:
+                continue
+
+            # Get the first input (most ops have single input)
+            input_name = node.input[0]
+            if input_name in weights:
+                # Input is a constant weight
+                current_input = weights[input_name]
+            elif input_name in tensors:
+                current_input = tensors[input_name]
+            else:
+                # Skip if input not available yet
+                continue
 
             if op_type == "Conv":
                 # Get weight
@@ -490,16 +512,28 @@ class TestCodegenSnapshots:
                 weight = weight.contiguous()
 
                 # Apply convolution
-                output = F.conv2d(
-                    output,
+                result = F.conv2d(
+                    current_input,
                     weight,
                     bias=bias,
                     stride=strides[0] if strides else 1,
                     padding=[pads[0], pads[2]] if pads else 0,
                 )
 
+                # Store output
+                for out_name in node.output:
+                    tensors[out_name] = result
+                    if out_name in output_names:
+                        outputs[out_name] = result.numpy()
+
             elif op_type == "Relu":
-                output = torch.relu(output)
+                result = torch.relu(current_input)
+
+                # Store output
+                for out_name in node.output:
+                    tensors[out_name] = result
+                    if out_name in output_names:
+                        outputs[out_name] = result.numpy()
 
             elif op_type == "MaxPool":
                 kernel_shape = None
@@ -517,15 +551,31 @@ class TestCodegenSnapshots:
                 strides = list(strides) if strides else [1, 1]
                 pads = list(pads) if pads else [0, 0, 0, 0]
 
-                output = F.max_pool2d(
-                    output,
+                result = F.max_pool2d(
+                    current_input,
                     kernel_size=kernel_shape,
                     stride=strides,
                     padding=[pads[0], pads[2]] if pads else 0,
                 )
 
+                # Store output
+                for out_name in node.output:
+                    tensors[out_name] = result
+                    if out_name in output_names:
+                        outputs[out_name] = result.numpy()
+
             elif op_type == "Flatten":
-                output = output.flatten(1)
+                axis = 1  # Default
+                for attr in node.attribute:
+                    if attr.name == "axis":
+                        axis = attr.i
+                result = current_input.flatten(axis)
+
+                # Store output
+                for out_name in node.output:
+                    tensors[out_name] = result
+                    if out_name in output_names:
+                        outputs[out_name] = result.numpy()
 
             elif op_type == "Gemm":
                 # Linear layer
@@ -543,21 +593,72 @@ class TestCodegenSnapshots:
                     elif attr.name == "transB":
                         trans_b = attr.i
 
-                if trans_b:
+                # Handle transposition for PyTorch F.linear
+                # F.linear computes: output = input * weight^T + bias
+                # ONNX Gemm with transB=1 computes: output = input * weight^T (same as PyTorch)
+                # ONNX Gemm with transB=0 computes: output = input * weight (need to transpose for PyTorch)
+                # So: when transB=0, we transpose; when transB=1, we don't
+                if trans_b == 0:
                     weight = weight.t()
 
                 # For 2D input (batch, features)
-                if len(output.shape) == 2:
-                    output = torch.nn.functional.linear(output, weight, bias)
+                if len(current_input.shape) == 2:
+                    result = torch.nn.functional.linear(current_input, weight, bias)
                 else:
                     # Flatten first
-                    output = output.flatten(1)
-                    output = torch.nn.functional.linear(output, weight, bias)
+                    result = current_input.flatten(1)
+                    result = torch.nn.functional.linear(result, weight, bias)
 
-            # Check if this is an output
-            for out_name in node.output:
-                if out_name in output_names:
-                    outputs[out_name] = output.numpy()
+                # Store output
+                for out_name in node.output:
+                    tensors[out_name] = result
+                    if out_name in output_names:
+                        outputs[out_name] = result.numpy()
+
+            elif op_type == "Add":
+                # Get second input
+                if len(node.input) < 2:
+                    continue
+                input2_name = node.input[1]
+                if input2_name in weights:
+                    input2 = weights[input2_name]
+                elif input2_name in tensors:
+                    input2 = tensors[input2_name]
+                else:
+                    continue
+
+                result = current_input + input2
+
+                # Store output
+                for out_name in node.output:
+                    tensors[out_name] = result
+                    if out_name in output_names:
+                        outputs[out_name] = result.numpy()
+
+            elif op_type == "GlobalAveragePool":
+                # Global average pooling: average over all spatial dimensions
+                # For [N, C, H, W], output is [N, C, 1, 1]
+                if len(current_input.shape) == 4:
+                    result = F.adaptive_avg_pool2d(current_input, (1, 1))
+                else:
+                    # For other shapes, just average over all dims except batch
+                    result = current_input.mean(dim=list(range(1, len(current_input.shape))), keepdim=True)
+
+                # Store output
+                for out_name in node.output:
+                    tensors[out_name] = result
+                    if out_name in output_names:
+                        outputs[out_name] = result.numpy()
+
+            elif op_type == "Identity":
+                # Identity just passes through
+                result = current_input
+
+                # Store output
+                for out_name in node.output:
+                    tensors[out_name] = result
+                    if out_name in output_names:
+                        outputs[out_name] = result.numpy()
 
         # Return all outputs
         return outputs
@@ -685,11 +786,45 @@ class TestCodegenSnapshots:
 
     def test_simple_conv_codegen_with_runtime(self):
         """Test simple_conv code compiles, runs with sanitizers, and output matches PyTorch."""
-        # Use the simple_conv.onnx model in tests directory
         model_path = Path(__file__).parent / "simple_conv.onnx"
+        self._run_runtime_test(model_path, "simple_conv")
+
+    def test_simple_mlp_codegen_with_runtime(self, models_dir):
+        """Test simple_mlp code compiles, runs with sanitizers, and output matches PyTorch."""
+        model_path = models_dir / "simple_mlp.onnx"
         if not model_path.exists():
             pytest.skip(f"Model not found: {model_path}")
+        self._run_runtime_test(model_path, "simple_mlp")
 
+    def test_lenet5_codegen_with_runtime(self, models_dir):
+        """Test lenet5 code compiles, runs with sanitizers, and output matches PyTorch."""
+        model_path = models_dir / "lenet5.onnx"
+        if not model_path.exists():
+            pytest.skip(f"Model not found: {model_path}")
+        self._run_runtime_test(model_path, "lenet5")
+
+    def test_simple_cnn_codegen_with_runtime(self, models_dir):
+        """Test simple_cnn code compiles, runs with sanitizers, and output matches PyTorch."""
+        model_path = models_dir / "simple_cnn.onnx"
+        if not model_path.exists():
+            pytest.skip(f"Model not found: {model_path}")
+        self._run_runtime_test(model_path, "simple_cnn")
+
+    def test_resnet18_codegen_with_runtime(self, models_dir):
+        """Test resnet18 code compiles, runs with sanitizers, and output matches PyTorch."""
+        model_path = models_dir / "resnet18.onnx"
+        if not model_path.exists():
+            pytest.skip(f"Model not found: {model_path}")
+        self._run_runtime_test(model_path, "resnet18")
+
+    def _run_runtime_test(self, model_path: Path, model_name: str, opt_level: str = "O0") -> None:
+        """Run runtime test with sanitizers and compare output with PyTorch reference.
+
+        Args:
+            model_path: Path to ONNX model file
+            model_name: Name of the model for logging
+            opt_level: Optimization level (e.g., "O0", "O2", "O3")
+        """
         # Get runtime directory
         runtime_dir = Path(__file__).parent.parent / "runtime"
 
@@ -702,7 +837,7 @@ class TestCodegenSnapshots:
         input_data = input_data.reshape(input_shape)
 
         # Get reference output using PyTorch
-        print(f"\\nComputing reference output with PyTorch...")
+        print(f"\\n[{model_name}] Computing reference output with PyTorch...")
         ref_outputs = self._get_reference_output(model_path, input_data)
         ref_output = list(ref_outputs.values())[0]
         print(f"  Reference output shape: {ref_output.shape}")
@@ -712,7 +847,7 @@ class TestCodegenSnapshots:
             compiler.compile(str(model_path), tmpdir)
 
             # Compile with sanitizers
-            exe_path = self._compile_with_sanitizer(tmpdir, runtime_dir)
+            exe_path = self._compile_with_sanitizer(tmpdir, runtime_dir, opt_level)
 
             # Run the executable
             stdout, stderr, returncode = self._run_executable(exe_path)
@@ -729,7 +864,7 @@ class TestCodegenSnapshots:
 
             # Parse C output and compare with reference
             # Note: The C test_runner only outputs first 10 values
-            print(f"\\nComparing C output with PyTorch reference...")
+            print(f"[{model_name}] Comparing C output with PyTorch reference...")
             c_output_flat = self._parse_c_output(stdout)
             print(f"  C output size: {len(c_output_flat)} values")
 
@@ -737,5 +872,40 @@ class TestCodegenSnapshots:
             ref_output_flat = ref_output.flatten()[:len(c_output_flat)]
             match, msg = self._compare_outputs(c_output_flat, ref_output_flat)
             assert match, f"Output mismatch: {msg}\\nC output:\\n{c_output_flat}\\nReference:\\n{ref_output_flat}"
-            print(f"  Output comparison: {msg}")
-            print(f"  C output matches PyTorch reference!")
+            print(f"  [{model_name}] {msg}")
+            print(f"  [{model_name}] C output matches PyTorch reference!")
+
+    # Tests with -O3 optimization level
+
+    def test_simple_conv_codegen_with_runtime_o3(self):
+        """Test simple_conv code compiles and runs with -O3 optimization and sanitizers."""
+        model_path = Path(__file__).parent / "simple_conv.onnx"
+        self._run_runtime_test(model_path, "simple_conv", opt_level="O3")
+
+    def test_simple_mlp_codegen_with_runtime_o3(self, models_dir):
+        """Test simple_mlp code compiles and runs with -O3 optimization and sanitizers."""
+        model_path = models_dir / "simple_mlp.onnx"
+        if not model_path.exists():
+            pytest.skip(f"Model not found: {model_path}")
+        self._run_runtime_test(model_path, "simple_mlp", opt_level="O3")
+
+    def test_lenet5_codegen_with_runtime_o3(self, models_dir):
+        """Test lenet5 code compiles and runs with -O3 optimization and sanitizers."""
+        model_path = models_dir / "lenet5.onnx"
+        if not model_path.exists():
+            pytest.skip(f"Model not found: {model_path}")
+        self._run_runtime_test(model_path, "lenet5", opt_level="O3")
+
+    def test_simple_cnn_codegen_with_runtime_o3(self, models_dir):
+        """Test simple_cnn code compiles and runs with -O3 optimization and sanitizers."""
+        model_path = models_dir / "simple_cnn.onnx"
+        if not model_path.exists():
+            pytest.skip(f"Model not found: {model_path}")
+        self._run_runtime_test(model_path, "simple_cnn", opt_level="O3")
+
+    def test_resnet18_codegen_with_runtime_o3(self, models_dir):
+        """Test resnet18 code compiles and runs with -O3 optimization and sanitizers."""
+        model_path = models_dir / "resnet18.onnx"
+        if not model_path.exists():
+            pytest.skip(f"Model not found: {model_path}")
+        self._run_runtime_test(model_path, "resnet18", opt_level="O3")

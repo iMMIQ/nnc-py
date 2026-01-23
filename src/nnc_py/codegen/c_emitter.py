@@ -101,6 +101,10 @@ class CEmitter:
             self._emit_tile_call(ctx, node)
         elif node.op_type == OpType.GEMM:
             self._emit_gemm_call(ctx, node)
+        elif node.op_type == OpType.MAXPOOL:
+            self._emit_maxpool_call(ctx, node)
+        elif node.op_type == OpType.GLOBAL_AVGPOOL:
+            self._emit_global_avgpool_call(ctx, node)
         else:
             # Generic handling for other operations
             self._emit_generic_call(ctx, node, op_name)
@@ -186,6 +190,98 @@ class CEmitter:
         args.append(str(trans_b))
 
         self.write_line(f"nnc_gemm({', '.join(args)});")
+
+    def _emit_maxpool_call(self, ctx: CompileContext, node: Node):
+        """Emit MaxPool operation call."""
+        # nnc_maxpool2d(Tensor* input, Tensor* output,
+        #              int kernel_h, int kernel_w,
+        #              int stride_h, int stride_w,
+        #              int pad_h, int pad_w)
+        args = []
+
+        # Input tensor
+        if len(node.inputs) >= 1:
+            var_name = ctx.tensor_symbols.get(node.inputs[0], node.inputs[0])
+            args.append(f"&{var_name}")
+
+        # Output tensor
+        if len(node.outputs) >= 1:
+            var_name = ctx.tensor_symbols.get(node.outputs[0], node.outputs[0])
+            args.append(f"&{var_name}")
+
+        # Get kernel_shape, strides, pads from attributes
+        kernel_shape = node.attrs.get("kernel_shape", [2, 2])
+        strides = node.attrs.get("strides", [2, 2])
+        pads = node.attrs.get("pads", [0, 0, 0, 0])
+
+        # Add kernel size
+        if len(kernel_shape) >= 2:
+            args.append(str(kernel_shape[0]))  # kernel_h
+            args.append(str(kernel_shape[1]))  # kernel_w
+        else:
+            args.extend(["2", "2"])
+
+        # Add strides
+        if len(strides) >= 2:
+            args.append(str(strides[0]))  # stride_h
+            args.append(str(strides[1]))  # stride_w
+        else:
+            args.extend(["2", "2"])
+
+        # Add padding (use top and left pads)
+        if len(pads) >= 2:
+            args.append(str(pads[0]))  # pad_h (top)
+            args.append(str(pads[1]))  # pad_w (left)
+        else:
+            args.extend(["0", "0"])
+
+        self.write_line(f"nnc_maxpool2d({', '.join(args)});")
+
+    def _emit_global_avgpool_call(self, ctx: CompileContext, node: Node):
+        """Emit GlobalAveragePool operation call."""
+        # nnc_avgpool2d(Tensor* input, Tensor* output,
+        #              int kernel_h, int kernel_w,
+        #              int stride_h, int stride_w,
+        #              int pad_h, int pad_w)
+        # For global avgpool, kernel and stride should match input spatial dims
+        args = []
+
+        # Input tensor
+        if len(node.inputs) >= 1:
+            var_name = ctx.tensor_symbols.get(node.inputs[0], node.inputs[0])
+            args.append(f"&{var_name}")
+
+            # Get input spatial dimensions for global pooling
+            input_tensor = ctx.graph.get_tensor(node.inputs[0])
+            if input_tensor and input_tensor.shape and input_tensor.shape.rank() == 4:
+                # [N, C, H, W] -> kernel size is H x W
+                h = input_tensor.shape.dims[2]
+                w = input_tensor.shape.dims[3]
+                kernel_h, kernel_w = str(h), str(w)
+                stride_h, stride_w = str(h), str(w)
+            else:
+                # Default values if shape unknown
+                kernel_h, kernel_w = "7", "7"
+                stride_h, stride_w = "1", "1"
+        else:
+            kernel_h, kernel_w = "7", "7"
+            stride_h, stride_w = "1", "1"
+
+        # Output tensor
+        if len(node.outputs) >= 1:
+            var_name = ctx.tensor_symbols.get(node.outputs[0], node.outputs[0])
+            args.append(f"&{var_name}")
+
+        # Add kernel size (input spatial dims for global pool)
+        args.extend([kernel_h, kernel_w])
+
+        # Add stride (input spatial dims for global pool)
+        args.extend([stride_h, stride_w])
+
+        # Add padding (no padding for global pool)
+        args.extend(["0", "0"])
+
+        self.write_line(f"nnc_avgpool2d({', '.join(args)});")
 
     def _emit_layernorm_call(self, ctx: CompileContext, node: Node):
         """Emit LayerNormalization operation call."""
