@@ -264,15 +264,75 @@ void nnc_maxpool2d(
     int stride_h, int stride_w,
     int pad_h, int pad_w
 ) {
-    /* TODO: Implement actual 2D max pooling */
-    /* For now, just copy input to output */
-    int64_t n = tensor_numel(output);
+    /* 2D Max Pooling implementation
+     * Input: [N, C, H, W]
+     * Output: [N, C, H_out, W_out]
+     * H_out = (H + 2*pad_h - kernel_h) / stride_h + 1
+     * W_out = (W + 2*pad_w - kernel_w) / stride_w + 1
+     */
+
+    if (!input || !output || !input->data || !output->data) {
+        return;
+    }
+    if (input->ndim != 4 || output->ndim != 4) {
+        return;
+    }
+
+    int N = (int)input->shape[0];
+    int C = (int)input->shape[1];
+    int H_in = (int)input->shape[2];
+    int W_in = (int)input->shape[3];
+    int H_out = (int)output->shape[2];
+    int W_out = (int)output->shape[3];
+
     float* in_data = (float*)input->data;
     float* out_data = (float*)output->data;
 
-    int64_t copy_n = (n < tensor_numel(input)) ? n : tensor_numel(input);
-    for (int64_t i = 0; i < copy_n; i++) {
-        out_data[i] = in_data[i];
+    /* Initialize output to minimum float value */
+    for (int64_t i = 0; i < tensor_numel(output); i++) {
+        out_data[i] = -3.402823e38f;  /* FLT_MIN-ish but for max pool */
+    }
+
+    /* Compute max pooling */
+    for (int n = 0; n < N; n++) {
+        for (int c = 0; c < C; c++) {
+            for (int h_out = 0; h_out < H_out; h_out++) {
+                for (int w_out = 0; w_out < W_out; w_out++) {
+                    /* Calculate input window start position */
+                    int h_start = h_out * stride_h - pad_h;
+                    int w_start = w_out * stride_w - pad_w;
+
+                    /* Calculate window end position */
+                    int h_end = h_start + kernel_h;
+                    int w_end = w_start + kernel_w;
+
+                    /* Clamp to input bounds */
+                    if (h_start < 0) h_start = 0;
+                    if (w_start < 0) w_start = 0;
+                    if (h_end > H_in) h_end = H_in;
+                    if (w_end > W_in) w_end = W_in;
+
+                    /* Find maximum in window */
+                    float max_val = -3.402823e38f;
+                    int has_valid = 0;
+
+                    for (int h = h_start; h < h_end; h++) {
+                        for (int w = w_start; w < w_end; w++) {
+                            int64_t in_idx = ((n * C + c) * H_in + h) * W_in + w;
+                            float val = in_data[in_idx];
+                            if (!has_valid || val > max_val) {
+                                max_val = val;
+                                has_valid = 1;
+                            }
+                        }
+                    }
+
+                    /* Write output */
+                    int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
+                    out_data[out_idx] = max_val;
+                }
+            }
+        }
     }
 }
 
@@ -282,14 +342,67 @@ void nnc_avgpool2d(
     int stride_h, int stride_w,
     int pad_h, int pad_w
 ) {
-    /* TODO: Implement actual 2D average pooling */
-    int64_t n = tensor_numel(output);
+    /* 2D Average Pooling implementation
+     * Input: [N, C, H, W]
+     * Output: [N, C, H_out, W_out]
+     * H_out = (H + 2*pad_h - kernel_h) / stride_h + 1
+     * W_out = (W + 2*pad_w - kernel_w) / stride_w + 1
+     */
+
+    if (!input || !output || !input->data || !output->data) {
+        return;
+    }
+    if (input->ndim != 4 || output->ndim != 4) {
+        return;
+    }
+
+    int N = (int)input->shape[0];
+    int C = (int)input->shape[1];
+    int H_in = (int)input->shape[2];
+    int W_in = (int)input->shape[3];
+    int H_out = (int)output->shape[2];
+    int W_out = (int)output->shape[3];
+
     float* in_data = (float*)input->data;
     float* out_data = (float*)output->data;
 
-    int64_t copy_n = (n < tensor_numel(input)) ? n : tensor_numel(input);
-    for (int64_t i = 0; i < copy_n; i++) {
-        out_data[i] = in_data[i];
+    /* Compute average pooling */
+    for (int n = 0; n < N; n++) {
+        for (int c = 0; c < C; c++) {
+            for (int h_out = 0; h_out < H_out; h_out++) {
+                for (int w_out = 0; w_out < W_out; w_out++) {
+                    /* Calculate input window start position */
+                    int h_start = h_out * stride_h - pad_h;
+                    int w_start = w_out * stride_w - pad_w;
+
+                    /* Calculate window end position */
+                    int h_end = h_start + kernel_h;
+                    int w_end = w_start + kernel_w;
+
+                    /* Clamp to input bounds */
+                    if (h_start < 0) h_start = 0;
+                    if (w_start < 0) w_start = 0;
+                    if (h_end > H_in) h_end = H_in;
+                    if (w_end > W_in) w_end = W_in;
+
+                    /* Calculate sum and count for averaging */
+                    float sum = 0.0f;
+                    int count = 0;
+
+                    for (int h = h_start; h < h_end; h++) {
+                        for (int w = w_start; w < w_end; w++) {
+                            int64_t in_idx = ((n * C + c) * H_in + h) * W_in + w;
+                            sum += in_data[in_idx];
+                            count++;
+                        }
+                    }
+
+                    /* Write output (average) */
+                    int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
+                    out_data[out_idx] = (count > 0) ? (sum / count) : 0.0f;
+                }
+            }
+        }
     }
 }
 
