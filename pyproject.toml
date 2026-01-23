@@ -78,8 +78,19 @@ disallow_untyped_defs = true
 testpaths = ["tests"]
 pythonpath = ["src"]
 
+# Syrupy snapshot testing configuration
+[tool.syropy]
+# Path to store snapshot files
+snapshots_path = "tests/snapshots"
+# Snapshot extension (use .ambr for diff-friendly format)
+snapshot_extension = "ambr"
+# Update snapshots: --snapshot-update or -U
+# Warn on unused snapshots: --snapshot-warn-unused
+# Diff provider: internal, difflib, git
+
 [dependency-groups]
 dev = [
     "pytest>=9.0.2",
     "pytest-cov>=7.0.0",
+    "syrupy>=4.0.0",
 ]
