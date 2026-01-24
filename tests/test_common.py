@@ -457,6 +457,14 @@ class BaseSnapshotTest:
             content = re.sub(r'\/\* Buffers: \d+, Tensors: \d+ \*\/', '/* Buffers: <COUNT>, Tensors: <COUNT> */', content)
             content = re.sub(r'#define NNC_MEMORY_SIZE \d+', '#define NNC_MEMORY_SIZE <SIZE>', content)
             content = re.sub(r'nbytes = \d+,', 'nbytes = <SIZE>,', content)
+            # Normalize node names that contain memory addresses (e.g., MatMul_140157833117536_MatMul)
+            # This handles both code and comments
+            # Match pattern: OP_<ID>_OP where <ID> is a number
+            ops_pattern = r'(MatMul|Add|Mul|Div|Softmax|Relu|Transpose|Flatten|Gemm|Conv|Constant|Split|Reshape|Concat)'
+            content = re.sub(fr'_{ops_pattern}_\d+_\1', r'_\1_<ID>_\1', content)
+            content = re.sub(fr'node_{ops_pattern}_\d+_\1', r'node_\1_<ID>_\1', content)
+            content = re.sub(fr'tensor_{ops_pattern}_\d+_\1', r'tensor_\1_<ID>_\1', content)
+            content = re.sub(fr'/\* {ops_pattern}: \1_\d+_\1 \*/', r'/* \1: \1_<ID>_\1 */', content)
             normalized_files[filename] = content
 
         lines = []

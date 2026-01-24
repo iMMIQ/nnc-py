@@ -207,6 +207,127 @@ def export_simple_mlp(output_dir: Path) -> Path:
     return output_path
 
 
+class SelfAttention(nn.Module):
+    """Single self-attention layer without multi-head complexity.
+
+    This is the core building block of Transformer architectures.
+    Uses scaled dot-product attention: softmax(QK^T / sqrt(d_k))V
+
+    Note: Uses separate Q, K, V projections to avoid torch.chunk which
+    generates ONNX Slice/Gather/Shape operators.
+    """
+
+    def __init__(self, embed_dim: int = 64):
+        super().__init__()
+        self.embed_dim = embed_dim
+        # Separate Query, Key, Value projections
+        # Using separate layers avoids chunk() which creates Slice/Gather ops
+        self.q_proj = nn.Linear(embed_dim, embed_dim)
+        self.k_proj = nn.Linear(embed_dim, embed_dim)
+        self.v_proj = nn.Linear(embed_dim, embed_dim)
+        # Output projection
+        self.out_proj = nn.Linear(embed_dim, embed_dim)
+        self.scale = embed_dim ** -0.5
+
+    def forward(self, x):
+        """Input shape: (batch, seq_len, embed_dim)."""
+        # Generate Q, K, V using separate projections
+        q = self.q_proj(x)
+        k = self.k_proj(x)
+        v = self.v_proj(x)
+
+        # Scaled dot-product attention
+        # (batch, seq_len, embed_dim) @ (batch, embed_dim, seq_len)
+        # -> (batch, seq_len, seq_len)
+        attn_scores = (q @ k.transpose(-2, -1)) * self.scale
+        attn_weights = torch.softmax(attn_scores, dim=-1)
+
+        # Apply attention to values
+        # (batch, seq_len, seq_len) @ (batch, seq_len, embed_dim)
+        # -> (batch, seq_len, embed_dim)
+        attn_output = attn_weights @ v
+
+        # Output projection
+        return self.out_proj(attn_output)
+
+
+class SimpleTransformer(nn.Module):
+    """A minimal Transformer model for testing.
+
+    Architecture:
+    1. Token embedding (Linear projection)
+    2. 2 Self-Attention layers with ReLU activation
+    3. Classification head
+
+    This is NOT a full BERT/GPT-style transformer, but focuses on
+    the core attention mechanism that defines the architecture.
+
+    Note: LayerNorm is omitted to avoid ONNX operators (Slice, Gather, Shape)
+    that may not be supported by the compiler.
+    """
+
+    def __init__(self, seq_len: int = 16, input_dim: int = 32,
+                 embed_dim: int = 64, num_classes: int = 10):
+        super().__init__()
+        self.seq_len = seq_len
+        self.input_dim = input_dim
+        self.embed_dim = embed_dim
+
+        # Input embedding: projects (seq_len, input_dim) -> (seq_len, embed_dim)
+        self.embedding = nn.Linear(input_dim, embed_dim)
+
+        # Two self-attention layers
+        self.attn1 = SelfAttention(embed_dim)
+        self.attn2 = SelfAttention(embed_dim)
+
+        # Classification head: global average pool -> linear
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(seq_len * embed_dim, 32),
+            nn.ReLU(),
+            nn.Linear(32, num_classes),
+        )
+
+    def forward(self, x):
+        """Input shape: (batch, seq_len, input_dim)."""
+        # Embedding
+        x = self.embedding(x)
+        x = torch.relu(x)
+
+        # Self-attention layers
+        x = self.attn1(x)
+        x = torch.relu(x)
+        x = self.attn2(x)
+        x = torch.relu(x)
+
+        # Classification
+        x = self.classifier(x)
+        return x
+
+
+def export_simple_transformer(output_dir: Path) -> Path:
+    """Export a simple Transformer model to ONNX.
+
+    This model demonstrates self-attention mechanism, the core of
+    modern transformer architectures used in BERT, GPT, etc.
+
+    Args:
+        output_dir: Directory to save the model.
+
+    Returns:
+        Path to the exported model.
+    """
+    model = SimpleTransformer(
+        seq_len=16,      # Short sequence for quick testing
+        input_dim=32,     # Input feature dimension per token
+        embed_dim=64,     # Attention embedding dimension
+        num_classes=10,
+    )
+    output_path = output_dir / "simple_transformer.onnx"
+    export_to_onnx(model, output_path, (1, 16, 32), "Simple Transformer")
+    return output_path
+
+
 def main() -> int:
     """Main entry point."""
     # Setup paths
@@ -237,6 +358,7 @@ def main() -> int:
         export_resnet18,
         export_simple_cnn,
         export_simple_mlp,
+        export_simple_transformer,
     ]
 
     exported = []
@@ -271,6 +393,7 @@ used for snapshot testing the nnc-py compiler.
 | `resnet18.onnx` | (1, 3, 224, 224) | Deep residual network, complex testing |
 | `simple_cnn.onnx` | (1, 3, 32, 32) | Minimal CNN for quick tests |
 | `simple_mlp.onnx` | (1, 1, 28, 28) | Simple feedforward network |
+| `simple_transformer.onnx` | (1, 16, 32) | Self-attention mechanism, Transformer core |
 
 ## Usage
 

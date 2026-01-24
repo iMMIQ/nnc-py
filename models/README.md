@@ -11,6 +11,7 @@ used for snapshot testing the nnc-py compiler.
 | `resnet18.onnx` | (1, 3, 224, 224) | Deep residual network, complex testing |
 | `simple_cnn.onnx` | (1, 3, 32, 32) | Minimal CNN for quick tests |
 | `simple_mlp.onnx` | (1, 1, 28, 28) | Simple feedforward network |
+| `simple_transformer.onnx` | (1, 16, 32) | Self-attention mechanism, Transformer core |
 
 ## Usage
 
