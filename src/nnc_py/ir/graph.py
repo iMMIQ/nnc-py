@@ -21,7 +21,7 @@ class Graph:
         self.constants: Dict[str, np.ndarray] = {}
 
         # NetworkX graph for analysis
-        self._nx_graph: Optional[nx.DiGraph] = None
+        self._nx_graph: Optional[nx.DiGraph[str]] = None
 
     def add_node(self, node: Node) -> None:
         """Add a node to the graph."""
@@ -55,10 +55,11 @@ class Graph:
     def topological_sort(self) -> List[Node]:
         """Return nodes in topological order."""
         self._ensure_nx_graph()
+        assert self._nx_graph is not None
         sorted_names = list(nx.topological_sort(self._nx_graph))
         return [self.nodes[name] for name in sorted_names]
 
-    def _ensure_nx_graph(self):
+    def _ensure_nx_graph(self) -> None:
         """Ensure the NetworkX graph is built."""
         if self._nx_graph is None:
             self._build_graph()

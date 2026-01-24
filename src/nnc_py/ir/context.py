@@ -1,6 +1,7 @@
 """Compilation context for passing information through the pipeline."""
 
 from dataclasses import dataclass, field
+from typing import Any
 
 from nnc_py.ir.graph import Graph
 
@@ -19,9 +20,9 @@ class CompileContext:
     node_symbols: dict[str, str] = field(default_factory=dict)  # ONNX -> C
 
     # Metadata
-    metadata: dict = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         """Initialize default values for mutable fields."""
         if self.tensor_symbols is None:
             self.tensor_symbols = {}
