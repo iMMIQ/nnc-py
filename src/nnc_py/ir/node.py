@@ -58,6 +58,7 @@ class OpType(Enum):
     UNSQUEEZE = "Unsqueeze"
     SPLIT = "Split"
     TILE = "Tile"
+    SHAPE = "Shape"
 
     # Reduction ops
     REDUCE_MEAN = "ReduceMean"
@@ -93,6 +94,7 @@ class Node:
             OpType.SQUEEZE,
             OpType.UNSQUEEZE,
             OpType.TILE,
+            OpType.SHAPE,
         }
         return self.op_type not in non_computational
 

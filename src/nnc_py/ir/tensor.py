@@ -40,6 +40,7 @@ class TensorType:
             DataType.FLOAT32: 4,
             DataType.FLOAT16: 2,
             DataType.INT32: 4,
+            DataType.INT64: 8,
             DataType.INT8: 1,
             DataType.UINT8: 1,
             DataType.BOOL: 1,

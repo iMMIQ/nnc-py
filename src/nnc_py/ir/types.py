@@ -9,6 +9,7 @@ class DataType(Enum):
     FLOAT32 = "float32"
     FLOAT16 = "float16"
     INT32 = "int32"
+    INT64 = "int64"
     INT8 = "int8"
     UINT8 = "uint8"
     BOOL = "bool"

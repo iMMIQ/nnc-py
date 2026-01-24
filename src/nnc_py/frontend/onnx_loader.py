@@ -29,6 +29,7 @@ class ONNXFrontend:
         onnx.TensorProto.FLOAT: DataType.FLOAT32,
         onnx.TensorProto.FLOAT16: DataType.FLOAT16,
         onnx.TensorProto.INT32: DataType.INT32,
+        onnx.TensorProto.INT64: DataType.INT64,
         onnx.TensorProto.INT8: DataType.INT8,
         onnx.TensorProto.UINT8: DataType.UINT8,
         onnx.TensorProto.BOOL: DataType.BOOL,
@@ -660,6 +661,16 @@ class ONNXFrontend:
             return TensorType(
                 dtype=DataType.BOOL,
                 shape=TensorShape(dims=out_shape, layout=input_tensor.shape.layout),
+                name=output_name,
+            )
+
+        elif op_type == "Shape":
+            # Shape operation - output is 1D tensor of int64 representing input shape
+            # The output is a 1D tensor with length equal to the rank of input
+            input_rank = len(input_tensor.shape.dims) if input_tensor.shape.dims else 0
+            return TensorType(
+                dtype=DataType.INT64,
+                shape=TensorShape(dims=[input_rank], layout=MemoryLayout.NHWC),
                 name=output_name,
             )
 
