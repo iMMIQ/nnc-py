@@ -61,24 +61,35 @@ def main():
     default="basic",
     help="Memory allocation strategy: basic (default) - Simple sequential allocation with spill-all",
 )
-def compile(onnx_model, output, target, opt_level, entry_name, verbose, max_memory, memory_strategy):
+@click.option(
+    "--enable-constant-folding/--disable-constant-folding",
+    default=True,
+    help="Enable/disable ONNX constant folding optimization (default: enabled)",
+)
+def compile(onnx_model, output, target, opt_level, entry_name, verbose, max_memory, memory_strategy, enable_constant_folding):
     """Compile an ONNX model to C code.
 
     Example:
         nnc compile model.onnx -o ./build -t x86 -O1
         nnc compile model.onnx -o ./build -O2 --max-memory 256K
         nnc compile model.onnx --memory-strategy basic
+        nnc compile model.onnx --disable-constant-folding
     """
     console.print(f"[bold blue]Compiling[/bold blue]: {onnx_model}")
     console.print(f"[bold blue]Target[/bold blue]: {target}")
     console.print(f"[bold blue]Optimization[/bold blue]: O{opt_level}")
     console.print(f"[bold blue]Memory Strategy[/bold blue]: {memory_strategy}")
+    console.print(f"[bold blue]Constant Folding[/bold blue]: {'enabled' if enable_constant_folding else 'disabled'}")
     if max_memory:
         console.print(f"[bold blue]Max Memory[/bold blue]: {max_memory}")
     console.print()
 
     try:
-        compiler = Compiler(target=target, opt_level=opt_level)
+        compiler = Compiler(
+            target=target,
+            opt_level=opt_level,
+            enable_constant_folding=enable_constant_folding,
+        )
         compiler.compile(
             onnx_path=onnx_model,
             output_dir=output,

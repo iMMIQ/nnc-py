@@ -12,6 +12,9 @@ class CompilerConfig:
     opt_level: int = 0
     debug: bool = False
 
+    # Frontend options
+    enable_constant_folding: bool = True
+
     # Pass configuration
     enable_fusion: bool = False
     enable_layout_opt: bool = True
@@ -34,6 +37,7 @@ class CompilerConfig:
             "target": self.target,
             "opt_level": self.opt_level,
             "debug": self.debug,
+            "enable_constant_folding": self.enable_constant_folding,
             "enable_fusion": self.enable_fusion,
             "enable_layout_opt": self.enable_layout_opt,
             "emit_comments": self.emit_comments,

@@ -69,6 +69,7 @@ class Compiler:
         target: str = "x86",
         opt_level: int = 0,
         memory_strategy: str = None,
+        enable_constant_folding: bool = True,
     ):
         """Initialize the compiler.
 
@@ -76,14 +77,16 @@ class Compiler:
             target: Target architecture ("x86" or "npu").
             opt_level: Optimization level (0-3).
             memory_strategy: Memory allocation strategy (e.g., "basic").
+            enable_constant_folding: Whether to enable ONNX constant folding (via onnxsim).
         """
         self.target = target
         self.opt_level = opt_level
         self.memory_strategy = memory_strategy
+        self.enable_constant_folding = enable_constant_folding
         self.console = Console()
 
         # Initialize compiler stages
-        self.frontend = ONNXFrontend()
+        self.frontend = ONNXFrontend(enable_simplify=enable_constant_folding)
         self.pass_manager = PassManager()
         self.backend = self._create_backend(target)
 
