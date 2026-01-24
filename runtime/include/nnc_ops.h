@@ -84,6 +84,13 @@ void nnc_softmax(Tensor* input, Tensor* output, int axis);
  */
 void nnc_sqrt(Tensor* input, Tensor* output);
 
+/* Pow - element-wise power
+ * Args:
+ *   input:  Input tensor (base)
+ *   output: Output tensor (x^2 for each element, for LayerNorm variance)
+ */
+void nnc_pow(Tensor* input, Tensor* output);
+
 /* Exp - element-wise exponential
  * Args:
  *   input:  Input tensor

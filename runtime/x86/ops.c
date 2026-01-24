@@ -1335,6 +1335,20 @@ void nnc_sqrt(Tensor* input, Tensor* output) {
     }
 }
 
+void nnc_pow(Tensor* input, Tensor* output) {
+    /* Element-wise power operation (x^2)
+     * Used for LayerNorm variance computation
+     * Computes x^2 for each element
+     */
+    int64_t n = tensor_numel(output);
+    float* in_data = (float*)input->data;
+    float* out_data = (float*)output->data;
+
+    for (int64_t i = 0; i < n; i++) {
+        out_data[i] = in_data[i] * in_data[i];
+    }
+}
+
 void nnc_exp(Tensor* input, Tensor* output) {
     /* Element-wise exponential operation
      * Computes exp(x) for each element

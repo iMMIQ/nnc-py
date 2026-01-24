@@ -16,10 +16,10 @@
   extern Tensor tensor_embedding_MatMul_output_0;
   extern Tensor tensor_embedding_Add_output_0;
   extern Tensor tensor_Relu_output_0;
-  extern Tensor tensor_v_67;
-  extern Tensor tensor_v_68;
-  extern Tensor tensor_v_69;
-  extern Tensor tensor_v_70;
+  extern Tensor tensor_v_84;
+  extern Tensor tensor_v_85;
+  extern Tensor tensor_v_86;
+  extern Tensor tensor_v_87;
   extern Tensor tensor_attn1_q_proj_Add_output_0;
   extern Tensor tensor_attn1_k_proj_Add_output_0;
   extern Tensor tensor_attn1_v_proj_Add_output_0;
@@ -31,10 +31,10 @@
   extern Tensor tensor_attn1_out_proj_MatMul_output_0;
   extern Tensor tensor_attn1_out_proj_Add_output_0;
   extern Tensor tensor_Relu_1_output_0;
-  extern Tensor tensor_v_74;
-  extern Tensor tensor_v_75;
-  extern Tensor tensor_v_76;
-  extern Tensor tensor_v_77;
+  extern Tensor tensor_v_91;
+  extern Tensor tensor_v_92;
+  extern Tensor tensor_v_93;
+  extern Tensor tensor_v_94;
   extern Tensor tensor_attn2_q_proj_Add_output_0;
   extern Tensor tensor_attn2_k_proj_Add_output_0;
   extern Tensor tensor_attn2_v_proj_Add_output_0;
@@ -46,6 +46,13 @@
   extern Tensor tensor_attn2_out_proj_MatMul_output_0;
   extern Tensor tensor_attn2_out_proj_Add_output_0;
   extern Tensor tensor_Relu_2_output_0;
+  extern Tensor tensor_norm_ReduceMean_output_0;
+  extern Tensor tensor_norm_Sub_output_0;
+  extern Tensor tensor_norm_Pow_output_0;
+  extern Tensor tensor_norm_ReduceMean_1_output_0;
+  extern Tensor tensor_norm_Add_output_0;
+  extern Tensor tensor_norm_Sqrt_output_0;
+  extern Tensor tensor_norm_Div_output_0;
   extern Tensor tensor_classifier_classifier_0_Flatten_output_0;
   extern Tensor tensor_classifier_classifier_1_Gemm_output_0;
   extern Tensor tensor_classifier_classifier_2_Relu_output_0;
@@ -62,17 +69,19 @@
   extern Tensor tensor_classifier_1_bias;
   extern Tensor tensor_classifier_3_weight;
   extern Tensor tensor_classifier_3_bias;
-  extern Tensor tensor_onnx_MatMul_69;
-  extern Tensor tensor_onnx_MatMul_73;
-  extern Tensor tensor_onnx_MatMul_77;
+  extern Tensor tensor_onnx_MatMul_82;
+  extern Tensor tensor_onnx_MatMul_86;
+  extern Tensor tensor_onnx_MatMul_90;
   extern Tensor tensor_attn1_Constant_output_0;
-  extern Tensor tensor_v_71;
-  extern Tensor tensor_v_66;
-  extern Tensor tensor_v_73;
+  extern Tensor tensor_norm_Constant_output_0;
+  extern Tensor tensor_norm_Constant_1_output_0;
+  extern Tensor tensor_v_88;
+  extern Tensor tensor_v_83;
+  extern Tensor tensor_v_90;
   
   /* MatMul: /embedding/MatMul */
   void node_embedding_MatMul(void) {
-      nnc_matmul(&tensor_input, &tensor_onnx_MatMul_69, &tensor_embedding_MatMul_output_0);
+      nnc_matmul(&tensor_input, &tensor_onnx_MatMul_82, &tensor_embedding_MatMul_output_0);
   }
   
   /* Add: /embedding/Add */
@@ -87,32 +96,32 @@
   
   /* MatMul: MatMul_<ID>_MatMul */
   void node_MatMul_<ID>_MatMul(void) {
-      nnc_matmul(&tensor_Relu_output_0, &tensor_v_66, &tensor_v_67);
+      nnc_matmul(&tensor_Relu_output_0, &tensor_v_83, &tensor_v_84);
   }
   
   /* Split: Split_<ID>_Split */
   void node_Split_<ID>_Split(void) {
       static Tensor* node_Split_<ID>_Split_outputs[3] = {
-          &tensor_v_68,
-          &tensor_v_69,
-          &tensor_v_70,
+          &tensor_v_85,
+          &tensor_v_86,
+          &tensor_v_87,
       };
-      nnc_split(&tensor_v_67, node_Split_<ID>_Split_outputs, 3, -1);
+      nnc_split(&tensor_v_84, node_Split_<ID>_Split_outputs, 3, -1);
   }
   
   /* Add: /attn1/q_proj/Add */
   void node_attn1_q_proj_Add(void) {
-      nnc_add(&tensor_attn1_q_proj_bias, &tensor_v_68, &tensor_attn1_q_proj_Add_output_0);
+      nnc_add(&tensor_attn1_q_proj_bias, &tensor_v_85, &tensor_attn1_q_proj_Add_output_0);
   }
   
   /* Add: /attn1/k_proj/Add */
   void node_attn1_k_proj_Add(void) {
-      nnc_add(&tensor_attn1_k_proj_bias, &tensor_v_69, &tensor_attn1_k_proj_Add_output_0);
+      nnc_add(&tensor_attn1_k_proj_bias, &tensor_v_86, &tensor_attn1_k_proj_Add_output_0);
   }
   
   /* Add: /attn1/v_proj/Add */
   void node_attn1_v_proj_Add(void) {
-      nnc_add(&tensor_attn1_v_proj_bias, &tensor_v_70, &tensor_attn1_v_proj_Add_output_0);
+      nnc_add(&tensor_attn1_v_proj_bias, &tensor_v_87, &tensor_attn1_v_proj_Add_output_0);
   }
   
   /* Transpose: /attn1/Transpose */
@@ -143,7 +152,7 @@
   
   /* MatMul: /attn1/out_proj/MatMul */
   void node_attn1_out_proj_MatMul(void) {
-      nnc_matmul(&tensor_attn1_MatMul_1_output_0, &tensor_onnx_MatMul_73, &tensor_attn1_out_proj_MatMul_output_0);
+      nnc_matmul(&tensor_attn1_MatMul_1_output_0, &tensor_onnx_MatMul_86, &tensor_attn1_out_proj_MatMul_output_0);
   }
   
   /* Add: /attn1/out_proj/Add */
@@ -158,32 +167,32 @@
   
   /* MatMul: MatMul_<ID>_MatMul */
   void node_MatMul_<ID>_MatMul(void) {
-      nnc_matmul(&tensor_Relu_1_output_0, &tensor_v_73, &tensor_v_74);
+      nnc_matmul(&tensor_Relu_1_output_0, &tensor_v_90, &tensor_v_91);
   }
   
   /* Split: Split_<ID>_Split */
   void node_Split_<ID>_Split(void) {
       static Tensor* node_Split_<ID>_Split_outputs[3] = {
-          &tensor_v_75,
-          &tensor_v_76,
-          &tensor_v_77,
+          &tensor_v_92,
+          &tensor_v_93,
+          &tensor_v_94,
       };
-      nnc_split(&tensor_v_74, node_Split_<ID>_Split_outputs, 3, -1);
+      nnc_split(&tensor_v_91, node_Split_<ID>_Split_outputs, 3, -1);
   }
   
   /* Add: /attn2/q_proj/Add */
   void node_attn2_q_proj_Add(void) {
-      nnc_add(&tensor_attn2_q_proj_bias, &tensor_v_75, &tensor_attn2_q_proj_Add_output_0);
+      nnc_add(&tensor_attn2_q_proj_bias, &tensor_v_92, &tensor_attn2_q_proj_Add_output_0);
   }
   
   /* Add: /attn2/k_proj/Add */
   void node_attn2_k_proj_Add(void) {
-      nnc_add(&tensor_attn2_k_proj_bias, &tensor_v_76, &tensor_attn2_k_proj_Add_output_0);
+      nnc_add(&tensor_attn2_k_proj_bias, &tensor_v_93, &tensor_attn2_k_proj_Add_output_0);
   }
   
   /* Add: /attn2/v_proj/Add */
   void node_attn2_v_proj_Add(void) {
-      nnc_add(&tensor_attn2_v_proj_bias, &tensor_v_77, &tensor_attn2_v_proj_Add_output_0);
+      nnc_add(&tensor_attn2_v_proj_bias, &tensor_v_94, &tensor_attn2_v_proj_Add_output_0);
   }
   
   /* Transpose: /attn2/Transpose */
@@ -214,7 +223,7 @@
   
   /* MatMul: /attn2/out_proj/MatMul */
   void node_attn2_out_proj_MatMul(void) {
-      nnc_matmul(&tensor_attn2_MatMul_1_output_0, &tensor_onnx_MatMul_77, &tensor_attn2_out_proj_MatMul_output_0);
+      nnc_matmul(&tensor_attn2_MatMul_1_output_0, &tensor_onnx_MatMul_90, &tensor_attn2_out_proj_MatMul_output_0);
   }
   
   /* Add: /attn2/out_proj/Add */
@@ -227,9 +236,44 @@
       nnc_relu(&tensor_attn2_out_proj_Add_output_0, &tensor_Relu_2_output_0);
   }
   
+  /* ReduceMean: /norm/ReduceMean */
+  void node_norm_ReduceMean(void) {
+      nnc_reducemean(&tensor_Relu_2_output_0, &tensor_norm_ReduceMean_output_0, -1, 1);
+  }
+  
+  /* Sub: /norm/Sub */
+  void node_norm_Sub(void) {
+      nnc_sub(&tensor_Relu_2_output_0, &tensor_norm_ReduceMean_output_0, &tensor_norm_Sub_output_0);
+  }
+  
+  /* Pow: /norm/Pow */
+  void node_norm_Pow(void) {
+      nnc_pow(&tensor_norm_Sub_output_0, &tensor_norm_Pow_output_0);
+  }
+  
+  /* ReduceMean: /norm/ReduceMean_1 */
+  void node_norm_ReduceMean_1(void) {
+      nnc_reducemean(&tensor_norm_Pow_output_0, &tensor_norm_ReduceMean_1_output_0, -1, 1);
+  }
+  
+  /* Add: /norm/Add */
+  void node_norm_Add(void) {
+      nnc_add(&tensor_norm_ReduceMean_1_output_0, &tensor_norm_Constant_1_output_0, &tensor_norm_Add_output_0);
+  }
+  
+  /* Sqrt: /norm/Sqrt */
+  void node_norm_Sqrt(void) {
+      nnc_sqrt(&tensor_norm_Add_output_0, &tensor_norm_Sqrt_output_0);
+  }
+  
+  /* Div: /norm/Div */
+  void node_norm_Div(void) {
+      nnc_div(&tensor_norm_Sub_output_0, &tensor_norm_Sqrt_output_0, &tensor_norm_Div_output_0);
+  }
+  
   /* Flatten: /classifier/classifier.0/Flatten */
   void node_classifier_classifier_0_Flatten(void) {
-      nnc_flatten(&tensor_Relu_2_output_0, &tensor_classifier_classifier_0_Flatten_output_0, 1);
+      nnc_flatten(&tensor_norm_Div_output_0, &tensor_classifier_classifier_0_Flatten_output_0, 1);
   }
   
   /* Gemm: /classifier/classifier.1/Gemm */
@@ -278,6 +322,13 @@
       node_attn2_out_proj_MatMul();
       node_attn2_out_proj_Add();
       node_Relu_2();
+      node_norm_ReduceMean();
+      node_norm_Sub();
+      node_norm_Pow();
+      node_norm_ReduceMean_1();
+      node_norm_Add();
+      node_norm_Sqrt();
+      node_norm_Div();
       node_classifier_classifier_0_Flatten();
       node_classifier_classifier_1_Gemm();
       node_classifier_classifier_2_Relu();
@@ -300,10 +351,10 @@
   extern Tensor tensor_embedding_MatMul_output_0;
   extern Tensor tensor_embedding_Add_output_0;
   extern Tensor tensor_Relu_output_0;
-  extern Tensor tensor_v_67;
-  extern Tensor tensor_v_68;
-  extern Tensor tensor_v_69;
-  extern Tensor tensor_v_70;
+  extern Tensor tensor_v_84;
+  extern Tensor tensor_v_85;
+  extern Tensor tensor_v_86;
+  extern Tensor tensor_v_87;
   extern Tensor tensor_attn1_q_proj_Add_output_0;
   extern Tensor tensor_attn1_k_proj_Add_output_0;
   extern Tensor tensor_attn1_v_proj_Add_output_0;
@@ -315,10 +366,10 @@
   extern Tensor tensor_attn1_out_proj_MatMul_output_0;
   extern Tensor tensor_attn1_out_proj_Add_output_0;
   extern Tensor tensor_Relu_1_output_0;
-  extern Tensor tensor_v_74;
-  extern Tensor tensor_v_75;
-  extern Tensor tensor_v_76;
-  extern Tensor tensor_v_77;
+  extern Tensor tensor_v_91;
+  extern Tensor tensor_v_92;
+  extern Tensor tensor_v_93;
+  extern Tensor tensor_v_94;
   extern Tensor tensor_attn2_q_proj_Add_output_0;
   extern Tensor tensor_attn2_k_proj_Add_output_0;
   extern Tensor tensor_attn2_v_proj_Add_output_0;
@@ -330,6 +381,13 @@
   extern Tensor tensor_attn2_out_proj_MatMul_output_0;
   extern Tensor tensor_attn2_out_proj_Add_output_0;
   extern Tensor tensor_Relu_2_output_0;
+  extern Tensor tensor_norm_ReduceMean_output_0;
+  extern Tensor tensor_norm_Sub_output_0;
+  extern Tensor tensor_norm_Pow_output_0;
+  extern Tensor tensor_norm_ReduceMean_1_output_0;
+  extern Tensor tensor_norm_Add_output_0;
+  extern Tensor tensor_norm_Sqrt_output_0;
+  extern Tensor tensor_norm_Div_output_0;
   extern Tensor tensor_classifier_classifier_0_Flatten_output_0;
   extern Tensor tensor_classifier_classifier_1_Gemm_output_0;
   extern Tensor tensor_classifier_classifier_2_Relu_output_0;
@@ -346,14 +404,16 @@
   extern Tensor tensor_classifier_1_bias;
   extern Tensor tensor_classifier_3_weight;
   extern Tensor tensor_classifier_3_bias;
-  extern Tensor tensor_onnx_MatMul_69;
-  extern Tensor tensor_onnx_MatMul_73;
-  extern Tensor tensor_onnx_MatMul_77;
+  extern Tensor tensor_onnx_MatMul_82;
+  extern Tensor tensor_onnx_MatMul_86;
+  extern Tensor tensor_onnx_MatMul_90;
   extern Tensor tensor_attn1_Constant_output_0;
-  extern Tensor tensor_v_71;
-  extern Tensor tensor_v_66;
-  extern Tensor tensor_v_73;
-  extern const int64_t tensor_v_71_data[3];
+  extern Tensor tensor_norm_Constant_output_0;
+  extern Tensor tensor_norm_Constant_1_output_0;
+  extern Tensor tensor_v_88;
+  extern Tensor tensor_v_83;
+  extern Tensor tensor_v_90;
+  extern const int64_t tensor_v_88_data[3];
   
   /* Constants loading function */
   int nnc_load_constants(const char* path);
@@ -426,42 +486,42 @@
       .nbytes = <SIZE>,
   };
   
-  /* Tensor: _v_67 */
-  static int64_t tensor_v_67_shape[] = {1, 16, 192};
-  Tensor tensor_v_67 = {
+  /* Tensor: _v_84 */
+  static int64_t tensor_v_84_shape[] = {1, 16, 192};
+  Tensor tensor_v_84 = {
       .data = _nnc_memory_pool + <OFFSET>,
       .dtype = NNC_DTYPE_FLOAT32,
-      .shape = tensor_v_67_shape,
+      .shape = tensor_v_84_shape,
       .ndim = 3,
       .nbytes = <SIZE>,
   };
   
-  /* Tensor: _v_68 */
-  static int64_t tensor_v_68_shape[] = {1, 16, 64};
-  Tensor tensor_v_68 = {
+  /* Tensor: _v_85 */
+  static int64_t tensor_v_85_shape[] = {1, 16, 64};
+  Tensor tensor_v_85 = {
       .data = _nnc_memory_pool + <OFFSET>,
       .dtype = NNC_DTYPE_FLOAT32,
-      .shape = tensor_v_68_shape,
+      .shape = tensor_v_85_shape,
       .ndim = 3,
       .nbytes = <SIZE>,
   };
   
-  /* Tensor: _v_69 */
-  static int64_t tensor_v_69_shape[] = {1, 16, 64};
-  Tensor tensor_v_69 = {
+  /* Tensor: _v_86 */
+  static int64_t tensor_v_86_shape[] = {1, 16, 64};
+  Tensor tensor_v_86 = {
       .data = _nnc_memory_pool + <OFFSET>,
       .dtype = NNC_DTYPE_FLOAT32,
-      .shape = tensor_v_69_shape,
+      .shape = tensor_v_86_shape,
       .ndim = 3,
       .nbytes = <SIZE>,
   };
   
-  /* Tensor: _v_70 */
-  static int64_t tensor_v_70_shape[] = {1, 16, 64};
-  Tensor tensor_v_70 = {
+  /* Tensor: _v_87 */
+  static int64_t tensor_v_87_shape[] = {1, 16, 64};
+  Tensor tensor_v_87 = {
       .data = _nnc_memory_pool + <OFFSET>,
       .dtype = NNC_DTYPE_FLOAT32,
-      .shape = tensor_v_70_shape,
+      .shape = tensor_v_87_shape,
       .ndim = 3,
       .nbytes = <SIZE>,
   };
@@ -576,42 +636,42 @@
       .nbytes = <SIZE>,
   };
   
-  /* Tensor: _v_74 */
-  static int64_t tensor_v_74_shape[] = {1, 16, 192};
-  Tensor tensor_v_74 = {
+  /* Tensor: _v_91 */
+  static int64_t tensor_v_91_shape[] = {1, 16, 192};
+  Tensor tensor_v_91 = {
       .data = _nnc_memory_pool + <OFFSET>,
       .dtype = NNC_DTYPE_FLOAT32,
-      .shape = tensor_v_74_shape,
+      .shape = tensor_v_91_shape,
       .ndim = 3,
       .nbytes = <SIZE>,
   };
   
-  /* Tensor: _v_75 */
-  static int64_t tensor_v_75_shape[] = {1, 16, 64};
-  Tensor tensor_v_75 = {
+  /* Tensor: _v_92 */
+  static int64_t tensor_v_92_shape[] = {1, 16, 64};
+  Tensor tensor_v_92 = {
       .data = _nnc_memory_pool + <OFFSET>,
       .dtype = NNC_DTYPE_FLOAT32,
-      .shape = tensor_v_75_shape,
+      .shape = tensor_v_92_shape,
       .ndim = 3,
       .nbytes = <SIZE>,
   };
   
-  /* Tensor: _v_76 */
-  static int64_t tensor_v_76_shape[] = {1, 16, 64};
-  Tensor tensor_v_76 = {
+  /* Tensor: _v_93 */
+  static int64_t tensor_v_93_shape[] = {1, 16, 64};
+  Tensor tensor_v_93 = {
       .data = _nnc_memory_pool + <OFFSET>,
       .dtype = NNC_DTYPE_FLOAT32,
-      .shape = tensor_v_76_shape,
+      .shape = tensor_v_93_shape,
       .ndim = 3,
       .nbytes = <SIZE>,
   };
   
-  /* Tensor: _v_77 */
-  static int64_t tensor_v_77_shape[] = {1, 16, 64};
-  Tensor tensor_v_77 = {
+  /* Tensor: _v_94 */
+  static int64_t tensor_v_94_shape[] = {1, 16, 64};
+  Tensor tensor_v_94 = {
       .data = _nnc_memory_pool + <OFFSET>,
       .dtype = NNC_DTYPE_FLOAT32,
-      .shape = tensor_v_77_shape,
+      .shape = tensor_v_94_shape,
       .ndim = 3,
       .nbytes = <SIZE>,
   };
@@ -726,6 +786,76 @@
       .nbytes = <SIZE>,
   };
   
+  /* Tensor: /norm/ReduceMean_output_0 */
+  static int64_t tensor_norm_ReduceMean_output_0_shape[] = {1, 16, 1};
+  Tensor tensor_norm_ReduceMean_output_0 = {
+      .data = _nnc_memory_pool + <OFFSET>,
+      .dtype = NNC_DTYPE_FLOAT32,
+      .shape = tensor_norm_ReduceMean_output_0_shape,
+      .ndim = 3,
+      .nbytes = <SIZE>,
+  };
+  
+  /* Tensor: /norm/Sub_output_0 */
+  static int64_t tensor_norm_Sub_output_0_shape[] = {1, 16, 64};
+  Tensor tensor_norm_Sub_output_0 = {
+      .data = _nnc_memory_pool + <OFFSET>,
+      .dtype = NNC_DTYPE_FLOAT32,
+      .shape = tensor_norm_Sub_output_0_shape,
+      .ndim = 3,
+      .nbytes = <SIZE>,
+  };
+  
+  /* Tensor: /norm/Pow_output_0 */
+  static int64_t tensor_norm_Pow_output_0_shape[] = {1, 16, 64};
+  Tensor tensor_norm_Pow_output_0 = {
+      .data = _nnc_memory_pool + <OFFSET>,
+      .dtype = NNC_DTYPE_FLOAT32,
+      .shape = tensor_norm_Pow_output_0_shape,
+      .ndim = 3,
+      .nbytes = <SIZE>,
+  };
+  
+  /* Tensor: /norm/ReduceMean_1_output_0 */
+  static int64_t tensor_norm_ReduceMean_1_output_0_shape[] = {1, 16, 1};
+  Tensor tensor_norm_ReduceMean_1_output_0 = {
+      .data = _nnc_memory_pool + <OFFSET>,
+      .dtype = NNC_DTYPE_FLOAT32,
+      .shape = tensor_norm_ReduceMean_1_output_0_shape,
+      .ndim = 3,
+      .nbytes = <SIZE>,
+  };
+  
+  /* Tensor: /norm/Add_output_0 */
+  static int64_t tensor_norm_Add_output_0_shape[] = {1, 16, 1};
+  Tensor tensor_norm_Add_output_0 = {
+      .data = _nnc_memory_pool + <OFFSET>,
+      .dtype = NNC_DTYPE_FLOAT32,
+      .shape = tensor_norm_Add_output_0_shape,
+      .ndim = 3,
+      .nbytes = <SIZE>,
+  };
+  
+  /* Tensor: /norm/Sqrt_output_0 */
+  static int64_t tensor_norm_Sqrt_output_0_shape[] = {1, 16, 1};
+  Tensor tensor_norm_Sqrt_output_0 = {
+      .data = _nnc_memory_pool + <OFFSET>,
+      .dtype = NNC_DTYPE_FLOAT32,
+      .shape = tensor_norm_Sqrt_output_0_shape,
+      .ndim = 3,
+      .nbytes = <SIZE>,
+  };
+  
+  /* Tensor: /norm/Div_output_0 */
+  static int64_t tensor_norm_Div_output_0_shape[] = {1, 16, 64};
+  Tensor tensor_norm_Div_output_0 = {
+      .data = _nnc_memory_pool + <OFFSET>,
+      .dtype = NNC_DTYPE_FLOAT32,
+      .shape = tensor_norm_Div_output_0_shape,
+      .ndim = 3,
+      .nbytes = <SIZE>,
+  };
+  
   /* Tensor: /classifier/classifier.0/Flatten_output_0 */
   static int64_t tensor_classifier_classifier_0_Flatten_output_0_shape[] = {1, 1024};
   Tensor tensor_classifier_classifier_0_Flatten_output_0 = {
@@ -761,6 +891,6 @@
 # ---
 # name: TestIRSnapshots.test_simple_transformer_ir_snapshot
   GraphSnapshotWrapper(
-    graph=Graph(name=main_graph, nodes=33, inputs=1, outputs=1),
+    graph=Graph(name=main_graph, nodes=40, inputs=1, outputs=1),
   )
 # ---

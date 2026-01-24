@@ -257,13 +257,11 @@ class SimpleTransformer(nn.Module):
     Architecture:
     1. Token embedding (Linear projection)
     2. 2 Self-Attention layers with ReLU activation
-    3. Classification head
+    3. Layer normalization
+    4. Classification head
 
     This is NOT a full BERT/GPT-style transformer, but focuses on
     the core attention mechanism that defines the architecture.
-
-    Note: LayerNorm is omitted to avoid ONNX operators (Slice, Gather, Shape)
-    that may not be supported by the compiler.
     """
 
     def __init__(self, seq_len: int = 16, input_dim: int = 32,
@@ -279,6 +277,9 @@ class SimpleTransformer(nn.Module):
         # Two self-attention layers
         self.attn1 = SelfAttention(embed_dim)
         self.attn2 = SelfAttention(embed_dim)
+
+        # Layer norm
+        self.norm = nn.LayerNorm(embed_dim)
 
         # Classification head: global average pool -> linear
         self.classifier = nn.Sequential(
@@ -299,6 +300,9 @@ class SimpleTransformer(nn.Module):
         x = torch.relu(x)
         x = self.attn2(x)
         x = torch.relu(x)
+
+        # Layer norm
+        x = self.norm(x)
 
         # Classification
         x = self.classifier(x)

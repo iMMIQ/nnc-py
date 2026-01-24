@@ -105,6 +105,10 @@ class CEmitter:
             self._emit_maxpool_call(ctx, node)
         elif node.op_type == OpType.GLOBAL_AVGPOOL:
             self._emit_global_avgpool_call(ctx, node)
+        elif node.op_type == OpType.REDUCE_MEAN:
+            self._emit_reducemean_call(ctx, node)
+        elif node.op_type == OpType.POW:
+            self._emit_pow_call(ctx, node)
         else:
             # Generic handling for other operations
             self._emit_generic_call(ctx, node, op_name)
@@ -444,6 +448,43 @@ class CEmitter:
             output_tensor = ctx.graph.get_tensor(node.outputs[0])
             ndim = output_tensor.shape.rank() if output_tensor.shape else 1
             self.write_line(f"nnc_tile(&{input_var}, &{output_var}, NULL, {ndim});")
+
+    def _emit_reducemean_call(self, ctx: CompileContext, node: Node):
+        """Emit ReduceMean operation call."""
+        input_var = ctx.tensor_symbols.get(node.inputs[0], node.inputs[0])
+        output_var = ctx.tensor_symbols.get(node.outputs[0], node.outputs[0])
+
+        # Get axis from attributes (may be "axes" or "axis")
+        axes = node.attrs.get("axes", None)  # ONNX uses "axes" (plural)
+        axis = node.attrs.get("axis", None)  # Fallback to "axis" (singular)
+        keepdims = node.attrs.get("keepdims", 1)
+
+        # Handle axes as a list (take first element if it's a list)
+        if axes is not None:
+            if isinstance(axes, list) and len(axes) > 0:
+                axis_val = axes[0]
+            else:
+                axis_val = axes
+        elif axis is not None:
+            axis_val = axis
+        else:
+            # Default to last axis (-1)
+            axis_val = -1
+
+        self.write_line(f"nnc_reducemean(&{input_var}, &{output_var}, {axis_val}, {keepdims});")
+
+    def _emit_pow_call(self, ctx: CompileContext, node: Node):
+        """Emit Pow operation call.
+
+        For LayerNorm, this is always squaring (x^2), so we can use
+        the unary nnc_pow function.
+        """
+        input_var = ctx.tensor_symbols.get(node.inputs[0], node.inputs[0])
+        output_var = ctx.tensor_symbols.get(node.outputs[0], node.outputs[0])
+
+        # For LayerNorm variance computation, exponent is always 2
+        # We use the unary nnc_pow function that computes x^2
+        self.write_line(f"nnc_pow(&{input_var}, &{output_var});")
 
     def _emit_generic_call(self, ctx: CompileContext, node: Node, op_name: str):
         """Emit generic operation call."""
