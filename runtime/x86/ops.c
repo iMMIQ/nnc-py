@@ -692,7 +692,8 @@ void nnc_matmul(Tensor* a, Tensor* b, Tensor* output) {
         }
     } else if (a_ndim >= 2 && b_ndim >= 2) {
         /* Batched matrix multiplication
-         * Broadcasting: [B, M, K] @ [B, K, N] or [M, K] @ [B, K, N], etc.
+         * Broadcasting: [B, M, K] @ [B, K, N] or [B, M, K] @ [K, N], etc.
+         * When B has fewer dimensions than A, it is broadcast across batches.
          */
 
         /* Get batch dimensions */
@@ -713,11 +714,18 @@ void nnc_matmul(Tensor* a, Tensor* b, Tensor* output) {
         }
         a_batch_stride /= (a->shape[a_ndim - 2] * a->shape[a_ndim - 1]);
 
+        /* For B: if it has fewer batch dimensions than output, it's broadcast (stride = 0) */
         int64_t b_batch_stride = 1;
-        for (int i = 0; i < b_ndim; i++) {
-            b_batch_stride *= b->shape[i];
+        if (b_ndim < out_ndim) {
+            /* B is 2D while A/output is 3D or higher - broadcast across batches */
+            b_batch_stride = 0;
+        } else {
+            /* B has same number of batch dimensions as output */
+            for (int i = 0; i < b_ndim; i++) {
+                b_batch_stride *= b->shape[i];
+            }
+            b_batch_stride /= (b->shape[b_ndim - 2] * b->shape[b_ndim - 1]);
         }
-        b_batch_stride /= (b->shape[b_ndim - 2] * b->shape[b_ndim - 1]);
 
         int64_t out_batch_stride = M * N;
 
