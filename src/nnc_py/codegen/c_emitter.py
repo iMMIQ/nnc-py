@@ -132,6 +132,10 @@ class CEmitter:
             self._emit_not_call(ctx, node)
         elif node.op_type == OpType.CAST:
             self._emit_cast_call(ctx, node)
+        elif node.op_type == OpType.GATHER:
+            self._emit_gather_call(ctx, node)
+        elif node.op_type == OpType.LSTM:
+            self._emit_lstm_call(ctx, node)
         else:
             # Generic handling for other operations
             self._emit_generic_call(ctx, node, op_name)
@@ -742,6 +746,83 @@ class CEmitter:
     def write_line(self, text: str = "") -> None:
         """Write a line with proper indentation."""
         self.output.write("    " * self.indent + text + "\n")
+
+    def _emit_gather_call(self, ctx: CompileContext, node: Node) -> None:
+        """Emit Gather operation call.
+
+        Gather extracts elements from data at indices specified by indices tensor.
+        The axis attribute specifies which axis to gather along.
+        """
+        data_var = ctx.tensor_symbols.get(node.inputs[0], node.inputs[0])
+        indices_var = ctx.tensor_symbols.get(node.inputs[1], node.inputs[1])
+        output_var = ctx.tensor_symbols.get(node.outputs[0], node.outputs[0])
+
+        # Get axis from attributes
+        axis = node.attrs.get("axis", 0)
+
+        # Determine data type: 1 for int64 (e.g., from Shape operator), 0 for float
+        data_tensor = ctx.graph.get_tensor(node.inputs[0])
+        data_dtype = 1 if data_tensor and data_tensor.dtype == DataType.INT64 else 0
+
+        self.write_line(f"nnc_gather(&{data_var}, &{indices_var}, &{output_var}, {axis}, {data_dtype});")
+
+    def _emit_lstm_call(self, ctx: CompileContext, node: Node) -> None:
+        """Emit LSTM operation call.
+
+        LSTM has multiple inputs and outputs:
+        Inputs: X, W, R, B, sequence_lens, initial_h, initial_c, P
+        Outputs: Y, Y_h, Y_c
+
+        We focus on the main outputs: Y (sequence output), Y_h (final hidden), Y_c (final cell)
+        """
+        # Build args list
+        args = []
+
+        # X: input tensor
+        if len(node.inputs) >= 1:
+            var_name = ctx.tensor_symbols.get(node.inputs[0], node.inputs[0])
+            args.append(f"&{var_name}")
+
+        # W: weights tensor
+        if len(node.inputs) >= 2:
+            var_name = ctx.tensor_symbols.get(node.inputs[1], node.inputs[1])
+            args.append(f"&{var_name}")
+
+        # R: recurrence weights tensor
+        if len(node.inputs) >= 3:
+            var_name = ctx.tensor_symbols.get(node.inputs[2], node.inputs[2])
+            args.append(f"&{var_name}")
+
+        # B: bias tensor (optional)
+        if len(node.inputs) >= 4 and node.inputs[3]:
+            var_name = ctx.tensor_symbols.get(node.inputs[3], node.inputs[3])
+            args.append(f"&{var_name}")
+        else:
+            args.append("NULL")
+
+        # Outputs: Y (main output), Y_h (hidden state), Y_c (cell state)
+        if len(node.outputs) >= 1:
+            var_name = ctx.tensor_symbols.get(node.outputs[0], node.outputs[0])
+            args.append(f"&{var_name}")  # Y
+        if len(node.outputs) >= 2:
+            var_name = ctx.tensor_symbols.get(node.outputs[1], node.outputs[1])
+            args.append(f"&{var_name}")  # Y_h
+        if len(node.outputs) >= 3:
+            var_name = ctx.tensor_symbols.get(node.outputs[2], node.outputs[2])
+            args.append(f"&{var_name}")  # Y_c
+
+        # LSTM attributes
+        direction = node.attrs.get("direction", "forward")
+        hidden_size = node.attrs.get("hidden_size", 0)
+
+        # Map direction to int: forward=0, reverse=1, bidirectional=2
+        direction_map = {"forward": 0, "reverse": 1, "bidirectional": 2}
+        direction_val = direction_map.get(direction, 0)
+
+        args.append(str(direction_val))
+        args.append(str(hidden_size))
+
+        self.write_line(f"nnc_lstm({', '.join(args)});")
 
     def _map_dtype(self, dtype: DataType) -> str:
         """Map IR dtype to C dtype."""

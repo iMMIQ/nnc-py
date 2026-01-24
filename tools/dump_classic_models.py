@@ -450,6 +450,82 @@ class OperatorCoverageModel(nn.Module):
         return x
 
 
+class SimpleLSTM(nn.Module):
+    """A simple LSTM model for sequence processing.
+
+    This model demonstrates LSTM (Long Short-Term Memory) functionality,
+    which is the core of many sequence-to-sequence models used in NLP,
+    time series forecasting, and more.
+
+    Architecture:
+    1. Input embedding (Linear projection)
+    2. LSTM layer
+    3. Output head (Linear)
+
+    The LSTM processes sequences and maintains hidden state across time steps.
+    """
+
+    def __init__(self, input_size: int = 32, hidden_size: int = 64,
+                 num_layers: int = 1, num_classes: int = 10):
+        super().__init__()
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+
+        # Input embedding: projects (input_dim) -> (hidden_size)
+        self.embedding = nn.Linear(input_size, hidden_size)
+
+        # LSTM layer
+        self.lstm = nn.LSTM(hidden_size, hidden_size, num_layers, batch_first=True)
+
+        # Classification head: use final hidden state
+        self.classifier = nn.Sequential(
+            nn.Linear(hidden_size, 32),
+            nn.ReLU(),
+            nn.Linear(32, num_classes),
+        )
+
+    def forward(self, x):
+        """Input shape: (batch, seq_len, input_dim)."""
+        # Embedding
+        x = self.embedding(x)
+        x = torch.relu(x)
+
+        # LSTM: output shape (batch, seq_len, hidden_size)
+        # hidden shape (num_layers, batch, hidden_size)
+        lstm_out, (hidden, _) = self.lstm(x)
+
+        # Use the final hidden state from the last layer
+        final_hidden = hidden[-1]  # (batch, hidden_size)
+
+        # Classification
+        x = self.classifier(final_hidden)
+        return x
+
+
+def export_simple_lstm(output_dir: Path) -> Path:
+    """Export a simple LSTM model to ONNX.
+
+    This model demonstrates LSTM functionality, the core of recurrent
+    neural networks used for sequence processing tasks.
+
+    Args:
+        output_dir: Directory to save the model.
+
+    Returns:
+        Path to the exported model.
+    """
+    model = SimpleLSTM(
+        input_size=32,     # Input feature dimension per time step
+        hidden_size=64,    # LSTM hidden state size
+        num_layers=1,      # Single LSTM layer
+        num_classes=10,
+    )
+    output_path = output_dir / "simple_lstm.onnx"
+    export_to_onnx(model, output_path, (1, 16, 32), "Simple LSTM")
+    return output_path
+
+
 def export_operator_coverage_model(output_dir: Path) -> Path:
     """Export the operator coverage model to ONNX.
 
@@ -567,6 +643,7 @@ def main() -> int:
         export_resnet18,
         export_simple_cnn,
         export_simple_mlp,
+        export_simple_lstm,
         export_simple_transformer,
         export_operator_coverage_model,
     ]
@@ -603,6 +680,7 @@ used for snapshot testing the nnc-py compiler.
 | `resnet18.onnx` | (1, 3, 224, 224) | Deep residual network, complex testing |
 | `simple_cnn.onnx` | (1, 3, 32, 32) | Minimal CNN for quick tests |
 | `simple_mlp.onnx` | (1, 1, 28, 28) | Simple feedforward network |
+| `simple_lstm.onnx` | (1, 16, 32) | LSTM for sequence processing |
 | `simple_transformer.onnx` | (1, 16, 32) | Self-attention mechanism, Transformer core |
 | `operator_coverage.onnx` | (1, 4, 8) | Comprehensive operator coverage test |
 

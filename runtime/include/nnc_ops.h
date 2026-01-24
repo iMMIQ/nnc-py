@@ -296,6 +296,47 @@ void nnc_or(Tensor* a, Tensor* b, Tensor* out);
  */
 void nnc_not(Tensor* input, Tensor* output);
 
+/* ============================================================================
+ * Indexing Operations
+ * ============================================================================ */
+
+/* Gather - gather elements along an axis
+ * Args:
+ *   data:    Input data tensor
+ *   indices: Indices tensor (int32 or int64)
+ *   output:  Output tensor with gathered elements
+ *   axis:    Axis along which to gather (0 for first dimension)
+ *   data_dtype: Data type of the data tensor (0=float, 1=int64)
+ *
+ * Output shape is data.shape[:axis] + indices.shape + data.shape[axis+1:]
+ */
+void nnc_gather(Tensor* data, Tensor* indices, Tensor* output, int axis, int data_dtype);
+
+/* ============================================================================
+ * RNN Operations
+ * ============================================================================ */
+
+/* LSTM - Long Short-Term Memory recurrent layer
+ * Args:
+ *   X:          Input tensor [seq_len, batch_size, input_size] or [batch_size, seq_len, input_size]
+ *   W:          Weights tensor [num_directions, 4*hidden_size, input_size]
+ *   R:          Recurrence weights tensor [num_directions, 4*hidden_size, hidden_size]
+ *   B:          Bias tensor [num_directions, 8*hidden_size] (can be NULL)
+ *   Y:          Output tensor [seq_len, num_directions, batch_size, hidden_size] or similar
+ *   Y_h:        Final hidden state [num_directions, batch_size, hidden_size]
+ *   Y_c:        Final cell state [num_directions, batch_size, hidden_size]
+ *   direction:  Direction (0=forward, 1=reverse, 2=bidirectional)
+ *   hidden_size: Hidden state size
+ *
+ * Note: This is a simplified LSTM implementation. For production use,
+ * consider using optimized libraries like cuDNN or oneDNN.
+ */
+void nnc_lstm(
+    Tensor* X, Tensor* W, Tensor* R, Tensor* B,
+    Tensor* Y, Tensor* Y_h, Tensor* Y_c,
+    int direction, int hidden_size
+);
+
 #ifdef __cplusplus
 }
 #endif

@@ -259,6 +259,13 @@ class ONNXFrontend:
                 attrs["num_outputs"] = int(attr.i)
             elif attr.name == "to":
                 attrs["to"] = int(attr.i)
+            # LSTM/RNN attributes
+            elif attr.name == "hidden_size":
+                attrs["hidden_size"] = int(attr.i)
+            elif attr.name == "direction":
+                attrs["direction"] = attr.s.decode() if attr.s else "forward"
+            elif attr.name == "layout":
+                attrs["layout"] = int(attr.i)
 
         return attrs
 
@@ -810,6 +817,129 @@ class ONNXFrontend:
                 shape=TensorShape(dims=[input_rank], layout=MemoryLayout.NHWC),
                 name=output_name,
             )
+
+        elif op_type == "Gather":
+            # Gather operation: output[index] = data[index] along specified axis
+            # Inputs: data, indices
+            # Output shape is data.shape[:axis] + indices.shape + data.shape[axis+1:]
+            if len(onnx_node.input) < 2:
+                return None
+
+            # Get axis attribute
+            axis = self._get_attr(onnx_node, "axis", 0)
+
+            # Get indices tensor to determine output shape
+            indices_name = onnx_node.input[1]
+            indices_tensor = graph.tensors.get(indices_name)
+            if not indices_tensor or not indices_tensor.shape.dims:
+                return None
+
+            # Handle negative axis
+            data_shape = input_tensor.shape.dims
+            if not data_shape:
+                return None
+
+            data_rank = len(data_shape)
+            if axis < 0:
+                axis = data_rank + axis
+
+            if axis < 0 or axis >= data_rank:
+                return None
+
+            # Compute output shape: data.shape[:axis] + indices.shape + data.shape[axis+1:]
+            indices_shape = indices_tensor.shape.dims
+            output_shape = list(data_shape[:axis]) + list(indices_shape) + list(data_shape[axis + 1:])
+
+            return TensorType(
+                dtype=input_tensor.dtype,
+                shape=TensorShape(dims=output_shape, layout=input_tensor.shape.layout),
+                name=output_name,
+            )
+
+        elif op_type == "LSTM":
+            # LSTM operation - ONNX LSTM has multiple outputs
+            # Outputs: Y (output), Y_h (hidden state), Y_c (cell state)
+            # For simplicity, we focus on the main output Y
+            #
+            # Input shapes:
+            #   X: [seq_length, batch_size, input_size] or [batch_size, seq_length, input_size]
+            #   W: [num_directions, 4*hidden_size, input_size]
+            #   R: [num_directions, 4*hidden_size, hidden_size]
+            #   B: [num_directions, 4*hidden_size] (optional)
+            #
+            # Output shapes:
+            #   Y: [seq_length, num_directions, batch_size, hidden_size]
+            #        or [batch_size, seq_length, num_directions, hidden_size]
+            #   Y_h: [num_directions, batch_size, hidden_size]
+            #   Y_c: [num_directions, batch_size, hidden_size]
+
+            # Get LSTM attributes
+            direction = self._get_attr(onnx_node, "direction", "forward")  # forward, reverse, bidirectional
+            hidden_size = self._get_attr(onnx_node, "hidden_size", None)
+
+            # Determine number of directions
+            num_directions = 2 if direction == "bidirectional" else 1
+
+            # Get input shape to determine batch_size and seq_length
+            input_shape = input_tensor.shape.dims
+            if not input_shape or len(input_shape) < 2:
+                return None
+
+            # Determine layout based on input shape
+            # ONNX LSTM supports two layouts:
+            #   0: [seq_length, batch_size, input_size] (default)
+            #   1: [batch_size, seq_length, input_size]
+            # We can infer from the shape - if first dim > second dim, likely seq_length first
+            layout = self._get_attr(onnx_node, "layout", 0)
+
+            if layout == 0:
+                # [seq_length, batch_size, input_size]
+                seq_length = input_shape[0]
+                batch_size = input_shape[1]
+                # Output shape: [seq_length, num_directions, batch_size, hidden_size]
+                if hidden_size:
+                    output_shape = [seq_length, num_directions, batch_size, hidden_size]
+                else:
+                    # Can't determine hidden size, use placeholder
+                    output_shape = [seq_length, num_directions, batch_size, -1]
+            else:
+                # [batch_size, seq_length, input_size]
+                batch_size = input_shape[0]
+                seq_length = input_shape[1]
+                # Output shape: [batch_size, seq_length, num_directions, hidden_size]
+                if hidden_size:
+                    output_shape = [batch_size, seq_length, num_directions, hidden_size]
+                else:
+                    output_shape = [batch_size, seq_length, num_directions, -1]
+
+            # Check which output this is (Y, Y_h, or Y_c)
+            # ONNX LSTM outputs are: [Y, Y_h, Y_c]
+            output_idx = -1
+            for i, out_name in enumerate(onnx_node.output):
+                if out_name == output_name:
+                    output_idx = i
+                    break
+
+            if output_idx == 0:  # Y: main output
+                return TensorType(
+                    dtype=input_tensor.dtype,
+                    shape=TensorShape(dims=output_shape, layout=MemoryLayout.NHWC),
+                    name=output_name,
+                )
+            elif output_idx == 1:  # Y_h: hidden state
+                hidden_shape = [num_directions, batch_size, hidden_size if hidden_size else -1]
+                return TensorType(
+                    dtype=input_tensor.dtype,
+                    shape=TensorShape(dims=hidden_shape, layout=MemoryLayout.NHWC),
+                    name=output_name,
+                )
+            elif output_idx == 2:  # Y_c: cell state
+                cell_shape = [num_directions, batch_size, hidden_size if hidden_size else -1]
+                return TensorType(
+                    dtype=input_tensor.dtype,
+                    shape=TensorShape(dims=cell_shape, layout=MemoryLayout.NHWC),
+                    name=output_name,
+                )
 
         # Default: same shape as input (for other ops)
         return TensorType(

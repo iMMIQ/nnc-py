@@ -75,6 +75,12 @@ class OpType(Enum):
     CLIP = "Clip"
     CAST = "Cast"
 
+    # RNN ops
+    LSTM = "LSTM"
+
+    # Indexing ops
+    GATHER = "Gather"
+
 
 @dataclass
 class Node:

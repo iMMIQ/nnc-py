@@ -8,6 +8,7 @@
 #include "nnc_runtime.h"
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
 
@@ -1560,5 +1561,422 @@ void nnc_not(Tensor* input, Tensor* output) {
 
     for (int64_t i = 0; i < n; i++) {
         out_data[i] = !in_data[i] ? 1 : 0;
+    }
+}
+
+/* ============================================================================
+ * Indexing Operations
+ * ============================================================================ */
+
+void nnc_gather(Tensor* data, Tensor* indices, Tensor* output, int axis, int data_dtype) {
+    /* Gather operation: extract elements from data along specified axis
+     * output[i][j][...] = data[i][indices[j]][...] for axis=1, etc.
+     *
+     * data_dtype: 0 for float, 1 for int64 (for shape tensors)
+     */
+    const int64_t* indices_data = (int64_t*)indices->data;
+
+    /* Get tensor shapes */
+    int64_t data_rank = data->ndim;
+    int64_t indices_rank = indices->ndim;
+    int64_t output_rank = output->ndim;
+
+    /* Handle negative axis */
+    if (axis < 0) {
+        axis = data_rank + axis;
+    }
+
+    /* Clamp axis to valid range */
+    if (axis < 0) axis = 0;
+    if (axis >= data_rank) axis = data_rank - 1;
+
+    /* Calculate total elements in output */
+    int64_t output_n = tensor_numel(output);
+
+    /* Simple case: scalar indices (0D) or single-element 1D */
+    if (indices_rank == 0 || (indices_rank == 1 && indices->shape[0] == 1)) {
+        int64_t gather_index = indices_data[0];
+
+        /* Handle negative indices */
+        int64_t dim_size = data->shape[axis];
+        if (gather_index < 0) {
+            gather_index += dim_size;
+        }
+
+        /* Clamp to valid range */
+        if (gather_index < 0) gather_index = 0;
+        if (gather_index >= dim_size) gather_index = dim_size - 1;
+
+        /* Handle INT64 data (e.g., from Shape operator) */
+        if (data_dtype == 1) {
+            const int64_t* data_data = (int64_t*)data->data;
+            int64_t* output_data = (int64_t*)output->data;
+
+            /* For 1D data */
+            if (data_rank == 1) {
+                output_data[0] = data_data[gather_index];
+                return;
+            }
+
+            /* For multi-dimensional data with scalar index, gather along axis */
+            /* Simply copy remaining dimensions */
+            int64_t copy_size = 1;
+            for (int i = axis + 1; i < data_rank; i++) {
+                copy_size *= data->shape[i];
+            }
+            for (int i = 0; i < copy_size; i++) {
+                output_data[i] = data_data[gather_index * copy_size + i];
+            }
+            return;
+        }
+
+        /* Handle FLOAT data (default) */
+        const float* data_data = (float*)data->data;
+        float* output_data = (float*)output->data;
+
+        /* For 1D data */
+        if (data_rank == 1) {
+            for (int64_t i = 0; i < output_n; i++) {
+                output_data[i] = data_data[gather_index];
+            }
+            return;
+        }
+
+        /* For 2D data */
+        if (data_rank == 2 && output_rank == 2) {
+            int64_t dim1_size = data->shape[1];
+            int64_t out_dim0 = output->shape[0];
+            int64_t out_dim1 = output->shape[1];
+
+            for (int64_t i = 0; i < out_dim0; i++) {
+                for (int64_t j = 0; j < out_dim1; j++) {
+                    if (axis == 0) {
+                        output_data[i * out_dim1 + j] = data_data[gather_index * dim1_size + j];
+                    } else {
+                        output_data[i * out_dim1 + j] = data_data[i * dim1_size + gather_index];
+                    }
+                }
+            }
+            return;
+        }
+
+        /* For 3D data (common in LSTM) */
+        if (data_rank == 3) {
+            int64_t d0 = data->shape[0], d1 = data->shape[1], d2 = data->shape[2];
+
+            /* Output has shape [d1, d2] if axis=0, or [d0, d2] if axis=1, or [d0, d1] if axis=2 */
+            if (axis == 0 && output_rank == 2) {
+                /* Gather along axis 0: output[i,j] = data[gather_index, j, k]... wait, that's wrong
+                 * Actually: output[i,j] = data[gather_index, i, j] for scalar gather
+                 */
+                for (int64_t i = 0; i < d1; i++) {
+                    for (int64_t j = 0; j < d2; j++) {
+                        int64_t src_idx = gather_index * d1 * d2 + i * d2 + j;
+                        output_data[i * d2 + j] = data_data[src_idx];
+                    }
+                }
+                return;
+            } else if (axis == 0 && output_rank == 3) {
+                /* For some cases, output might still be 3D */
+                int64_t o0 = output->shape[0], o1 = output->shape[1], o2 = output->shape[2];
+                for (int64_t i = 0; i < o0; i++) {
+                    for (int64_t j = 0; j < o1; j++) {
+                        for (int64_t k = 0; k < o2; k++) {
+                            int64_t src_idx = gather_index * d1 * d2 + j * d2 + k;
+                            output_data[i * o1 * o2 + j * o2 + k] = data_data[src_idx];
+                        }
+                    }
+                }
+                return;
+            } else if (axis == 1) {
+                /* Gather along axis 1 */
+                for (int64_t i = 0; i < d0; i++) {
+                    for (int64_t k = 0; k < d2; k++) {
+                        int64_t src_idx = i * d1 * d2 + gather_index * d2 + k;
+                        int64_t out_idx = i * d2 + k;
+                        output_data[out_idx] = data_data[src_idx];
+                    }
+                }
+                return;
+            } else if (axis == 2) {
+                /* Gather along axis 2 */
+                for (int64_t i = 0; i < d0; i++) {
+                    for (int64_t j = 0; j < d1; j++) {
+                        int64_t src_idx = i * d1 * d2 + j * d2 + gather_index;
+                        int64_t out_idx = i * d1 + j;
+                        output_data[out_idx] = data_data[src_idx];
+                    }
+                }
+                return;
+            }
+        }
+    }
+
+    /* General case: 1D indices tensor */
+    if (indices_rank == 1) {
+        int64_t num_indices = indices->shape[0];
+
+        /* Handle INT64 data */
+        if (data_dtype == 1) {
+            const int64_t* data_data = (int64_t*)data->data;
+            int64_t* output_data = (int64_t*)output->data;
+
+            if (data_rank == 1) {
+                for (int i = 0; i < num_indices; i++) {
+                    int64_t idx = indices_data[i];
+                    if (idx < 0) idx += data->shape[0];
+                    if (idx < 0) idx = 0;
+                    if (idx >= data->shape[0]) idx = data->shape[0] - 1;
+                    output_data[i] = data_data[idx];
+                }
+                return;
+            }
+        }
+
+        /* Handle FLOAT data */
+        const float* data_data = (float*)data->data;
+        float* output_data = (float*)output->data;
+
+        /* For 2D data with 1D indices */
+        if (data_rank == 2) {
+            int64_t dim1_size = data->shape[1];
+            for (int64_t idx = 0; idx < num_indices; idx++) {
+                int64_t gather_index = indices_data[idx];
+                if (gather_index < 0) gather_index += data->shape[axis];
+                if (gather_index < 0) gather_index = 0;
+                if (gather_index >= data->shape[axis]) gather_index = data->shape[axis] - 1;
+
+                if (axis == 0) {
+                    for (int64_t j = 0; j < dim1_size; j++) {
+                        output_data[idx * dim1_size + j] = data_data[gather_index * dim1_size + j];
+                    }
+                } else {
+                    for (int64_t i = 0; i < data->shape[0]; i++) {
+                        output_data[i * num_indices + idx] = data_data[i * dim1_size + gather_index];
+                    }
+                }
+            }
+            return;
+        }
+    }
+
+    /* Fallback: element-by-element copy */
+    if (data_dtype == 1) {
+        const int64_t* data_data = (int64_t*)data->data;
+        int64_t* output_data = (int64_t*)output->data;
+        int64_t data_n = tensor_numel(data);
+        for (int64_t i = 0; i < output_n; i++) {
+            output_data[i] = data_data[i % data_n];
+        }
+    } else {
+        const float* data_data = (float*)data->data;
+        float* output_data = (float*)output->data;
+        int64_t data_n = tensor_numel(data);
+        for (int64_t i = 0; i < output_n; i++) {
+            output_data[i] = data_data[i % data_n];
+        }
+    }
+}
+
+/* ============================================================================
+ * RNN Operations
+ * ============================================================================ */
+
+/* LSTM activation functions */
+static float sigmoid_f(float x) {
+    return 1.0f / (1.0f + expf(-x));
+}
+
+static float tanh_f(float x) {
+    return tanhf(x);
+}
+
+/* LSTM cell computation for one time step
+ * Computes:
+ *   i_t = sigmoid(W_i * x_t + R_i * h_{t-1} + b_i)
+ *   o_t = sigmoid(W_o * x_t + R_o * h_{t-1} + b_o)
+ *   f_t = sigmoid(W_f * x_t + R_f * h_{t-1} + b_f)
+ *   g_t = tanh(W_c * x_t + R_c * h_{t-1} + b_c)
+ *   c_t = f_t * c_{t-1} + i_t * g_t
+ *   h_t = o_t * tanh(c_t)
+ *
+ * ONNX LSTM weight format: I, O, F, C (Input, Output, Forget, Cell)
+ * W: [4*hidden_size, input_size] - row-major: each row is hidden_size elements
+ * R: [4*hidden_size, hidden_size] - row-major
+ * B: [8*hidden_size] - [W_b_i, W_b_o, W_b_f, W_b_c, R_b_i, R_b_o, R_b_f, R_b_c]
+ */
+static void lstm_cell(
+    const float* x_t,        /* Input at time t: [input_size] */
+    const float* h_prev,     /* Previous hidden state: [hidden_size] */
+    const float* c_prev,     /* Previous cell state: [hidden_size] */
+    const float* W,          /* Input weights: [4*hidden_size, input_size] */
+    const float* R,          /* Hidden weights: [4*hidden_size, hidden_size] */
+    const float* B,          /* Bias: [8*hidden_size] or NULL */
+    float* h_next,           /* Next hidden state: [hidden_size] */
+    float* c_next,           /* Next cell state: [hidden_size] */
+    int input_size,
+    int hidden_size
+) {
+    /* ONNX LSTM gate order: I, O, F, C (Input, Output, Forget, Cell) */
+
+    /* Compute all gates at once for efficiency */
+    for (int i = 0; i < hidden_size; i++) {
+        /* Input gate (i_t) - ONNX index: 0, row: i */
+        float i_gate = 0.0f;
+        const float* W_i = W + 0 * hidden_size * input_size + i * input_size;
+        const float* R_i = R + 0 * hidden_size * hidden_size + i * hidden_size;
+        for (int j = 0; j < input_size; j++) {
+            i_gate += W_i[j] * x_t[j];
+        }
+        for (int j = 0; j < hidden_size; j++) {
+            i_gate += R_i[j] * h_prev[j];
+        }
+        if (B) {
+            i_gate += B[0 * hidden_size + i] + B[4 * hidden_size + i];
+        }
+        i_gate = sigmoid_f(i_gate);
+
+        /* Output gate (o_t) - ONNX index: 1, row: i */
+        float o_gate = 0.0f;
+        const float* W_o = W + 1 * hidden_size * input_size + i * input_size;
+        const float* R_o = R + 1 * hidden_size * hidden_size + i * hidden_size;
+        for (int j = 0; j < input_size; j++) {
+            o_gate += W_o[j] * x_t[j];
+        }
+        for (int j = 0; j < hidden_size; j++) {
+            o_gate += R_o[j] * h_prev[j];
+        }
+        if (B) {
+            o_gate += B[1 * hidden_size + i] + B[5 * hidden_size + i];
+        }
+        o_gate = sigmoid_f(o_gate);
+
+        /* Forget gate (f_t) - ONNX index: 2, row: i */
+        float f_gate = 0.0f;
+        const float* W_f = W + 2 * hidden_size * input_size + i * input_size;
+        const float* R_f = R + 2 * hidden_size * hidden_size + i * hidden_size;
+        for (int j = 0; j < input_size; j++) {
+            f_gate += W_f[j] * x_t[j];
+        }
+        for (int j = 0; j < hidden_size; j++) {
+            f_gate += R_f[j] * h_prev[j];
+        }
+        if (B) {
+            f_gate += B[2 * hidden_size + i] + B[6 * hidden_size + i];
+        }
+        f_gate = sigmoid_f(f_gate);
+
+        /* Cell gate (g_t) - ONNX index: 3, row: i */
+        float g_gate = 0.0f;
+        const float* W_c = W + 3 * hidden_size * input_size + i * input_size;
+        const float* R_c = R + 3 * hidden_size * hidden_size + i * hidden_size;
+        for (int j = 0; j < input_size; j++) {
+            g_gate += W_c[j] * x_t[j];
+        }
+        for (int j = 0; j < hidden_size; j++) {
+            g_gate += R_c[j] * h_prev[j];
+        }
+        if (B) {
+            g_gate += B[3 * hidden_size + i] + B[7 * hidden_size + i];
+        }
+        g_gate = tanh_f(g_gate);
+
+        /* Update cell state: c_t = f_t * c_{t-1} + i_t * g_t */
+        c_next[i] = f_gate * c_prev[i] + i_gate * g_gate;
+
+        /* Update hidden state: h_t = o_t * tanh(c_t) */
+        h_next[i] = o_gate * tanh_f(c_next[i]);
+    }
+}
+
+void nnc_lstm(
+    Tensor* X, Tensor* W, Tensor* R, Tensor* B,
+    Tensor* Y, Tensor* Y_h, Tensor* Y_c,
+    int direction, int hidden_size
+) {
+    /* LSTM operation
+     * Assumes layout=0 (seq_length, batch_size, input_size) for input X
+     * Outputs are in ONNX format
+     */
+
+    /* Get dimensions */
+    int64_t seq_len = X->shape[0];
+    int64_t batch_size = X->shape[1];
+    int64_t input_size = X->shape[2];
+
+    const float* X_data = (float*)X->data;
+    const float* W_data = (float*)W->data;
+    const float* R_data = (float*)R->data;
+    const float* B_data = B ? (float*)B->data : NULL;
+
+    float* Y_data = (float*)Y->data;
+    float* Y_h_data = (float*)Y_h->data;
+    float* Y_c_data = (float*)Y_c->data;
+
+    /* For each direction (forward/bidirectional) */
+    for (int dir = 0; dir < (direction == 2 ? 2 : 1); dir++) {
+        /* Initialize hidden and cell states to zero */
+        float* h = (float*)malloc(hidden_size * sizeof(float));
+        float* c = (float*)malloc(hidden_size * sizeof(float));
+        for (int i = 0; i < hidden_size; i++) {
+            h[i] = 0.0f;
+            c[i] = 0.0f;
+        }
+
+        /* Pointer to weights for this direction */
+        const float* W_dir = W_data + dir * 4 * hidden_size * input_size;
+        const float* R_dir = R_data + dir * 4 * hidden_size * hidden_size;
+        const float* B_dir = NULL;
+        if (B_data) {
+            B_dir = B_data + dir * 8 * hidden_size;
+        }
+
+        /* Process sequence */
+        for (int t = 0; t < seq_len; t++) {
+            /* Determine time step index (reverse for backward direction) */
+            int t_idx = (dir == 1) ? (seq_len - 1 - t) : t;
+
+            /* Process each batch */
+            for (int b = 0; b < batch_size; b++) {
+                /* Get input for this time step and batch */
+                const float* x_t = X_data + t_idx * batch_size * input_size + b * input_size;
+
+                /* Compute LSTM cell */
+                float* h_new = (float*)malloc(hidden_size * sizeof(float));
+                float* c_new = (float*)malloc(hidden_size * sizeof(float));
+
+                lstm_cell(x_t, h, c, W_dir, R_dir, B_dir, h_new, c_new, input_size, hidden_size);
+
+                /* Update states */
+                for (int i = 0; i < hidden_size; i++) {
+                    h[i] = h_new[i];
+                    c[i] = c_new[i];
+                }
+                free(h_new);
+                free(c_new);
+
+                /* Write output */
+                /* ONNX output format: Y[seq_len][num_directions][batch_size][hidden_size] */
+                int64_t y_idx = t * (direction == 2 ? 2 : 1) * batch_size * hidden_size +
+                                 dir * batch_size * hidden_size +
+                                 b * hidden_size;
+                for (int i = 0; i < hidden_size; i++) {
+                    Y_data[y_idx + i] = h[i];
+                }
+            }
+        }
+
+        /* Write final hidden and cell states */
+        /* Y_h and Y_c format: [num_directions][batch_size][hidden_size] */
+        for (int b = 0; b < batch_size; b++) {
+            int64_t h_idx = dir * batch_size * hidden_size + b * hidden_size;
+            for (int i = 0; i < hidden_size; i++) {
+                Y_h_data[h_idx + i] = h[i];
+                Y_c_data[h_idx + i] = c[i];
+            }
+        }
+
+        free(h);
+        free(c);
     }
 }

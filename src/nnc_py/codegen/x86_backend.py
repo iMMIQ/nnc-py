@@ -648,6 +648,26 @@ class X86Backend(BackendBase):
             args.append(f"{beta}f")
             args.append(str(trans_a))
             args.append(str(trans_b))
+        elif node.op_type == OpType.GATHER:
+            # Gather: data, indices, output, axis, data_dtype
+            axis = node.attrs.get("axis", 0)
+            # Determine data type: 1 for int64 (e.g., from Shape operator), 0 for float
+            data_tensor = ctx.graph.get_tensor(node.inputs[0])
+            from nnc_py.ir.types import DataType
+            data_dtype = 1 if data_tensor and data_tensor.dtype == DataType.INT64 else 0
+            args.append(str(axis))
+            args.append(str(data_dtype))
+        elif node.op_type == OpType.LSTM:
+            # LSTM has special handling
+            # X, W, R, B inputs
+            # Y, Y_h, Y_c outputs
+            # direction, hidden_size attributes
+            direction = node.attrs.get("direction", "forward")
+            hidden_size = node.attrs.get("hidden_size", 0)
+            direction_map = {"forward": 0, "reverse": 1, "bidirectional": 2}
+            direction_val = direction_map.get(direction, 0)
+            args.append(str(direction_val))
+            args.append(str(hidden_size))
 
         return f"{op_name}({', '.join(args)});"
 
@@ -717,6 +737,26 @@ class X86Backend(BackendBase):
             args.append(f"{beta}f")
             args.append(str(trans_a))
             args.append(str(trans_b))
+        elif node.op_type == OpType.GATHER:
+            # Gather: data, indices, output, axis, data_dtype
+            axis = node.attrs.get("axis", 0)
+            # Determine data type: 1 for int64 (e.g., from Shape operator), 0 for float
+            data_tensor = ctx.graph.get_tensor(node.inputs[0])
+            from nnc_py.ir.types import DataType
+            data_dtype = 1 if data_tensor and data_tensor.dtype == DataType.INT64 else 0
+            args.append(str(axis))
+            args.append(str(data_dtype))
+        elif node.op_type == OpType.LSTM:
+            # LSTM has special handling
+            # X, W, R, B inputs
+            # Y, Y_h, Y_c outputs
+            # direction, hidden_size attributes
+            direction = node.attrs.get("direction", "forward")
+            hidden_size = node.attrs.get("hidden_size", 0)
+            direction_map = {"forward": 0, "reverse": 1, "bidirectional": 2}
+            direction_val = direction_map.get(direction, 0)
+            args.append(str(direction_val))
+            args.append(str(hidden_size))
 
         return f"{op_name}({', '.join(args)});"
 
