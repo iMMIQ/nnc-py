@@ -52,15 +52,21 @@ class TestCodegenSnapshots(BaseSnapshotTest):
             normalized_code = self._get_normalized_code(tmpdir)
             assert normalized_code == snapshot
 
-    @pytest.mark.skip(reason="Runtime implementations for some operators (Equal, Greater, Not, Or, Cast) are not yet complete")
     def test_operator_coverage_codegen_with_runtime(self):
-        """Test Operator Coverage code compiles, runs with sanitizers, and output matches reference."""
+        """Test Operator Coverage code compiles, runs with sanitizers, and output matches reference.
+
+        This test verifies that the generated C code produces the same output as ONNX Runtime.
+        Specifically tests:
+        - Reshape with computed constant shape (Concat of Constants)
+        - Greater operation with broadcasting (tensor > scalar)
+        - Boolean operations (And, Or, Not) and their cast to float
+        - Concatenation of boolean results and mean computation
+        """
         model_path = self.models_dir / "operator_coverage.onnx"
         if not model_path.exists():
             pytest.skip(f"Model not found: {model_path}")
         self._run_runtime_test(model_path, "operator_coverage")
 
-    @pytest.mark.skip(reason="Runtime implementations for some operators (Equal, Greater, Not, Or, Cast) are not yet complete")
     def test_operator_coverage_codegen_with_runtime_o3(self):
         """Test Operator Coverage code compiles and runs with -O3 optimization and sanitizers."""
         model_path = self.models_dir / "operator_coverage.onnx"
