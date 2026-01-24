@@ -1,5 +1,6 @@
 """ONNX model loader and parser."""
 
+import numpy as np
 import onnx
 from onnx import helper, numpy_helper
 
@@ -123,7 +124,7 @@ class ONNXFrontend:
                     else:
                         # Try to infer type from node
                         inferred_type = self._infer_tensor_type(
-                            onnx_node, output_name, ir_graph
+                            onnx_node, output_name, ir_graph, onnx_graph
                         )
                         if inferred_type:
                             ir_graph.add_tensor(inferred_type)
@@ -146,7 +147,7 @@ class ONNXFrontend:
                     if existing_tensor and not existing_tensor.shape.dims:
                         # Try to infer shape again
                         inferred_type = self._infer_tensor_type(
-                            onnx_node, output_name, ir_graph
+                            onnx_node, output_name, ir_graph, onnx_graph
                         )
                         if inferred_type and inferred_type.shape.dims:
                             ir_graph.tensors[output_name] = inferred_type
@@ -294,7 +295,57 @@ class ONNXFrontend:
             # This can happen for empty tensors or special cases
             pass
 
-    def _infer_tensor_type(self, onnx_node, output_name: str, graph: Graph) -> TensorType | None:
+    def _resolve_constant_tensor(self, tensor_name: str, graph: Graph, onnx_graph) -> "np.ndarray | None":
+        """Resolve a tensor to its constant value if possible.
+
+        This handles cases where the tensor is produced by operations on constants
+        (e.g., Concat of Constants, Unsqueeze of Constant, etc.).
+
+        Args:
+            tensor_name: Name of the tensor to resolve.
+            graph: The IR graph containing constants.
+            onnx_graph: The ONNX graph containing nodes.
+
+        Returns:
+            The constant numpy array if resolvable, None otherwise.
+        """
+        # Direct constant
+        if tensor_name in graph.constants:
+            return graph.constants[tensor_name]
+
+        # Find the node that produces this tensor
+        producing_node = None
+        for node in onnx_graph.node:
+            if tensor_name in node.output:
+                producing_node = node
+                break
+
+        if producing_node is None:
+            return None
+
+        # Handle operations that produce constant values
+        if producing_node.op_type == "Concat":
+            # Concat of constants is constant
+            input_arrays = []
+            for input_name in producing_node.input:
+                arr = self._resolve_constant_tensor(input_name, graph, onnx_graph)
+                if arr is None:
+                    return None
+                input_arrays.append(arr)
+
+            if input_arrays:
+                return np.concatenate(input_arrays)
+
+        elif producing_node.op_type == "Unsqueeze":
+            # Unsqueeze (add dimension) of constant is constant
+            if len(producing_node.input) >= 1:
+                arr = self._resolve_constant_tensor(producing_node.input[0], graph, onnx_graph)
+                if arr is not None:
+                    return np.expand_dims(arr, axis=-1)
+
+        return None
+
+    def _infer_tensor_type(self, onnx_node, output_name: str, graph: Graph, onnx_graph=None) -> TensorType | None:
         """Infer tensor type from node and input types."""
         # Handle Constant nodes - no inputs, type should already be defined
         if onnx_node.op_type == "Constant":
@@ -408,11 +459,17 @@ class ONNXFrontend:
                         new_shape = [int(v) for v in attr.ints]
                         break
 
-            # If not in attributes, check second input (constant)
-            if not new_shape and len(onnx_node.input) >= 2:
+            # If not in attributes, check second input (constant or computed constant)
+            if not new_shape and len(onnx_node.input) >= 2 and onnx_graph is not None:
                 shape_input_name = onnx_node.input[1]
+                # Try direct constant first
                 if shape_input_name in graph.constants:
                     new_shape = graph.constants[shape_input_name].tolist()
+                else:
+                    # Try to resolve computed constant (e.g., Concat of Constants)
+                    shape_array = self._resolve_constant_tensor(shape_input_name, graph, onnx_graph)
+                    if shape_array is not None:
+                        new_shape = shape_array.tolist()
 
             # Handle -1 in shape (infer from dimension)
             if new_shape:

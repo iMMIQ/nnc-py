@@ -1490,14 +1490,19 @@ void nnc_expand(Tensor* input, Tensor* output, int64_t* shape, int ndim) {
 void nnc_greater(Tensor* a, Tensor* b, Tensor* out) {
     /* Greater comparison: out = (a > b)
      * Output is uint8_t (BOOL type)
+     * Supports broadcasting when one input is scalar (1 element)
      */
     int64_t n = tensor_numel(out);
+    int64_t a_n = tensor_numel(a);
+    int64_t b_n = tensor_numel(b);
     const float* a_data = (float*)a->data;
     const float* b_data = (float*)b->data;
     uint8_t* out_data = (uint8_t*)out->data;
 
     for (int64_t i = 0; i < n; i++) {
-        out_data[i] = a_data[i] > b_data[i] ? 1 : 0;
+        float a_val = a_data[i % a_n];
+        float b_val = b_data[i % b_n];
+        out_data[i] = a_val > b_val ? 1 : 0;
     }
 }
 
