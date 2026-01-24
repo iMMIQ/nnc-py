@@ -1901,15 +1901,18 @@ run: model
         alloc_plan = get_memory_allocation_plan(ctx)
 
         if alloc_plan is not None and (alloc_plan.has_spill or any(alloc.is_spilled for alloc in alloc_plan.tensor_allocations.values())):
-            # Generate dual memory pools using new MemoryAllocationPlan
+            # When there's a spill, use max_memory as the pool size instead of total_fast_memory
+            # This ensures all tensor offsets fit within the declared pool
+            max_memory = ctx.metadata.get('max_memory', alloc_plan.total_fast_memory)
+            fast_memory_size = max(alloc_plan.total_fast_memory, max_memory)
             return [
                 "/* Dual Memory Pools (Fast + Slow for spilled tensors) */",
-                f"/* Fast memory: {alloc_plan.total_fast_memory} bytes ({alloc_plan.total_fast_memory / 1024:.2f} KB) */",
+                f"/* Fast memory: {fast_memory_size} bytes ({fast_memory_size / 1024:.2f} KB) */",
                 f"/* Slow memory: {alloc_plan.total_slow_memory} bytes ({alloc_plan.total_slow_memory / 1024:.2f} KB) */",
                 f"/* Buffers: {alloc_plan.num_buffers}, Spill points: {alloc_plan.spill_count}, Reload points: {alloc_plan.reload_count} */",
                 "",
                 f"/* Fast Memory Pool (SRAM/On-chip) */",
-                f"#define NNC_FAST_MEMORY_SIZE {alloc_plan.total_fast_memory}",
+                f"#define NNC_FAST_MEMORY_SIZE {fast_memory_size}",
                 f"#define NNC_MEMORY_ALIGNMENT 16",
                 f"static uint8_t _nnc_fast_pool[NNC_FAST_MEMORY_SIZE] "
                 f"__attribute__((aligned(NNC_MEMORY_ALIGNMENT))) = {{0}};",

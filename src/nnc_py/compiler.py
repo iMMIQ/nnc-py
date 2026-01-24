@@ -151,6 +151,12 @@ class Compiler:
             self.console.print(f"  Memory strategy: {strategy}")
 
         # Stage 3: Run optimization passes
+        # Re-register passes for current opt_level to avoid accumulation
+        # when the same Compiler instance is reused across multiple compilations
+        self.pass_manager = PassManager()
+        for pass_obj in PassManager.get_default_passes(self.opt_level):
+            self.pass_manager.register(pass_obj)
+
         if self.pass_manager.passes:
             with self.console.status(
                 "[bold yellow]Running optimization passes..."
