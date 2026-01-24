@@ -1453,6 +1453,7 @@ run: model
             DataType.FLOAT32: "NNC_DTYPE_FLOAT32",
             DataType.FLOAT16: "NNC_DTYPE_FLOAT16",
             DataType.INT32: "NNC_DTYPE_INT32",
+            DataType.INT64: "NNC_DTYPE_INT64",
             DataType.INT8: "NNC_DTYPE_INT8",
             DataType.UINT8: "NNC_DTYPE_UINT8",
             DataType.BOOL: "NNC_DTYPE_BOOL",
@@ -1776,6 +1777,21 @@ int main(void) {{
         # Get number of dimensions
         ndim = len(tensor.shape.dims)
 
+        # Determine how to read the tensor data based on dtype
+        # BOOL tensors are stored as uint8_t, need conversion to float for output
+        # INT64 tensors (e.g., from Shape operator) are stored as int64_t
+        is_bool = tensor.dtype == DataType.BOOL
+        is_int64 = tensor.dtype == DataType.INT64
+        if is_bool:
+            # For BOOL, read as uint8_t and convert to float
+            data_read_expr = f"((uint8_t*){var_name}.data)[i]"
+        elif is_int64:
+            # For INT64, read as int64_t and convert to float
+            data_read_expr = f"(float)((int64_t*){var_name}.data)[i]"
+        else:
+            # For other types, read as float
+            data_read_expr = f"((float*){var_name}.data)[i]"
+
         if self.debug_mode:
             # Use debug macros for file output
             code = f"""
@@ -1793,7 +1809,7 @@ int main(void) {{
             code += f"""
     DEBUG_PRINT_DATA_START();
     for (int i = 0; i < {num_elements}; i++) {{
-        DEBUG_PRINT_VALUE(((float*){var_name}.data)[i]);
+        DEBUG_PRINT_VALUE((float){data_read_expr});
     }}
     DEBUG_PRINT_DATA_END();
     DEBUG_PRINT_TENSOR_END("{tensor_name}");
@@ -1815,7 +1831,7 @@ int main(void) {{
             code += f"""
     printf("DATA_START\\\\n");
     for (int i = 0; i < {num_elements}; i++) {{
-        printf("%f\\\\n", ((float*){var_name}.data)[i]);
+        printf("%f\\\\n", (float){data_read_expr});
     }}
     printf("DATA_END\\\\n");
     printf("DEBUG_TENSOR_END %s\\\\n\\n", "{tensor_name}");

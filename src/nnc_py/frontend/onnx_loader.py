@@ -156,10 +156,147 @@ class ONNXFrontend:
             if not changed:
                 break
 
-        # 7. Validate graph
+        # 7. Post-process Expand nodes to resolve symbolic dimensions
+        self._resolve_expand_shapes(onnx_graph, ir_graph)
+
+        # 7.5. Post-process Concat nodes to fix dtypes
+        self._resolve_concat_dtypes(onnx_graph, ir_graph)
+
+        # 8. Validate graph
         self._validate_graph(ir_graph)
 
         return ir_graph
+
+    def _resolve_expand_shapes(self, onnx_graph, ir_graph: "Graph") -> None:
+        """Resolve symbolic dimensions in Expand output shapes.
+
+        For Expand operations, ONNX shape inference may produce symbolic dimensions
+        (like "unk__0") instead of concrete values. This method traces the shape
+        input to find the actual values.
+        """
+        # Find all Expand nodes
+        expand_nodes = []
+        for node in onnx_graph.node:
+            if node.op_type == "Expand":
+                expand_nodes.append(node)
+
+        for node in expand_nodes:
+            if len(node.output) == 0:
+                continue
+
+            output_name = node.output[0]
+            if output_name not in ir_graph.tensors:
+                continue
+
+            output_tensor = ir_graph.tensors[output_name]
+
+            # Check if output has symbolic dimensions
+            has_symbolic = any(isinstance(d, str) for d in output_tensor.shape.dims)
+            if not has_symbolic:
+                continue
+
+            # Try to resolve the shape from the shape input
+            if len(node.input) < 2:
+                continue
+
+            shape_input_name = node.input[1]
+
+            # Check if the shape input is a Concat node output
+            # Trace back to find the Concat node
+            concat_node = None
+            for n in onnx_graph.node:
+                if n.op_type == "Concat" and n.output and shape_input_name in n.output:
+                    concat_node = n
+                    break
+
+            if concat_node and len(concat_node.input) >= 1:
+                # Try to get the actual shape values from Concat inputs
+                resolved_shape = []
+
+                # Get the expected rank from the output tensor
+                expected_rank = len(output_tensor.shape.dims)
+
+                # Try to get shape values from constants in the Concat inputs
+                for i, input_name in enumerate(concat_node.input):
+                    if input_name in ir_graph.constants:
+                        # Constant input - get the value
+                        const_value = ir_graph.constants[input_name]
+                        if hasattr(const_value, 'ndim') and const_value.ndim == 0:
+                            # Scalar
+                            resolved_shape.append(int(const_value))
+                        elif hasattr(const_value, '__len__'):
+                            # Array - flatten and add all elements
+                            for val in const_value:
+                                resolved_shape.append(int(val))
+                        else:
+                            resolved_shape.append(int(const_value))
+                    else:
+                        # Non-constant input - try to get shape from tensor
+                        input_tensor = ir_graph.tensors.get(input_name)
+                        if input_tensor and input_tensor.shape.dims:
+                            # For 1D tensors with single element, use that element
+                            if len(input_tensor.shape.dims) == 1 and input_tensor.shape.dims[0] == 1:
+                                # This is a 1D tensor with 1 element - we don't know the value
+                                # but we can infer from context
+                                resolved_shape.append(1)
+
+                # If we couldn't resolve all dimensions, fall back to input tensor shape
+                if len(resolved_shape) != expected_rank and len(node.input) >= 1:
+                    data_input_name = node.input[0]
+                    data_tensor = ir_graph.tensors.get(data_input_name)
+                    if data_tensor and data_tensor.shape.dims:
+                        resolved_shape = list(data_tensor.shape.dims)
+
+                # Update the output tensor shape
+                if resolved_shape:
+                    new_tensor = TensorType(
+                        dtype=output_tensor.dtype,
+                        shape=TensorShape(dims=resolved_shape, layout=output_tensor.shape.layout),
+                        name=output_name,
+                    )
+                    ir_graph.tensors[output_name] = new_tensor
+
+    def _resolve_concat_dtypes(self, onnx_graph, ir_graph: "Graph") -> None:
+        """Fix Concat output dtypes when inputs are INT64.
+
+        ONNX shape inference may set Concat output dtype incorrectly when inputs
+        are INT64 (e.g., from Shape operations). This method fixes the dtype
+        to match the input tensors' dtype.
+        """
+        from nnc_py.ir.types import DataType
+
+        # Find all Concat nodes
+        concat_nodes = []
+        for node in onnx_graph.node:
+            if node.op_type == "Concat":
+                concat_nodes.append(node)
+
+        for node in concat_nodes:
+            if len(node.output) == 0:
+                continue
+
+            output_name = node.output[0]
+            if output_name not in ir_graph.tensors:
+                continue
+
+            output_tensor = ir_graph.tensors[output_name]
+
+            # Check if any input is INT64
+            has_int64_input = False
+            for input_name in node.input:
+                input_tensor = ir_graph.tensors.get(input_name)
+                if input_tensor and input_tensor.dtype == DataType.INT64:
+                    has_int64_input = True
+                    break
+
+            # If any input is INT64 and output is not, fix it
+            if has_int64_input and output_tensor.dtype != DataType.INT64:
+                new_tensor = TensorType(
+                    dtype=DataType.INT64,
+                    shape=output_tensor.shape,
+                    name=output_name,
+                )
+                ir_graph.tensors[output_name] = new_tensor
 
     def _parse_tensor_type(self, onnx_tensor) -> TensorType:
         """Parse ONNX tensor type info."""
@@ -258,7 +395,8 @@ class ONNXFrontend:
             elif attr.name == "num_outputs":
                 attrs["num_outputs"] = int(attr.i)
             elif attr.name == "to":
-                attrs["to"] = int(attr.i)
+                # Map ONNX dtype to DataType enum
+                attrs["to"] = self._map_onnx_dtype(int(attr.i))
             # LSTM/RNN attributes
             elif attr.name == "hidden_size":
                 attrs["hidden_size"] = int(attr.i)
@@ -822,6 +960,7 @@ class ONNXFrontend:
             # Gather operation: output[index] = data[index] along specified axis
             # Inputs: data, indices
             # Output shape is data.shape[:axis] + indices.shape + data.shape[axis+1:]
+            # Special case: if indices is scalar (0D), the axis dimension is removed
             if len(onnx_node.input) < 2:
                 return None
 
@@ -831,7 +970,7 @@ class ONNXFrontend:
             # Get indices tensor to determine output shape
             indices_name = onnx_node.input[1]
             indices_tensor = graph.tensors.get(indices_name)
-            if not indices_tensor or not indices_tensor.shape.dims:
+            if not indices_tensor:
                 return None
 
             # Handle negative axis
@@ -846,9 +985,149 @@ class ONNXFrontend:
             if axis < 0 or axis >= data_rank:
                 return None
 
-            # Compute output shape: data.shape[:axis] + indices.shape + data.shape[axis+1:]
+            # Compute output shape
             indices_shape = indices_tensor.shape.dims
-            output_shape = list(data_shape[:axis]) + list(indices_shape) + list(data_shape[axis + 1:])
+            indices_rank = len(indices_shape) if indices_shape else 0
+
+            # Special case: scalar indices (0D tensor) removes the axis dimension
+            if indices_rank == 0:
+                # Scalar index: output shape is data.shape[:axis] + data.shape[axis+1:]
+                output_shape = list(data_shape[:axis]) + list(data_shape[axis + 1:])
+            else:
+                # Non-scalar indices: output shape is data.shape[:axis] + indices.shape + data.shape[axis+1:]
+                output_shape = list(data_shape[:axis]) + list(indices_shape) + list(data_shape[axis + 1:])
+
+            return TensorType(
+                dtype=input_tensor.dtype,
+                shape=TensorShape(dims=output_shape, layout=input_tensor.shape.layout),
+                name=output_name,
+            )
+
+        elif op_type == "Concat":
+            # Concat operation: concatenate tensors along specified axis
+            # Inputs: multiple tensors to concatenate
+            # Output shape is same as input shapes, with summed dimension along axis
+            if len(onnx_node.input) < 1:
+                return None
+
+            # Get the axis attribute
+            axis = self._get_attr(onnx_node, "axis", 0)
+
+            # Get all input tensors
+            input_tensors = []
+            for input_name in onnx_node.input:
+                inp_tensor = graph.tensors.get(input_name)
+                if inp_tensor:
+                    input_tensors.append(inp_tensor)
+
+            if not input_tensors:
+                return None
+
+            # Use the first input as template
+            first_shape = input_tensors[0].shape.dims
+            if not first_shape:
+                return None
+
+            # Handle negative axis
+            rank = len(first_shape)
+            if axis < 0:
+                axis = rank + axis
+            if axis < 0 or axis >= rank:
+                axis = 0
+
+            # Output shape is same as input, except along concat axis
+            output_shape = list(first_shape)
+
+            # Sum the dimensions along the concat axis
+            concat_dim = 0
+            for inp in input_tensors:
+                inp_shape = inp.shape.dims
+                if inp_shape and len(inp_shape) > axis:
+                    concat_dim += inp_shape[axis]
+
+            output_shape[axis] = concat_dim
+
+            return TensorType(
+                dtype=input_tensors[0].dtype,
+                shape=TensorShape(dims=output_shape, layout=input_tensors[0].shape.layout),
+                name=output_name,
+            )
+
+        elif op_type == "Expand":
+            # Expand operation: broadcast tensor to a larger shape
+            # Inputs: data, shape (1D tensor containing target shape)
+            # Output shape is the target shape
+            if len(onnx_node.input) < 2:
+                return None
+
+            # Get the shape input
+            shape_input_name = onnx_node.input[1]
+            shape_tensor = graph.tensors.get(shape_input_name)
+
+            if shape_tensor and shape_tensor.shape.dims:
+                # The shape tensor contains the target shape as its data
+                # If it's a constant, we can get the actual shape
+                if shape_input_name in graph.constants:
+                    shape_data = graph.constants[shape_input_name]
+                    if hasattr(shape_data, '__iter__') and not isinstance(shape_data, str):
+                        # Shape is stored as an array of values
+                        output_shape = list(shape_data)
+                    else:
+                        # Single value
+                        output_shape = [shape_data] if shape_data is not None else []
+                else:
+                    # Shape is not constant - try to infer from input tensors
+                    # For expand, the output should broadcast the input shape
+                    # Use a heuristic: check if all input shapes can be determined
+                    input_shape = input_tensor.shape.dims if input_tensor.shape else []
+                    output_shape = list(input_shape)  # Default to input shape
+            else:
+                # Can't determine shape, use input shape as default
+                output_shape = list(input_tensor.shape.dims) if input_tensor.shape else []
+
+            return TensorType(
+                dtype=input_tensor.dtype,
+                shape=TensorShape(dims=output_shape, layout=input_tensor.shape.layout),
+                name=output_name,
+            )
+
+        elif op_type == "Unsqueeze":
+            # Unsqueeze operation: add a dimension of size 1 at specified axis
+            # Input: [a, b, c], axis=1 -> Output: [a, 1, b, c]
+            input_shape = input_tensor.shape.dims if input_tensor.shape else []
+
+            # Get axes attribute (can be a single int or a list of ints)
+            axes = self._get_attr(onnx_node, "axes", None)
+            if axes is None and len(onnx_node.input) > 1:
+                # ONNX opset 13+ uses "axes" as an input, not attribute
+                # Try to get it from the second input
+                axes_tensor = graph.tensors.get(onnx_node.input[1])
+                if axes_tensor and onnx_node.input[1] in graph.constants:
+                    axes = graph.constants[onnx_node.input[1]]
+                    if not isinstance(axes, list):
+                        axes = [axes]
+
+            if axes is None:
+                # Can't determine axes, use input shape
+                output_shape = list(input_shape)
+            else:
+                # Normalize axes to a list
+                if not isinstance(axes, list):
+                    axes = [axes]
+
+                # Insert dimensions of size 1 at the specified axes
+                output_shape = list(input_shape)
+                # Sort axes in descending order to insert from back to front
+                for axis in sorted(axes, reverse=True):
+                    # Handle negative axis
+                    if axis < 0:
+                        axis = len(output_shape) + 1 + axis
+                    # Clamp to valid range
+                    if axis < 0:
+                        axis = 0
+                    if axis > len(output_shape):
+                        axis = len(output_shape)
+                    output_shape.insert(axis, 1)
 
             return TensorType(
                 dtype=input_tensor.dtype,

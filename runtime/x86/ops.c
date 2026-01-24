@@ -963,14 +963,16 @@ void nnc_reducesum(Tensor* input, Tensor* output, int axis, int keepdims) {
 void nnc_concat(Tensor** inputs, Tensor* output, int num_inputs, int axis) {
     /* Concatenation along specified axis
      * Combines multiple tensors along a given dimension
+     * Handles both float32 and int64 data types
      */
-
-    float* out_data = (float*)output->data;
 
     /* Handle negative axis */
     if (axis < 0) {
         axis = output->ndim + axis;
     }
+
+    /* Check if output is INT64 dtype */
+    int is_int64 = (output->dtype == 6);  /* NNC_DTYPE_INT64 */
 
     /* Calculate dimensions before and after concat axis */
     int64_t outer_size = 1;
@@ -987,17 +989,35 @@ void nnc_concat(Tensor** inputs, Tensor* output, int num_inputs, int axis) {
     int64_t output_offset = 0;
     for (int input_idx = 0; input_idx < num_inputs; input_idx++) {
         Tensor* input = inputs[input_idx];
-        float* in_data = (float*)input->data;
 
         int64_t concat_dim = input->shape[axis];
         int64_t copy_size = concat_dim * inner_size;
 
-        for (int64_t outer = 0; outer < outer_size; outer++) {
-            int64_t dest_base = outer * output->shape[axis] * inner_size + output_offset;
-            int64_t src_base = outer * concat_dim * inner_size;
+        if (is_int64) {
+            /* INT64 data path */
+            int64_t* out_data = (int64_t*)output->data;
+            int64_t* in_data = (int64_t*)input->data;
 
-            for (int64_t i = 0; i < copy_size; i++) {
-                out_data[dest_base + i] = in_data[src_base + i];
+            for (int64_t outer = 0; outer < outer_size; outer++) {
+                int64_t dest_base = outer * output->shape[axis] * inner_size + output_offset;
+                int64_t src_base = outer * concat_dim * inner_size;
+
+                for (int64_t i = 0; i < copy_size; i++) {
+                    out_data[dest_base + i] = in_data[src_base + i];
+                }
+            }
+        } else {
+            /* FLOAT32 data path (default) */
+            float* out_data = (float*)output->data;
+            float* in_data = (float*)input->data;
+
+            for (int64_t outer = 0; outer < outer_size; outer++) {
+                int64_t dest_base = outer * output->shape[axis] * inner_size + output_offset;
+                int64_t src_base = outer * concat_dim * inner_size;
+
+                for (int64_t i = 0; i < copy_size; i++) {
+                    out_data[dest_base + i] = in_data[src_base + i];
+                }
             }
         }
 
@@ -1417,10 +1437,11 @@ void nnc_cast(Tensor* input, Tensor* output, int to_dtype) {
      */
     int64_t n = tensor_numel(input);
 
+    /* Check if input is BOOL type by checking dtype field */
+    int is_bool_input = (input->dtype == NNC_DTYPE_BOOL);
+
     switch (to_dtype) {
         case NNC_DTYPE_FLOAT32: {
-            /* Check if input is BOOL type by checking dtype field */
-            int is_bool_input = (input->dtype == NNC_DTYPE_BOOL);
             if (is_bool_input) {
                 /* BOOL to FLOAT32 - convert properly */
                 const uint8_t* in_data = (uint8_t*)input->data;
@@ -1439,29 +1460,51 @@ void nnc_cast(Tensor* input, Tensor* output, int to_dtype) {
             memcpy(output->data, input->data, n * sizeof(float));
             break;
         case NNC_DTYPE_INT32: {
-            /* Float to int32 */
-            const float* in_data = (float*)input->data;
             int32_t* out_data = (int32_t*)output->data;
-            for (int64_t i = 0; i < n; i++) {
-                out_data[i] = (int32_t)in_data[i];
+            if (is_bool_input) {
+                /* BOOL to INT32 - convert properly */
+                const uint8_t* in_data = (uint8_t*)input->data;
+                for (int64_t i = 0; i < n; i++) {
+                    out_data[i] = (int32_t)in_data[i];
+                }
+            } else {
+                /* Float to int32 */
+                const float* in_data = (float*)input->data;
+                for (int64_t i = 0; i < n; i++) {
+                    out_data[i] = (int32_t)in_data[i];
+                }
             }
             break;
         }
         case NNC_DTYPE_INT64: {
-            /* Float to int64 */
-            const float* in_data = (float*)input->data;
             int64_t* out_data = (int64_t*)output->data;
-            for (int64_t i = 0; i < n; i++) {
-                out_data[i] = (int64_t)in_data[i];
+            if (is_bool_input) {
+                /* BOOL to INT64 - convert properly */
+                const uint8_t* in_data = (uint8_t*)input->data;
+                for (int64_t i = 0; i < n; i++) {
+                    out_data[i] = (int64_t)in_data[i];
+                }
+            } else {
+                /* Float to int64 */
+                const float* in_data = (float*)input->data;
+                for (int64_t i = 0; i < n; i++) {
+                    out_data[i] = (int64_t)in_data[i];
+                }
             }
             break;
         }
         case NNC_DTYPE_BOOL: {
-            /* Float to bool (non-zero is true) */
-            const float* in_data = (float*)input->data;
             uint8_t* out_data = (uint8_t*)output->data;
-            for (int64_t i = 0; i < n; i++) {
-                out_data[i] = in_data[i] != 0.0f ? 1 : 0;
+            if (is_bool_input) {
+                /* BOOL to BOOL - just copy */
+                const uint8_t* in_data = (uint8_t*)input->data;
+                memcpy(out_data, in_data, n);
+            } else {
+                /* Float to bool (non-zero is true) */
+                const float* in_data = (float*)input->data;
+                for (int64_t i = 0; i < n; i++) {
+                    out_data[i] = in_data[i] != 0.0f ? 1 : 0;
+                }
             }
             break;
         }

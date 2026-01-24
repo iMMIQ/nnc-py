@@ -203,7 +203,7 @@
   
   /* Cast: /Cast_4 */
   void node_Cast_4(void) {
-      nnc_cast(&tensor_Greater_output_0, &tensor_Cast_4_output_0, NNC_DTYPE_FLOAT32);
+      nnc_cast(&tensor_Greater_output_0, &tensor_Cast_4_output_0, NNC_DTYPE_BOOL);
   }
   
   /* And: /And */

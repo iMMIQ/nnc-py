@@ -331,7 +331,7 @@
   static int64_t tensor_lstm_Shape_output_0_shape[] = {3};
   Tensor tensor_lstm_Shape_output_0 = {
       .data = _nnc_memory_pool + <OFFSET>,
-      .dtype = NNC_DTYPE_FLOAT32,
+      .dtype = NNC_DTYPE_INT64,
       .shape = tensor_lstm_Shape_output_0_shape,
       .ndim = 1,
       .nbytes = <SIZE>,
@@ -341,7 +341,7 @@
   static int64_t tensor_lstm_Gather_output_0_shape[] = {};
   Tensor tensor_lstm_Gather_output_0 = {
       .data = _nnc_memory_pool + <OFFSET>,
-      .dtype = NNC_DTYPE_FLOAT32,
+      .dtype = NNC_DTYPE_INT64,
       .shape = tensor_lstm_Gather_output_0_shape,
       .ndim = 0,
       .nbytes = <SIZE>,
@@ -351,7 +351,7 @@
   static int64_t tensor_onnx_Concat_81_shape[] = {1};
   Tensor tensor_onnx_Concat_81 = {
       .data = _nnc_memory_pool + <OFFSET>,
-      .dtype = NNC_DTYPE_FLOAT32,
+      .dtype = NNC_DTYPE_INT64,
       .shape = tensor_onnx_Concat_81_shape,
       .ndim = 1,
       .nbytes = <SIZE>,
@@ -361,27 +361,27 @@
   static int64_t tensor_lstm_Concat_output_0_shape[] = {3};
   Tensor tensor_lstm_Concat_output_0 = {
       .data = _nnc_memory_pool + <OFFSET>,
-      .dtype = NNC_DTYPE_FLOAT32,
+      .dtype = NNC_DTYPE_INT64,
       .shape = tensor_lstm_Concat_output_0_shape,
       .ndim = 1,
       .nbytes = <SIZE>,
   };
   
   /* Tensor: /lstm/Expand_output_0 */
-  static int64_t tensor_lstm_Expand_output_0_shape[] = {-1, -1, 64};
+  static int64_t tensor_lstm_Expand_output_0_shape[] = {1, 1, 64};
   Tensor tensor_lstm_Expand_output_0 = {
       .data = _nnc_memory_pool + <OFFSET>,
       .dtype = NNC_DTYPE_FLOAT32,
       .shape = tensor_lstm_Expand_output_0_shape,
       .ndim = 3,
-      .nbytes = -1,
+      .nbytes = <SIZE>,
   };
   
   /* Tensor: /lstm/Shape_1_output_0 */
   static int64_t tensor_lstm_Shape_1_output_0_shape[] = {3};
   Tensor tensor_lstm_Shape_1_output_0 = {
       .data = _nnc_memory_pool + <OFFSET>,
-      .dtype = NNC_DTYPE_FLOAT32,
+      .dtype = NNC_DTYPE_INT64,
       .shape = tensor_lstm_Shape_1_output_0_shape,
       .ndim = 1,
       .nbytes = <SIZE>,
@@ -391,7 +391,7 @@
   static int64_t tensor_lstm_Gather_1_output_0_shape[] = {};
   Tensor tensor_lstm_Gather_1_output_0 = {
       .data = _nnc_memory_pool + <OFFSET>,
-      .dtype = NNC_DTYPE_FLOAT32,
+      .dtype = NNC_DTYPE_INT64,
       .shape = tensor_lstm_Gather_1_output_0_shape,
       .ndim = 0,
       .nbytes = <SIZE>,
@@ -401,7 +401,7 @@
   static int64_t tensor_onnx_Concat_92_shape[] = {1};
   Tensor tensor_onnx_Concat_92 = {
       .data = _nnc_memory_pool + <OFFSET>,
-      .dtype = NNC_DTYPE_FLOAT32,
+      .dtype = NNC_DTYPE_INT64,
       .shape = tensor_onnx_Concat_92_shape,
       .ndim = 1,
       .nbytes = <SIZE>,
@@ -411,20 +411,20 @@
   static int64_t tensor_lstm_Concat_1_output_0_shape[] = {3};
   Tensor tensor_lstm_Concat_1_output_0 = {
       .data = _nnc_memory_pool + <OFFSET>,
-      .dtype = NNC_DTYPE_FLOAT32,
+      .dtype = NNC_DTYPE_INT64,
       .shape = tensor_lstm_Concat_1_output_0_shape,
       .ndim = 1,
       .nbytes = <SIZE>,
   };
   
   /* Tensor: /lstm/Expand_1_output_0 */
-  static int64_t tensor_lstm_Expand_1_output_0_shape[] = {-1, -1, 64};
+  static int64_t tensor_lstm_Expand_1_output_0_shape[] = {1, 1, 64};
   Tensor tensor_lstm_Expand_1_output_0 = {
       .data = _nnc_memory_pool + <OFFSET>,
       .dtype = NNC_DTYPE_FLOAT32,
       .shape = tensor_lstm_Expand_1_output_0_shape,
       .ndim = 3,
-      .nbytes = -1,
+      .nbytes = <SIZE>,
   };
   
   /* Tensor: /lstm/LSTM_output_0 */

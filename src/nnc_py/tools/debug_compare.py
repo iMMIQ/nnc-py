@@ -86,7 +86,13 @@ class DebugOutputParser:
                     # Convert to numpy array
                     data_array = np.array(data_values, dtype=np.float32)
                     # Reshape according to shape (if no -1 dimensions)
-                    if current_shape and -1 not in current_shape:
+                    # Handle scalar tensors (ndim=0, shape=[]) specially
+                    ndim = current_tensor.get("ndim", len(current_shape))
+                    if ndim == 0:
+                        # Scalar tensor - reshape to empty tuple for scalar
+                        if len(data_array) == 1:
+                            data_array = data_array.reshape(())
+                    elif current_shape and -1 not in current_shape:
                         data_array = data_array.reshape(current_shape)
                     current_tensor["data"] = data_array
                     self.outputs[current_tensor["name"]] = current_tensor
