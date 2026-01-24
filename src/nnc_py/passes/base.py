@@ -76,8 +76,6 @@ class PassManager:
         """
         from nnc_py.passes.liveness import LivenessAnalysisPass
         from nnc_py.passes.memory_planning import MemoryPlanningPassV2
-        from nnc_py.passes.split_analysis import SplitAnalysisPass
-        from nnc_py.passes.split_transform import SplitTransformPass
         from nnc_py.passes.spill import SpillAnalysisPass
 
         # O0: Essential passes only (liveness + memory planning)
@@ -94,12 +92,10 @@ class PassManager:
                 MemoryPlanningPassV2(),
             ]
 
-        # O2: Intermediate optimizations (with operator splitting)
+        # O2: Intermediate optimizations
         if opt_level == 2:
             return [
                 LivenessAnalysisPass(),
-                SplitAnalysisPass(),
-                SplitTransformPass(),
                 MemoryPlanningPassV2(),
                 SpillAnalysisPass(),  # Handles overflow if max_memory set
             ]
@@ -109,8 +105,6 @@ class PassManager:
             # TODO: Add advanced passes (operator fusion, etc.)
             return [
                 LivenessAnalysisPass(),
-                SplitAnalysisPass(),
-                SplitTransformPass(),
                 MemoryPlanningPassV2(),
                 SpillAnalysisPass(),
             ]

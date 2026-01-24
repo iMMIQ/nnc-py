@@ -232,19 +232,3 @@ nnc compile model.onnx -o ./build -O2 --max-memory 256K
 #    Slow:  144 KB (spilled tensors)
 #    Spill/Reload ops: 4
 ```
-
-## Future: Operator Splitting
-
-To reduce peak memory, operators can be split:
-```
-# Current: MatMul produces full output at once
-MatMul([1024,1024], [1024,1024]) → [1024,1024]  # 4MB
-
-# Future: Split into tiles
-for i in range(0, 1024, 64):
-    for j in range(0, 1024, 64):
-        tile = MatMul_tile(input[i:i+64,:], weight[:,j:j+64])
-        # Only need 64x64 = 16KB at a time
-```
-
-This is NOT implemented now, but the architecture should support it.
