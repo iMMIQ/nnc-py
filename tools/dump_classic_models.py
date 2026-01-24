@@ -526,6 +526,103 @@ def export_simple_lstm(output_dir: Path) -> Path:
     return output_path
 
 
+class LargeOperatorCoverageModel(nn.Module):
+    """Operator coverage model with large parameters for memory constraint testing.
+
+    This model uses the same operator set as OperatorCoverageModel but with
+    larger tensor dimensions to force memory spill under constraints:
+    - Input shape: (4, 64, 128) instead of (1, 4, 8)
+    - Weight matrices: 128x64 instead of 8x4
+    - Multiple intermediate tensors that must spill to slow memory
+
+    Operators covered (same as small model):
+    - Arithmetic: Add, Sub, Mul, Div, Pow, Sqrt
+    - Logical: And, Or, Not, Equal
+    - Shape: Reshape, Transpose, Unsqueeze, Split, Concat, Tile
+    - Reduction: ReduceMean, ReduceSum
+    - Activation: Relu, Clip
+    - Other: Constant, MatMul, Cast
+    """
+
+    def __init__(self):
+        super().__init__()
+        # Large learnable parameters
+        self.weight = nn.Parameter(torch.randn(128, 64))
+        self.bias = nn.Parameter(torch.randn(128))
+        self.scale = nn.Parameter(torch.ones(1) * 0.5)
+
+    def forward(self, x):
+        """Input shape: (batch, 64, 128)"""
+        # Constant operations
+        constant_val = torch.tensor(1.0, dtype=x.dtype)
+
+        # Arithmetic chain
+        x = x + constant_val          # Add
+        x = x * self.scale            # Mul
+        x = x - 0.5                   # Sub
+        x = x / 2.0                   # Div
+        x = torch.pow(x, 2.0)         # Pow
+
+        # Sqrt with non-negative input
+        x_sqrt_input = torch.clamp(x, min=0.0) + 1e-6
+        x = torch.sqrt(x_sqrt_input)  # Sqrt
+
+        # Clip and Relu
+        x = torch.clamp(x, min=-1.0, max=1.0)  # Clip
+        x = torch.relu(x)                       # Relu
+
+        # MatMul: x is (batch, 64, 128), weight is (128, 64)
+        # We want (batch, 64, 128) @ (128, 64) -> (batch, 64, 64)
+        # So use weight directly (not transposed)
+        x = torch.matmul(x, self.weight)       # (batch, 64, 64)
+
+        # Reshape
+        batch_size = x.shape[0]
+        x = x.reshape(batch_size, -1)  # (batch, 4096)
+
+        # Reductions
+        mean_val = torch.mean(x, dim=1, keepdim=True)  # (batch, 1)
+        sum_val = torch.sum(x, dim=1, keepdim=True)    # (batch, 1)
+
+        # Concat
+        x = torch.cat([mean_val, sum_val], dim=1)  # (batch, 2)
+
+        # Unsqueeze
+        x = x.unsqueeze(-1)  # (batch, 2, 1)
+
+        # Tile (repeat)
+        x = x.repeat(1, 1, 64)  # (batch, 2, 64)
+
+        # Transpose
+        x = x.transpose(1, 2)  # (batch, 64, 2)
+
+        # Split
+        x1, x2 = torch.split(x, 1, dim=2)  # each: (batch, 64, 1)
+
+        # Logical operations with comparisons
+        x1_gt_zero = x1 > 0
+        x1_gt_one = x1 > 1.0
+        x2_gt_zero = x2 > 0
+
+        # And, Or, Not
+        and_result = x1_gt_zero & x1_gt_one
+        or_result = x1_gt_zero | x2_gt_zero
+        not_result = torch.logical_not(x1_gt_zero)
+
+        # Cast to float
+        and_result = and_result.to(torch.float32)
+        or_result = or_result.to(torch.float32)
+        not_result = not_result.to(torch.float32)
+
+        # Combine results
+        x = torch.cat([and_result, or_result, not_result], dim=1)  # (batch, 64, 3)
+
+        # Final aggregation
+        x = x.mean(dim=1)  # (batch, 3)
+
+        return x
+
+
 def export_operator_coverage_model(output_dir: Path) -> Path:
     """Export the operator coverage model to ONNX.
 
@@ -613,6 +710,87 @@ def export_operator_coverage_model(output_dir: Path) -> Path:
     return output_path
 
 
+def export_large_operator_coverage_model(output_dir: Path) -> Path:
+    """Export the large operator coverage model to ONNX for memory constraint testing.
+
+    This model uses the same operators as operator_coverage.onnx but with larger
+    tensor dimensions to force memory spill under constraints.
+
+    Args:
+        output_dir: Directory to save the model.
+
+    Returns:
+        Path to the exported model.
+    """
+    import onnx
+    from onnx import helper
+
+    model = LargeOperatorCoverageModel()
+    output_path = output_dir / "operator_coverage_large.onnx"
+
+    # Export to ONNX with large input shape
+    model.eval()
+    dummy_input = torch.randn(4, 64, 128)
+
+    torch.onnx.export(
+        model,
+        dummy_input,
+        output_path,
+        export_params=True,
+        opset_version=13,
+        do_constant_folding=False,
+        input_names=["input"],
+        output_names=["output"],
+        dynamo=False,
+    )
+
+    # Manually add Equal operator if not present
+    onnx_model = onnx.load(output_path)
+    ops = {node.op_type for node in onnx_model.graph.node}
+
+    if "Equal" not in ops:
+        split_output = None
+        for node in onnx_model.graph.node:
+            if node.op_type == "Split":
+                split_output = node.output[0]
+                break
+
+        if split_output:
+            equal_node = helper.make_node(
+                "Equal",
+                inputs=[split_output, "const_zero"],
+                outputs=["equal_output"],
+                name="Equal_manual",
+            )
+            const_zero = helper.make_tensor(
+                "const_zero", onnx.TensorProto.FLOAT, [1], [0.0]
+            )
+            onnx_model.graph.initializer.append(const_zero)
+
+            split_idx = next(
+                i for i, n in enumerate(onnx_model.graph.node) if n.op_type == "Split"
+            )
+            onnx_model.graph.node.insert(split_idx + 1, equal_node)
+            onnx.save(onnx_model, output_path)
+            onnx_model = onnx.load(output_path)
+
+    onnx.checker.check_model(onnx_model)
+
+    # Print model info
+    print(f"  Input shape: (4, 64, 128)")
+    print(f"  Output shape: (4, 3)")
+    print(f"  ONNX opset: 13")
+    print(f"  Model size: {output_path.stat().st_size / 1024:.1f} KB")
+
+    # Count ops
+    ops = {}
+    for node in onnx_model.graph.node:
+        ops[node.op_type] = ops.get(node.op_type, 0) + 1
+    print(f"  Operators: {dict(ops)}")
+
+    return output_path
+
+
 def main() -> int:
     """Main entry point."""
     # Setup paths
@@ -646,6 +824,7 @@ def main() -> int:
         export_simple_lstm,
         export_simple_transformer,
         export_operator_coverage_model,
+        export_large_operator_coverage_model,
     ]
 
     exported = []
@@ -683,6 +862,7 @@ used for snapshot testing the nnc-py compiler.
 | `simple_lstm.onnx` | (1, 16, 32) | LSTM for sequence processing |
 | `simple_transformer.onnx` | (1, 16, 32) | Self-attention mechanism, Transformer core |
 | `operator_coverage.onnx` | (1, 4, 8) | Comprehensive operator coverage test |
+| `operator_coverage_large.onnx` | (4, 64, 128) | Large model for memory constraint testing |
 
 ### Operator Coverage Model
 
@@ -693,6 +873,14 @@ The `operator_coverage.onnx` model includes the following operators:
 - **Reduction**: ReduceMean, ReduceSum
 - **Activation**: Relu, Clip
 - **Other**: Constant, MatMul, Cast
+
+### Large Operator Coverage Model
+
+The `operator_coverage_large.onnx` model is a memory-constrained variant with the same
+operator coverage but larger tensor dimensions:
+- Input: (4, 64, 128) vs (1, 4, 8) for the small model
+- Forces memory spill when compiled with constraints (e.g., 32KB limit)
+- Tests correctness of spill/reload code generation
 
 ## Usage
 
