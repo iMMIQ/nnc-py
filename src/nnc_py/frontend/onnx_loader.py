@@ -255,6 +255,8 @@ class ONNXFrontend:
                 attrs["split"] = [int(d) for d in attr.ints]
             elif attr.name == "num_outputs":
                 attrs["num_outputs"] = int(attr.i)
+            elif attr.name == "to":
+                attrs["to"] = int(attr.i)
 
         return attrs
 
@@ -663,6 +665,83 @@ class ONNXFrontend:
                 shape=TensorShape(dims=out_shape, layout=input_tensor.shape.layout),
                 name=output_name,
             )
+
+        elif op_type == "Greater":
+            # Greater operation - element-wise comparison, outputs bool
+            # Output shape follows broadcasting rules
+            if len(onnx_node.input) < 2:
+                return None
+
+            right_name = onnx_node.input[1]
+            right_tensor = graph.tensors.get(right_name)
+            if not right_tensor or not right_tensor.shape.dims:
+                return TensorType(
+                    dtype=DataType.BOOL,
+                    shape=input_tensor.shape,
+                    name=output_name,
+                )
+
+            a_shape = input_tensor.shape.dims
+            b_shape = right_tensor.shape.dims
+
+            if len(a_shape) >= len(b_shape):
+                out_shape = a_shape
+            else:
+                out_shape = b_shape
+
+            return TensorType(
+                dtype=DataType.BOOL,
+                shape=TensorShape(dims=out_shape, layout=input_tensor.shape.layout),
+                name=output_name,
+            )
+
+        elif op_type == "Or":
+            # Or operation - element-wise logical OR, outputs bool
+            if len(onnx_node.input) < 2:
+                return None
+
+            right_name = onnx_node.input[1]
+            right_tensor = graph.tensors.get(right_name)
+            if not right_tensor or not right_tensor.shape.dims:
+                return TensorType(
+                    dtype=DataType.BOOL,
+                    shape=input_tensor.shape,
+                    name=output_name,
+                )
+
+            a_shape = input_tensor.shape.dims
+            b_shape = right_tensor.shape.dims
+
+            if len(a_shape) >= len(b_shape):
+                out_shape = a_shape
+            else:
+                out_shape = b_shape
+
+            return TensorType(
+                dtype=DataType.BOOL,
+                shape=TensorShape(dims=out_shape, layout=input_tensor.shape.layout),
+                name=output_name,
+            )
+
+        elif op_type == "Not":
+            # Not operation - element-wise logical NOT, outputs bool
+            return TensorType(
+                dtype=DataType.BOOL,
+                shape=input_tensor.shape,
+                name=output_name,
+            )
+
+        elif op_type == "Cast":
+            # Cast operation - output dtype is specified by 'to' attribute
+            to_attr = self._get_attr(onnx_node, "to", None)
+            if to_attr is not None:
+                # Map ONNX dtype to DataType
+                target_dtype = self._map_onnx_dtype(to_attr)
+                return TensorType(
+                    dtype=target_dtype,
+                    shape=input_tensor.shape,
+                    name=output_name,
+                )
 
         elif op_type == "Shape":
             # Shape operation - output is 1D tensor of int64 representing input shape

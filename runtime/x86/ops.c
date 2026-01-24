@@ -1272,47 +1272,16 @@ void nnc_equal(Tensor* a, Tensor* b, Tensor* out) {
 }
 
 void nnc_and(Tensor* a, Tensor* b, Tensor* out) {
-    /* Element-wise logical AND operation
-     * Treats non-zero as true, zero as false
-     * Returns 1.0f where both a and b are non-zero, 0.0f otherwise
+    /* Logical AND operation
+     * Inputs and output are uint8_t (BOOL type)
      */
     int64_t n = tensor_numel(out);
-    int64_t a_n = tensor_numel(a);
-    int64_t b_n = tensor_numel(b);
+    const uint8_t* a_data = (uint8_t*)a->data;
+    const uint8_t* b_data = (uint8_t*)b->data;
+    uint8_t* out_data = (uint8_t*)out->data;
 
-    float* a_data = (float*)a->data;
-    float* b_data = (float*)b->data;
-    float* out_data = (float*)out->data;
-
-    /* Handle broadcasting - use minimum size */
-    int64_t and_n = n;
-    if (a_n < and_n) and_n = a_n;
-    if (b_n < and_n) and_n = b_n;
-
-    /* Compute AND for overlapping elements */
-    for (int64_t i = 0; i < and_n; i++) {
-        out_data[i] = ((a_data[i] != 0.0f) && (b_data[i] != 0.0f)) ? 1.0f : 0.0f;
-    }
-
-    /* Handle broadcast: if one input is smaller, broadcast its value */
-    if (a_n == 1 && b_n == n) {
-        for (int64_t i = and_n; i < n; i++) {
-            out_data[i] = ((a_data[0] != 0.0f) && (b_data[i] != 0.0f)) ? 1.0f : 0.0f;
-        }
-    } else if (a_n == n && b_n == 1) {
-        for (int64_t i = and_n; i < n; i++) {
-            out_data[i] = ((a_data[i] != 0.0f) && (b_data[0] != 0.0f)) ? 1.0f : 0.0f;
-        }
-    } else if (a_n < n && b_n == n) {
-        /* Broadcast a (e.g., [6] to [2, 6]) */
-        for (int64_t i = and_n; i < n; i++) {
-            out_data[i] = ((a_data[i % a_n] != 0.0f) && (b_data[i] != 0.0f)) ? 1.0f : 0.0f;
-        }
-    } else if (a_n == n && b_n < n) {
-        /* Broadcast b (e.g., [6] to [2, 6]) */
-        for (int64_t i = and_n; i < n; i++) {
-            out_data[i] = ((a_data[i] != 0.0f) && (b_data[i % b_n] != 0.0f)) ? 1.0f : 0.0f;
-        }
+    for (int64_t i = 0; i < n; i++) {
+        out_data[i] = (a_data[i] && b_data[i]) ? 1 : 0;
     }
 }
 
@@ -1410,9 +1379,24 @@ void nnc_cast(Tensor* input, Tensor* output, int to_dtype) {
     int64_t n = tensor_numel(input);
 
     switch (to_dtype) {
-        case NNC_DTYPE_FLOAT32:
+        case NNC_DTYPE_FLOAT32: {
+            /* Check if input is BOOL type by checking dtype field */
+            int is_bool_input = (input->dtype == NNC_DTYPE_BOOL);
+            if (is_bool_input) {
+                /* BOOL to FLOAT32 - convert properly */
+                const uint8_t* in_data = (uint8_t*)input->data;
+                float* out_data = (float*)output->data;
+                for (int64_t i = 0; i < n; i++) {
+                    out_data[i] = (float)in_data[i];
+                }
+            } else {
+                /* Float to float - copy */
+                memcpy(output->data, input->data, n * sizeof(float));
+            }
+            break;
+        }
         case NNC_DTYPE_FLOAT16:
-            /* Float to float - copy */
+            /* Float to float - copy (with size conversion) */
             memcpy(output->data, input->data, n * sizeof(float));
             break;
         case NNC_DTYPE_INT32: {
