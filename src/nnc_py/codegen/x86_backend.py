@@ -1752,14 +1752,26 @@ int main(void) {{
             return ""
 
         var_name = ctx.tensor_symbols.get(tensor_name, tensor_name)
+
+        # Calculate element size from dtype
+        elem_size_map = {
+            DataType.FLOAT32: 4,
+            DataType.FLOAT16: 2,
+            DataType.INT32: 4,
+            DataType.INT64: 8,
+            DataType.INT8: 1,
+            DataType.UINT8: 1,
+            DataType.BOOL: 1,
+        }
+        elem_size = elem_size_map.get(tensor.dtype, 4)
+
         # Calculate number of elements from byte size
         byte_size = tensor.byte_size()
         if byte_size < 0:
             # Unknown size due to symbolic dimensions
             num_elements = -1
         else:
-            # Element size for float32
-            num_elements = byte_size // 4
+            num_elements = byte_size // elem_size
 
         # Get number of dimensions
         ndim = len(tensor.shape.dims)
@@ -1775,7 +1787,8 @@ int main(void) {{
                 if isinstance(dim, int):
                     code += f'    DEBUG_PRINT_DIM({i}, {dim});\n'
                 else:
-                    code += f'    DEBUG_PRINT_DIM({i}, (int){var_name}.shape[i]);\n'
+                    # For symbolic dimensions, use the actual index value (not Python variable i)
+                    code += f'    DEBUG_PRINT_DIM({i}, (int){var_name}.shape[{i}]);\n'
 
             code += f"""
     DEBUG_PRINT_DATA_START();
@@ -1796,7 +1809,8 @@ int main(void) {{
                 if isinstance(dim, int):
                     code += f'    printf("DIM {i} %d\\\\n", {dim});\n'
                 else:
-                    code += f'    printf("DIM {i} %d\\\\n", (int){var_name}.shape[i]);\n'
+                    # For symbolic dimensions, use the actual index value (not Python variable i)
+                    code += f'    printf("DIM {i} %d\\\\n", (int){var_name}.shape[{i}]);\n'
 
             code += f"""
     printf("DATA_START\\\\n");

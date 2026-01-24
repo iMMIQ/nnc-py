@@ -85,8 +85,8 @@ class DebugOutputParser:
                     collecting_data = False
                     # Convert to numpy array
                     data_array = np.array(data_values, dtype=np.float32)
-                    # Reshape according to shape
-                    if current_shape:
+                    # Reshape according to shape (if no -1 dimensions)
+                    if current_shape and -1 not in current_shape:
                         data_array = data_array.reshape(current_shape)
                     current_tensor["data"] = data_array
                     self.outputs[current_tensor["name"]] = current_tensor
@@ -185,25 +185,46 @@ class ONNXRuntimeRunner:
                     data = np.zeros(size, dtype=np.float32)
                 input_data[name] = data.reshape(concrete_shape)
 
-        # Run with all intermediate outputs
-        output_names = [o.name for o in self.model.graph.output] + self.intermediate_outputs
+        # Need to expose intermediate outputs
+        # Use shape inference to get type information for intermediate tensors
+        from copy import deepcopy
+        import tempfile
+        import os
 
-        # Remove duplicates while preserving order
-        seen = set()
-        unique_outputs = []
-        for name in output_names:
-            if name not in seen:
-                seen.add(name)
-                unique_outputs.append(name)
+        model_copy = deepcopy(self.model)
 
+        # Apply shape inference to get complete type information
         try:
-            results = self.session.run(unique_outputs, input_data)
-            return dict(zip(unique_outputs, results))
-        except Exception as e:
-            # Some outputs might not be available, try with just model outputs
-            results = self.session.run(None, input_data)
-            model_output_names = [o.name for o in self.model.graph.output]
-            return dict(zip(model_output_names, results))
+            model_copy = onnx.shape_inference.infer_shapes(model_copy)
+        except Exception:
+            pass  # Shape inference may fail for some models
+
+        # Get existing output names
+        existing_output_names = {o.name for o in model_copy.graph.output}
+
+        # After shape inference, graph.value_info contains inferred type info for intermediate tensors
+        # Add these to the graph outputs
+        if hasattr(model_copy.graph, 'value_info'):
+            for vi in model_copy.graph.value_info:
+                if vi.name not in existing_output_names:
+                    model_copy.graph.output.append(vi)
+
+        # Save to temp file and run
+        with tempfile.NamedTemporaryFile(suffix=".onnx", delete=False) as tmp:
+            tmp_path = tmp.name
+            try:
+                onnx.save(model_copy, tmp_path)
+                temp_session = ort.InferenceSession(tmp_path)
+                results = temp_session.run(None, input_data)
+
+                # Map result names to outputs
+                output_names = [o.name for o in model_copy.graph.output]
+                return dict(zip(output_names, results))
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except:
+                    pass
 
 
 class DebugComparator:

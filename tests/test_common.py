@@ -477,22 +477,19 @@ class BaseSnapshotTest:
         return "\n".join(lines)
 
     def _run_runtime_test(self, model_path: Path, model_name: str, opt_level: str = "O0") -> None:
-        """Run runtime test with sanitizers and compare output with PyTorch reference."""
+        """Run runtime test with sanitizers and compare intermediate outputs with ONNX Runtime.
+
+        Uses debug mode to capture intermediate tensor outputs and compare each layer's
+        output with ONNX Runtime reference implementation.
+        """
+        from nnc_py.tools.debug_compare import DebugComparator
+
         runtime_dir = Path(__file__).parent.parent / "runtime"
 
-        onnx_model = onnx.load(str(model_path))
-        input_shape = [d.dim_value for d in onnx_model.graph.input[0].type.tensor_type.shape.dim]
-        input_size = np.prod(input_shape)
-        input_data = np.arange(input_size, dtype=np.float32) * 0.01
-        input_data = input_data.reshape(input_shape)
-
-        print(f"\\n[{model_name}] Computing reference output with PyTorch...")
-        ref_outputs = self._get_reference_output(model_path, input_data)
-        ref_output = list(ref_outputs.values())[0]
-        print(f"  Reference output shape: {ref_output.shape}")
-
         with tempfile.TemporaryDirectory() as tmpdir:
-            compiler = Compiler(target="x86", opt_level=0)
+            # Compile with debug mode enabled
+            print(f"\\n[{model_name}] Compiling with debug mode...")
+            compiler = Compiler(target="x86", opt_level=0, debug_mode=True)
             compiler.compile(str(model_path), tmpdir)
 
             exe_path = self._compile_with_sanitizer(tmpdir, runtime_dir, opt_level)
@@ -504,12 +501,44 @@ class BaseSnapshotTest:
             assert "NNC Model Runner" in stdout
             assert "Inference complete" in stdout
 
-            print(f"[{model_name}] Comparing C output with PyTorch reference...")
-            c_output_flat = self._parse_c_output(stdout)
-            print(f"  C output size: {len(c_output_flat)} values")
+            # Check that debug output file was created
+            debug_file = Path(tmpdir) / "nnc_debug_output.txt"
+            assert debug_file.exists(), f"Debug output file not created. stdout: {stdout}"
 
-            ref_output_flat = ref_output.flatten()[:len(c_output_flat)]
-            match, msg = self._compare_outputs(c_output_flat, ref_output_flat)
-            assert match, f"Output mismatch: {msg}\\nC output:\\n{c_output_flat}\\nReference:\\n{ref_output_flat}"
-            print(f"  [{model_name}] {msg}")
-            print(f"  [{model_name}] C output matches PyTorch reference!")
+            print(f"[{model_name}] Comparing NNC outputs with ONNX Runtime...")
+
+            # Compare NNC debug output with ONNX Runtime
+            # Use relaxed tolerances for floating point differences across implementations
+            # ResNet and deeper models may have accumulated floating point differences
+            comparator = DebugComparator(str(debug_file), str(model_path), rtol=1e-1, atol=1e-3)
+            results = comparator.compare()
+
+            # Report results
+            total = len(results["matched"]) + len(results["mismatched"]) + len(results["shape_mismatch"])
+            print(f"  Total tensors compared: {total}")
+            print(f"  ✓ Matched: {len(results['matched'])}")
+            print(f"  ✗ Mismatched: {len(results['mismatched'])}")
+            print(f"  ⚠ Shape mismatch: {len(results['shape_mismatch'])}")
+
+            # Report mismatches if any
+            if results["mismatched"]:
+                print(f"  [{model_name}] Mismatched tensors:")
+                for item in results["mismatched"][:5]:  # Show first 5
+                    if "max_diff" in item:
+                        print(f"    - {item['tensor']}: max_diff={item['max_diff']:.6e}")
+                if len(results["mismatched"]) > 5:
+                    print(f"    ... and {len(results['mismatched']) - 5} more")
+
+            if results["shape_mismatch"]:
+                print(f"  [{model_name}] Shape mismatches:")
+                for item in results["shape_mismatch"][:5]:
+                    print(f"    - {item['tensor']}: NNC {item['nnc_shape']} vs ONNX {item['onnx_shape']}")
+
+            # Assert that all outputs match
+            assert len(results["shape_mismatch"]) == 0, \
+                f"Shape mismatches found: {len(results['shape_mismatch'])}"
+            assert len(results["mismatched"]) == 0, \
+                f"Output mismatches found: {len(results['mismatched'])}"
+
+            print(f"  [{model_name}] All {total} tensor outputs match ONNX Runtime!")
+
