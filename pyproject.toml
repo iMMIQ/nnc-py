@@ -25,13 +25,19 @@ classifiers = [
 ]
 
 dependencies = [
-    "onnx>=1.16.0",
+    "onnx>=1.16.0,<1.18",
+    "onnxsim>=0.4.0",
+    "onnxruntime>=1.20.0",
     "numpy>=1.24.0",
     "networkx>=3.0",
     "click>=8.0.0",
     "rich>=13.0.0",
     "pydantic>=2.0.0",
 ]
+
+# Build configuration for onnxsim
+# Note: onnxsim requires CMake policy setting for CMake 4.x
+# Install with: CMAKE_ARGS="-DCMAKE_POLICY_VERSION_MINIMUM=3.5" uv pip install onnxsim
 
 [project.optional-dependencies]
 dev = [

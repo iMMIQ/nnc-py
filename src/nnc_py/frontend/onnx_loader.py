@@ -2,11 +2,18 @@
 
 import onnx
 from onnx import helper, numpy_helper
+
 try:
     from onnx import shape_inference
     HAS_SHAPE_INFERENCE = True
 except ImportError:
     HAS_SHAPE_INFERENCE = False
+
+try:
+    import onnxsim
+    HAS_ONNXSIM = True
+except ImportError:
+    HAS_ONNXSIM = False
 
 from nnc_py.ir.graph import Graph
 from nnc_py.ir.node import Node, OpType
@@ -27,6 +34,14 @@ class ONNXFrontend:
         onnx.TensorProto.BOOL: DataType.BOOL,
     }
 
+    def __init__(self, enable_simplify: bool = True):
+        """Initialize the ONNX frontend.
+
+        Args:
+            enable_simplify: Whether to use onnxsim to simplify the model.
+        """
+        self.enable_simplify = enable_simplify and HAS_ONNXSIM
+
     def load(self, onnx_path: str) -> Graph:
         """Load ONNX model and convert to IR graph.
 
@@ -38,6 +53,14 @@ class ONNXFrontend:
         """
         # Load ONNX model
         model = onnx.load(onnx_path)
+
+        # Apply onnxsim to simplify the model (constant folding, etc.)
+        if self.enable_simplify:
+            try:
+                model, _ = onnxsim.simplify(model)
+            except Exception as e:
+                # Simplification failed, continue with original model
+                pass
 
         # Apply ONNX shape inference if available
         if HAS_SHAPE_INFERENCE:

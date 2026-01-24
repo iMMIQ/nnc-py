@@ -1,7 +1,6 @@
 """Optimization passes module."""
 
 from nnc_py.passes.base import PassBase, PassManager
-from nnc_py.passes.constant_folding import ConstantFoldingPass
 # New memory strategy interface
 from nnc_py.passes.memory_strategy import (
     AllocationStrategy,
@@ -22,7 +21,6 @@ __all__ = [
     # Core pass infrastructure
     "PassBase",
     "PassManager",
-    "ConstantFoldingPass",
 
     # New memory strategy interface
     "AllocationStrategy",
