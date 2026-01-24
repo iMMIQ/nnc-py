@@ -70,15 +70,19 @@ def create_binary_op_model_with_spill(
     """Create a model with binary operation that requires spill.
 
     Both inputs to the binary op may be spilled, requiring reload to fast memory.
+    Uses two different inputs to prevent onnxsim from merging identical ops.
     """
-    input_tensor = helper.make_tensor_value_info(
-        'input', onnx.TensorProto.FLOAT, [1, tensor_size]
+    input1_tensor = helper.make_tensor_value_info(
+        'input1', onnx.TensorProto.FLOAT, [1, tensor_size]
+    )
+    input2_tensor = helper.make_tensor_value_info(
+        'input2', onnx.TensorProto.FLOAT, [1, tensor_size]
     )
 
     nodes = [
-        # Create two large intermediate values
-        helper.make_node('Relu', inputs=['input'], outputs=['relu1']),
-        helper.make_node('Relu', inputs=['input'], outputs=['relu2']),
+        # Create two large intermediate values from different inputs
+        helper.make_node('Relu', inputs=['input1'], outputs=['relu1']),
+        helper.make_node('Relu', inputs=['input2'], outputs=['relu2']),
         # Binary op consuming both - this needs both in fast memory
         helper.make_node('Add', inputs=['relu1', 'relu2'], outputs=['output']),
     ]
@@ -90,7 +94,7 @@ def create_binary_op_model_with_spill(
     graph = helper.make_graph(
         nodes,
         'binary_spill_model',
-        [input_tensor],
+        [input1_tensor, input2_tensor],
         [output_tensor],
     )
 

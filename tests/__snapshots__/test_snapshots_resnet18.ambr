@@ -13,22 +13,6 @@
   /* Tensor declarations */
   extern Tensor tensor_input;
   extern Tensor tensor_output;
-  extern Tensor tensor_onnx_Conv_251;
-  extern Tensor tensor_onnx_Conv_248;
-  extern Tensor tensor_onnx_Conv_245;
-  extern Tensor tensor_onnx_Conv_242;
-  extern Tensor tensor_onnx_Conv_236;
-  extern Tensor tensor_onnx_Conv_233;
-  extern Tensor tensor_onnx_Conv_230;
-  extern Tensor tensor_onnx_Conv_227;
-  extern Tensor tensor_onnx_Conv_221;
-  extern Tensor tensor_onnx_Conv_218;
-  extern Tensor tensor_onnx_Conv_215;
-  extern Tensor tensor_onnx_Conv_212;
-  extern Tensor tensor_onnx_Conv_206;
-  extern Tensor tensor_onnx_Conv_203;
-  extern Tensor tensor_onnx_Conv_200;
-  extern Tensor tensor_onnx_Conv_197;
   extern Tensor tensor_conv1_Conv_output_0;
   extern Tensor tensor_relu_Relu_output_0;
   extern Tensor tensor_maxpool_MaxPool_output_0;
@@ -104,86 +88,6 @@
   extern Tensor tensor_onnx_Conv_247;
   extern Tensor tensor_onnx_Conv_250;
   
-  /* Identity: Identity_0 */
-  void node_Identity_0(void) {
-      nnc_identity(&tensor_onnx_Conv_239, &tensor_onnx_Conv_251);
-  }
-  
-  /* Identity: Identity_1 */
-  void node_Identity_1(void) {
-      nnc_identity(&tensor_onnx_Conv_239, &tensor_onnx_Conv_248);
-  }
-  
-  /* Identity: Identity_2 */
-  void node_Identity_2(void) {
-      nnc_identity(&tensor_onnx_Conv_239, &tensor_onnx_Conv_245);
-  }
-  
-  /* Identity: Identity_3 */
-  void node_Identity_3(void) {
-      nnc_identity(&tensor_onnx_Conv_239, &tensor_onnx_Conv_242);
-  }
-  
-  /* Identity: Identity_4 */
-  void node_Identity_4(void) {
-      nnc_identity(&tensor_onnx_Conv_224, &tensor_onnx_Conv_236);
-  }
-  
-  /* Identity: Identity_5 */
-  void node_Identity_5(void) {
-      nnc_identity(&tensor_onnx_Conv_224, &tensor_onnx_Conv_233);
-  }
-  
-  /* Identity: Identity_6 */
-  void node_Identity_6(void) {
-      nnc_identity(&tensor_onnx_Conv_224, &tensor_onnx_Conv_230);
-  }
-  
-  /* Identity: Identity_7 */
-  void node_Identity_7(void) {
-      nnc_identity(&tensor_onnx_Conv_224, &tensor_onnx_Conv_227);
-  }
-  
-  /* Identity: Identity_8 */
-  void node_Identity_8(void) {
-      nnc_identity(&tensor_onnx_Conv_209, &tensor_onnx_Conv_221);
-  }
-  
-  /* Identity: Identity_9 */
-  void node_Identity_9(void) {
-      nnc_identity(&tensor_onnx_Conv_209, &tensor_onnx_Conv_218);
-  }
-  
-  /* Identity: Identity_10 */
-  void node_Identity_10(void) {
-      nnc_identity(&tensor_onnx_Conv_209, &tensor_onnx_Conv_215);
-  }
-  
-  /* Identity: Identity_11 */
-  void node_Identity_11(void) {
-      nnc_identity(&tensor_onnx_Conv_209, &tensor_onnx_Conv_212);
-  }
-  
-  /* Identity: Identity_12 */
-  void node_Identity_12(void) {
-      nnc_identity(&tensor_onnx_Conv_194, &tensor_onnx_Conv_206);
-  }
-  
-  /* Identity: Identity_13 */
-  void node_Identity_13(void) {
-      nnc_identity(&tensor_onnx_Conv_194, &tensor_onnx_Conv_203);
-  }
-  
-  /* Identity: Identity_14 */
-  void node_Identity_14(void) {
-      nnc_identity(&tensor_onnx_Conv_194, &tensor_onnx_Conv_200);
-  }
-  
-  /* Identity: Identity_15 */
-  void node_Identity_15(void) {
-      nnc_identity(&tensor_onnx_Conv_194, &tensor_onnx_Conv_197);
-  }
-  
   /* Conv: /conv1/Conv */
   void node_conv1_Conv(void) {
       nnc_conv(&tensor_input, &tensor_onnx_Conv_193, &tensor_onnx_Conv_194, &tensor_conv1_Conv_output_0, 7, 7, 2, 2, 3, 3);
@@ -201,7 +105,7 @@
   
   /* Conv: /layer1/layer1.0/conv1/Conv */
   void node_layer1_layer1_0_conv1_Conv(void) {
-      nnc_conv(&tensor_maxpool_MaxPool_output_0, &tensor_onnx_Conv_196, &tensor_onnx_Conv_197, &tensor_layer1_layer1_0_conv1_Conv_output_0, 3, 3, 1, 1, 1, 1);
+      nnc_conv(&tensor_maxpool_MaxPool_output_0, &tensor_onnx_Conv_196, &tensor_onnx_Conv_194, &tensor_layer1_layer1_0_conv1_Conv_output_0, 3, 3, 1, 1, 1, 1);
   }
   
   /* Relu: /layer1/layer1.0/relu/Relu */
@@ -211,7 +115,7 @@
   
   /* Conv: /layer1/layer1.0/conv2/Conv */
   void node_layer1_layer1_0_conv2_Conv(void) {
-      nnc_conv(&tensor_layer1_layer1_0_relu_Relu_output_0, &tensor_onnx_Conv_199, &tensor_onnx_Conv_200, &tensor_layer1_layer1_0_conv2_Conv_output_0, 3, 3, 1, 1, 1, 1);
+      nnc_conv(&tensor_layer1_layer1_0_relu_Relu_output_0, &tensor_onnx_Conv_199, &tensor_onnx_Conv_194, &tensor_layer1_layer1_0_conv2_Conv_output_0, 3, 3, 1, 1, 1, 1);
   }
   
   /* Add: /layer1/layer1.0/Add */
@@ -226,7 +130,7 @@
   
   /* Conv: /layer1/layer1.1/conv1/Conv */
   void node_layer1_layer1_1_conv1_Conv(void) {
-      nnc_conv(&tensor_layer1_layer1_0_relu_1_Relu_output_0, &tensor_onnx_Conv_202, &tensor_onnx_Conv_203, &tensor_layer1_layer1_1_conv1_Conv_output_0, 3, 3, 1, 1, 1, 1);
+      nnc_conv(&tensor_layer1_layer1_0_relu_1_Relu_output_0, &tensor_onnx_Conv_202, &tensor_onnx_Conv_194, &tensor_layer1_layer1_1_conv1_Conv_output_0, 3, 3, 1, 1, 1, 1);
   }
   
   /* Relu: /layer1/layer1.1/relu/Relu */
@@ -236,7 +140,7 @@
   
   /* Conv: /layer1/layer1.1/conv2/Conv */
   void node_layer1_layer1_1_conv2_Conv(void) {
-      nnc_conv(&tensor_layer1_layer1_1_relu_Relu_output_0, &tensor_onnx_Conv_205, &tensor_onnx_Conv_206, &tensor_layer1_layer1_1_conv2_Conv_output_0, 3, 3, 1, 1, 1, 1);
+      nnc_conv(&tensor_layer1_layer1_1_relu_Relu_output_0, &tensor_onnx_Conv_205, &tensor_onnx_Conv_194, &tensor_layer1_layer1_1_conv2_Conv_output_0, 3, 3, 1, 1, 1, 1);
   }
   
   /* Add: /layer1/layer1.1/Add */
@@ -256,7 +160,7 @@
   
   /* Conv: /layer2/layer2.0/downsample/downsample.0/Conv */
   void node_layer2_layer2_0_downsample_downsample_0_Conv(void) {
-      nnc_conv(&tensor_layer1_layer1_1_relu_1_Relu_output_0, &tensor_onnx_Conv_214, &tensor_onnx_Conv_215, &tensor_layer2_layer2_0_downsample_downsample_0_Conv_output_0, 1, 1, 2, 2, 0, 0);
+      nnc_conv(&tensor_layer1_layer1_1_relu_1_Relu_output_0, &tensor_onnx_Conv_214, &tensor_onnx_Conv_209, &tensor_layer2_layer2_0_downsample_downsample_0_Conv_output_0, 1, 1, 2, 2, 0, 0);
   }
   
   /* Relu: /layer2/layer2.0/relu/Relu */
@@ -266,7 +170,7 @@
   
   /* Conv: /layer2/layer2.0/conv2/Conv */
   void node_layer2_layer2_0_conv2_Conv(void) {
-      nnc_conv(&tensor_layer2_layer2_0_relu_Relu_output_0, &tensor_onnx_Conv_211, &tensor_onnx_Conv_212, &tensor_layer2_layer2_0_conv2_Conv_output_0, 3, 3, 1, 1, 1, 1);
+      nnc_conv(&tensor_layer2_layer2_0_relu_Relu_output_0, &tensor_onnx_Conv_211, &tensor_onnx_Conv_209, &tensor_layer2_layer2_0_conv2_Conv_output_0, 3, 3, 1, 1, 1, 1);
   }
   
   /* Add: /layer2/layer2.0/Add */
@@ -281,7 +185,7 @@
   
   /* Conv: /layer2/layer2.1/conv1/Conv */
   void node_layer2_layer2_1_conv1_Conv(void) {
-      nnc_conv(&tensor_layer2_layer2_0_relu_1_Relu_output_0, &tensor_onnx_Conv_217, &tensor_onnx_Conv_218, &tensor_layer2_layer2_1_conv1_Conv_output_0, 3, 3, 1, 1, 1, 1);
+      nnc_conv(&tensor_layer2_layer2_0_relu_1_Relu_output_0, &tensor_onnx_Conv_217, &tensor_onnx_Conv_209, &tensor_layer2_layer2_1_conv1_Conv_output_0, 3, 3, 1, 1, 1, 1);
   }
   
   /* Relu: /layer2/layer2.1/relu/Relu */
@@ -291,7 +195,7 @@
   
   /* Conv: /layer2/layer2.1/conv2/Conv */
   void node_layer2_layer2_1_conv2_Conv(void) {
-      nnc_conv(&tensor_layer2_layer2_1_relu_Relu_output_0, &tensor_onnx_Conv_220, &tensor_onnx_Conv_221, &tensor_layer2_layer2_1_conv2_Conv_output_0, 3, 3, 1, 1, 1, 1);
+      nnc_conv(&tensor_layer2_layer2_1_relu_Relu_output_0, &tensor_onnx_Conv_220, &tensor_onnx_Conv_209, &tensor_layer2_layer2_1_conv2_Conv_output_0, 3, 3, 1, 1, 1, 1);
   }
   
   /* Add: /layer2/layer2.1/Add */
@@ -311,7 +215,7 @@
   
   /* Conv: /layer3/layer3.0/downsample/downsample.0/Conv */
   void node_layer3_layer3_0_downsample_downsample_0_Conv(void) {
-      nnc_conv(&tensor_layer2_layer2_1_relu_1_Relu_output_0, &tensor_onnx_Conv_229, &tensor_onnx_Conv_230, &tensor_layer3_layer3_0_downsample_downsample_0_Conv_output_0, 1, 1, 2, 2, 0, 0);
+      nnc_conv(&tensor_layer2_layer2_1_relu_1_Relu_output_0, &tensor_onnx_Conv_229, &tensor_onnx_Conv_224, &tensor_layer3_layer3_0_downsample_downsample_0_Conv_output_0, 1, 1, 2, 2, 0, 0);
   }
   
   /* Relu: /layer3/layer3.0/relu/Relu */
@@ -321,7 +225,7 @@
   
   /* Conv: /layer3/layer3.0/conv2/Conv */
   void node_layer3_layer3_0_conv2_Conv(void) {
-      nnc_conv(&tensor_layer3_layer3_0_relu_Relu_output_0, &tensor_onnx_Conv_226, &tensor_onnx_Conv_227, &tensor_layer3_layer3_0_conv2_Conv_output_0, 3, 3, 1, 1, 1, 1);
+      nnc_conv(&tensor_layer3_layer3_0_relu_Relu_output_0, &tensor_onnx_Conv_226, &tensor_onnx_Conv_224, &tensor_layer3_layer3_0_conv2_Conv_output_0, 3, 3, 1, 1, 1, 1);
   }
   
   /* Add: /layer3/layer3.0/Add */
@@ -336,7 +240,7 @@
   
   /* Conv: /layer3/layer3.1/conv1/Conv */
   void node_layer3_layer3_1_conv1_Conv(void) {
-      nnc_conv(&tensor_layer3_layer3_0_relu_1_Relu_output_0, &tensor_onnx_Conv_232, &tensor_onnx_Conv_233, &tensor_layer3_layer3_1_conv1_Conv_output_0, 3, 3, 1, 1, 1, 1);
+      nnc_conv(&tensor_layer3_layer3_0_relu_1_Relu_output_0, &tensor_onnx_Conv_232, &tensor_onnx_Conv_224, &tensor_layer3_layer3_1_conv1_Conv_output_0, 3, 3, 1, 1, 1, 1);
   }
   
   /* Relu: /layer3/layer3.1/relu/Relu */
@@ -346,7 +250,7 @@
   
   /* Conv: /layer3/layer3.1/conv2/Conv */
   void node_layer3_layer3_1_conv2_Conv(void) {
-      nnc_conv(&tensor_layer3_layer3_1_relu_Relu_output_0, &tensor_onnx_Conv_235, &tensor_onnx_Conv_236, &tensor_layer3_layer3_1_conv2_Conv_output_0, 3, 3, 1, 1, 1, 1);
+      nnc_conv(&tensor_layer3_layer3_1_relu_Relu_output_0, &tensor_onnx_Conv_235, &tensor_onnx_Conv_224, &tensor_layer3_layer3_1_conv2_Conv_output_0, 3, 3, 1, 1, 1, 1);
   }
   
   /* Add: /layer3/layer3.1/Add */
@@ -366,7 +270,7 @@
   
   /* Conv: /layer4/layer4.0/downsample/downsample.0/Conv */
   void node_layer4_layer4_0_downsample_downsample_0_Conv(void) {
-      nnc_conv(&tensor_layer3_layer3_1_relu_1_Relu_output_0, &tensor_onnx_Conv_244, &tensor_onnx_Conv_245, &tensor_layer4_layer4_0_downsample_downsample_0_Conv_output_0, 1, 1, 2, 2, 0, 0);
+      nnc_conv(&tensor_layer3_layer3_1_relu_1_Relu_output_0, &tensor_onnx_Conv_244, &tensor_onnx_Conv_239, &tensor_layer4_layer4_0_downsample_downsample_0_Conv_output_0, 1, 1, 2, 2, 0, 0);
   }
   
   /* Relu: /layer4/layer4.0/relu/Relu */
@@ -376,7 +280,7 @@
   
   /* Conv: /layer4/layer4.0/conv2/Conv */
   void node_layer4_layer4_0_conv2_Conv(void) {
-      nnc_conv(&tensor_layer4_layer4_0_relu_Relu_output_0, &tensor_onnx_Conv_241, &tensor_onnx_Conv_242, &tensor_layer4_layer4_0_conv2_Conv_output_0, 3, 3, 1, 1, 1, 1);
+      nnc_conv(&tensor_layer4_layer4_0_relu_Relu_output_0, &tensor_onnx_Conv_241, &tensor_onnx_Conv_239, &tensor_layer4_layer4_0_conv2_Conv_output_0, 3, 3, 1, 1, 1, 1);
   }
   
   /* Add: /layer4/layer4.0/Add */
@@ -391,7 +295,7 @@
   
   /* Conv: /layer4/layer4.1/conv1/Conv */
   void node_layer4_layer4_1_conv1_Conv(void) {
-      nnc_conv(&tensor_layer4_layer4_0_relu_1_Relu_output_0, &tensor_onnx_Conv_247, &tensor_onnx_Conv_248, &tensor_layer4_layer4_1_conv1_Conv_output_0, 3, 3, 1, 1, 1, 1);
+      nnc_conv(&tensor_layer4_layer4_0_relu_1_Relu_output_0, &tensor_onnx_Conv_247, &tensor_onnx_Conv_239, &tensor_layer4_layer4_1_conv1_Conv_output_0, 3, 3, 1, 1, 1, 1);
   }
   
   /* Relu: /layer4/layer4.1/relu/Relu */
@@ -401,7 +305,7 @@
   
   /* Conv: /layer4/layer4.1/conv2/Conv */
   void node_layer4_layer4_1_conv2_Conv(void) {
-      nnc_conv(&tensor_layer4_layer4_1_relu_Relu_output_0, &tensor_onnx_Conv_250, &tensor_onnx_Conv_251, &tensor_layer4_layer4_1_conv2_Conv_output_0, 3, 3, 1, 1, 1, 1);
+      nnc_conv(&tensor_layer4_layer4_1_relu_Relu_output_0, &tensor_onnx_Conv_250, &tensor_onnx_Conv_239, &tensor_layer4_layer4_1_conv2_Conv_output_0, 3, 3, 1, 1, 1, 1);
   }
   
   /* Add: /layer4/layer4.1/Add */
@@ -431,22 +335,6 @@
   
   /* Main inference entry point */
   void nnc_run(void) {
-      node_Identity_0();
-      node_Identity_1();
-      node_Identity_2();
-      node_Identity_3();
-      node_Identity_4();
-      node_Identity_5();
-      node_Identity_6();
-      node_Identity_7();
-      node_Identity_8();
-      node_Identity_9();
-      node_Identity_10();
-      node_Identity_11();
-      node_Identity_12();
-      node_Identity_13();
-      node_Identity_14();
-      node_Identity_15();
       node_conv1_Conv();
       node_relu_Relu();
       node_maxpool_MaxPool();
@@ -511,22 +399,6 @@
   /* Tensor declarations */
   extern Tensor tensor_input;
   extern Tensor tensor_output;
-  extern Tensor tensor_onnx_Conv_251;
-  extern Tensor tensor_onnx_Conv_248;
-  extern Tensor tensor_onnx_Conv_245;
-  extern Tensor tensor_onnx_Conv_242;
-  extern Tensor tensor_onnx_Conv_236;
-  extern Tensor tensor_onnx_Conv_233;
-  extern Tensor tensor_onnx_Conv_230;
-  extern Tensor tensor_onnx_Conv_227;
-  extern Tensor tensor_onnx_Conv_221;
-  extern Tensor tensor_onnx_Conv_218;
-  extern Tensor tensor_onnx_Conv_215;
-  extern Tensor tensor_onnx_Conv_212;
-  extern Tensor tensor_onnx_Conv_206;
-  extern Tensor tensor_onnx_Conv_203;
-  extern Tensor tensor_onnx_Conv_200;
-  extern Tensor tensor_onnx_Conv_197;
   extern Tensor tensor_conv1_Conv_output_0;
   extern Tensor tensor_relu_Relu_output_0;
   extern Tensor tensor_maxpool_MaxPool_output_0;
@@ -637,166 +509,6 @@
       .dtype = NNC_DTYPE_FLOAT32,
       .shape = tensor_output_shape,
       .ndim = 2,
-      .nbytes = <SIZE>,
-  };
-  
-  /* Tensor: onnx::Conv_251 */
-  static int64_t tensor_onnx_Conv_251_shape[] = {512};
-  Tensor tensor_onnx_Conv_251 = {
-      .data = _nnc_memory_pool + <OFFSET>,
-      .dtype = NNC_DTYPE_FLOAT32,
-      .shape = tensor_onnx_Conv_251_shape,
-      .ndim = 1,
-      .nbytes = <SIZE>,
-  };
-  
-  /* Tensor: onnx::Conv_248 */
-  static int64_t tensor_onnx_Conv_248_shape[] = {512};
-  Tensor tensor_onnx_Conv_248 = {
-      .data = _nnc_memory_pool + <OFFSET>,
-      .dtype = NNC_DTYPE_FLOAT32,
-      .shape = tensor_onnx_Conv_248_shape,
-      .ndim = 1,
-      .nbytes = <SIZE>,
-  };
-  
-  /* Tensor: onnx::Conv_245 */
-  static int64_t tensor_onnx_Conv_245_shape[] = {512};
-  Tensor tensor_onnx_Conv_245 = {
-      .data = _nnc_memory_pool + <OFFSET>,
-      .dtype = NNC_DTYPE_FLOAT32,
-      .shape = tensor_onnx_Conv_245_shape,
-      .ndim = 1,
-      .nbytes = <SIZE>,
-  };
-  
-  /* Tensor: onnx::Conv_242 */
-  static int64_t tensor_onnx_Conv_242_shape[] = {512};
-  Tensor tensor_onnx_Conv_242 = {
-      .data = _nnc_memory_pool + <OFFSET>,
-      .dtype = NNC_DTYPE_FLOAT32,
-      .shape = tensor_onnx_Conv_242_shape,
-      .ndim = 1,
-      .nbytes = <SIZE>,
-  };
-  
-  /* Tensor: onnx::Conv_236 */
-  static int64_t tensor_onnx_Conv_236_shape[] = {256};
-  Tensor tensor_onnx_Conv_236 = {
-      .data = _nnc_memory_pool + <OFFSET>,
-      .dtype = NNC_DTYPE_FLOAT32,
-      .shape = tensor_onnx_Conv_236_shape,
-      .ndim = 1,
-      .nbytes = <SIZE>,
-  };
-  
-  /* Tensor: onnx::Conv_233 */
-  static int64_t tensor_onnx_Conv_233_shape[] = {256};
-  Tensor tensor_onnx_Conv_233 = {
-      .data = _nnc_memory_pool + <OFFSET>,
-      .dtype = NNC_DTYPE_FLOAT32,
-      .shape = tensor_onnx_Conv_233_shape,
-      .ndim = 1,
-      .nbytes = <SIZE>,
-  };
-  
-  /* Tensor: onnx::Conv_230 */
-  static int64_t tensor_onnx_Conv_230_shape[] = {256};
-  Tensor tensor_onnx_Conv_230 = {
-      .data = _nnc_memory_pool + <OFFSET>,
-      .dtype = NNC_DTYPE_FLOAT32,
-      .shape = tensor_onnx_Conv_230_shape,
-      .ndim = 1,
-      .nbytes = <SIZE>,
-  };
-  
-  /* Tensor: onnx::Conv_227 */
-  static int64_t tensor_onnx_Conv_227_shape[] = {256};
-  Tensor tensor_onnx_Conv_227 = {
-      .data = _nnc_memory_pool + <OFFSET>,
-      .dtype = NNC_DTYPE_FLOAT32,
-      .shape = tensor_onnx_Conv_227_shape,
-      .ndim = 1,
-      .nbytes = <SIZE>,
-  };
-  
-  /* Tensor: onnx::Conv_221 */
-  static int64_t tensor_onnx_Conv_221_shape[] = {128};
-  Tensor tensor_onnx_Conv_221 = {
-      .data = _nnc_memory_pool + <OFFSET>,
-      .dtype = NNC_DTYPE_FLOAT32,
-      .shape = tensor_onnx_Conv_221_shape,
-      .ndim = 1,
-      .nbytes = <SIZE>,
-  };
-  
-  /* Tensor: onnx::Conv_218 */
-  static int64_t tensor_onnx_Conv_218_shape[] = {128};
-  Tensor tensor_onnx_Conv_218 = {
-      .data = _nnc_memory_pool + <OFFSET>,
-      .dtype = NNC_DTYPE_FLOAT32,
-      .shape = tensor_onnx_Conv_218_shape,
-      .ndim = 1,
-      .nbytes = <SIZE>,
-  };
-  
-  /* Tensor: onnx::Conv_215 */
-  static int64_t tensor_onnx_Conv_215_shape[] = {128};
-  Tensor tensor_onnx_Conv_215 = {
-      .data = _nnc_memory_pool + <OFFSET>,
-      .dtype = NNC_DTYPE_FLOAT32,
-      .shape = tensor_onnx_Conv_215_shape,
-      .ndim = 1,
-      .nbytes = <SIZE>,
-  };
-  
-  /* Tensor: onnx::Conv_212 */
-  static int64_t tensor_onnx_Conv_212_shape[] = {128};
-  Tensor tensor_onnx_Conv_212 = {
-      .data = _nnc_memory_pool + <OFFSET>,
-      .dtype = NNC_DTYPE_FLOAT32,
-      .shape = tensor_onnx_Conv_212_shape,
-      .ndim = 1,
-      .nbytes = <SIZE>,
-  };
-  
-  /* Tensor: onnx::Conv_206 */
-  static int64_t tensor_onnx_Conv_206_shape[] = {64};
-  Tensor tensor_onnx_Conv_206 = {
-      .data = _nnc_memory_pool + <OFFSET>,
-      .dtype = NNC_DTYPE_FLOAT32,
-      .shape = tensor_onnx_Conv_206_shape,
-      .ndim = 1,
-      .nbytes = <SIZE>,
-  };
-  
-  /* Tensor: onnx::Conv_203 */
-  static int64_t tensor_onnx_Conv_203_shape[] = {64};
-  Tensor tensor_onnx_Conv_203 = {
-      .data = _nnc_memory_pool + <OFFSET>,
-      .dtype = NNC_DTYPE_FLOAT32,
-      .shape = tensor_onnx_Conv_203_shape,
-      .ndim = 1,
-      .nbytes = <SIZE>,
-  };
-  
-  /* Tensor: onnx::Conv_200 */
-  static int64_t tensor_onnx_Conv_200_shape[] = {64};
-  Tensor tensor_onnx_Conv_200 = {
-      .data = _nnc_memory_pool + <OFFSET>,
-      .dtype = NNC_DTYPE_FLOAT32,
-      .shape = tensor_onnx_Conv_200_shape,
-      .ndim = 1,
-      .nbytes = <SIZE>,
-  };
-  
-  /* Tensor: onnx::Conv_197 */
-  static int64_t tensor_onnx_Conv_197_shape[] = {64};
-  Tensor tensor_onnx_Conv_197 = {
-      .data = _nnc_memory_pool + <OFFSET>,
-      .dtype = NNC_DTYPE_FLOAT32,
-      .shape = tensor_onnx_Conv_197_shape,
-      .ndim = 1,
       .nbytes = <SIZE>,
   };
   
@@ -1285,6 +997,6 @@
 # ---
 # name: TestIRSnapshots.test_resnet18_ir_snapshot
   GraphSnapshotWrapper(
-    graph=Graph(name=main_graph, nodes=65, inputs=1, outputs=1),
+    graph=Graph(name=main_graph, nodes=49, inputs=1, outputs=1),
   )
 # ---

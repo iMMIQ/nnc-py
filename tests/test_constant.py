@@ -206,7 +206,8 @@ class TestConstantOpSupport:
         import tempfile
         with tempfile.NamedTemporaryFile(suffix=".onnx", delete=False) as f:
             onnx.save(model, f.name)
-            frontend = ONNXFrontend()
+            # Disable onnxsim to keep Constant node in graph
+            frontend = ONNXFrontend(enable_simplify=False)
             ir_graph = frontend.load(f.name)
 
         # Verify constant was extracted
