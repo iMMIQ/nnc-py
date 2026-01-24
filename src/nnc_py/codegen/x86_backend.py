@@ -54,18 +54,9 @@ class X86Backend(BackendBase):
         from nnc_py.codegen.c_emitter import CEmitter
         from nnc_py.passes.memory_planning import get_memory_allocation_plan
         from nnc_py.passes.spill import get_spill_plan
-        from nnc_py.passes.unified_memory import get_unified_memory_plan
 
-        # Check for new MemoryAllocationPlan first
+        # Check for new MemoryAllocationPlan
         alloc_plan = get_memory_allocation_plan(ctx)
-
-        # Check for unified memory plan (legacy)
-        unified_plan = None
-        if alloc_plan is None and "unified_memory_plan" in ctx.metadata:
-            try:
-                unified_plan = get_unified_memory_plan(ctx)
-            except RuntimeError:
-                pass
 
         # Check for legacy spill plan
         spill_plan = get_spill_plan(ctx)
@@ -74,9 +65,6 @@ class X86Backend(BackendBase):
         if alloc_plan is not None and alloc_plan.has_spill:
             # Use new MemoryAllocationPlan with reload code generation
             return self._generate_source_with_unified_spill(ctx, alloc_plan)
-        elif unified_plan is not None and unified_plan.has_spill:
-            # Use legacy unified memory plan
-            return self._generate_source_with_unified_spill(ctx, unified_plan)
         elif spill_plan is not None and spill_plan.has_overflow:
             # Use legacy spill plan
             return self._generate_source_with_spill(ctx, spill_plan)
@@ -231,7 +219,7 @@ class X86Backend(BackendBase):
         return "\n".join(output)
 
     def _generate_source_with_unified_spill(self, ctx: CompileContext, plan) -> str:
-        """Generate source file with spill/reload wrapper functions using UnifiedMemoryPlan.
+        """Generate source file with spill/reload wrapper functions using MemoryAllocationPlan.
 
         The key requirement: ALL operators must execute with inputs/outputs in fast memory.
         When tensors are spilled to slow memory, they must be:
@@ -894,19 +882,8 @@ run: model
         from nnc_py.passes.memory_planning import get_memory_allocation_plan
         alloc_plan = get_memory_allocation_plan(ctx)
 
-        # Check for unified memory plan (legacy)
-        from nnc_py.passes.unified_memory import get_unified_memory_plan
-        unified_plan = None
-        if "unified_memory_plan" in ctx.metadata:
-            try:
-                unified_plan = get_unified_memory_plan(ctx)
-            except RuntimeError:
-                pass
-
         # Determine if we have spill
         has_spill = alloc_plan is not None and alloc_plan.has_spill
-        if not has_spill and unified_plan is not None:
-            has_spill = unified_plan.has_spill
 
         # Also check if any tensors are allocated in slow memory
         has_slow_memory_tensors = False
@@ -914,16 +891,12 @@ run: model
             has_slow_memory_tensors = any(
                 alloc.is_spilled for alloc in alloc_plan.tensor_allocations.values()
             )
-        elif unified_plan is not None:
-            has_slow_memory_tensors = any(
-                alloc.in_slow_memory for alloc in unified_plan.tensor_allocations.values()
-            )
 
         # Generate slow pool if we have spill points OR slow memory tensors
         needs_slow_pool = has_spill or has_slow_memory_tensors
 
         # Check if memory planning was performed
-        has_memory_plan = alloc_plan is not None or unified_plan is not None or "memory_plan" in ctx.metadata
+        has_memory_plan = alloc_plan is not None or "memory_plan" in ctx.metadata
 
         if has_memory_plan:
             # Generate static memory pool(s)
@@ -953,11 +926,6 @@ run: model
                     # Non-spilled tensors go to fast memory
                     # Use alloc.offset which is the tensor's offset within the buffer
                     tensor_offsets[tensor_name] = ("fast", alloc.offset)
-        elif unified_plan is not None:
-            # Use unified memory plan for offsets
-            for buf in unified_plan.buffers:
-                for tensor_name in buf.tensors:
-                    tensor_offsets[tensor_name] = ("fast", buf.offset)
         elif "memory_plan" in ctx.metadata:
             # Use legacy memory plan
             from nnc_py.passes.memory_plan import get_memory_plan
@@ -1016,7 +984,6 @@ run: model
         from nnc_py.passes.memory_planning import get_memory_allocation_plan
         from nnc_py.passes.memory_plan import get_memory_plan
         from nnc_py.passes.spill import get_spill_plan
-        from nnc_py.passes.unified_memory import get_unified_memory_plan
 
         # Check for new memory allocation plan first
         alloc_plan = get_memory_allocation_plan(ctx)
@@ -1037,36 +1004,6 @@ run: model
                 "",
                 f"/* Slow Memory Pool (DRAM/External) */",
                 f"#define NNC_SLOW_MEMORY_SIZE {alloc_plan.total_slow_memory}",
-                f"uint8_t _nnc_slow_pool[NNC_SLOW_MEMORY_SIZE] "
-                f"__attribute__((aligned(NNC_MEMORY_ALIGNMENT))) = {{0}};",
-                "",
-            ]
-
-        # Check for unified memory plan (legacy)
-        unified_plan = None
-        if "unified_memory_plan" in ctx.metadata:
-            try:
-                unified_plan = get_unified_memory_plan(ctx)
-            except RuntimeError:
-                pass
-
-        if unified_plan is not None and unified_plan.has_spill:
-            # Generate dual memory pools using UnifiedMemoryPlan
-            return [
-                "/* Dual Memory Pools (Fast + Slow for overflow) - Using UnifiedMemoryPlan */",
-                f"/* Fast memory limit: {unified_plan.fast_memory_limit} bytes ({unified_plan.fast_memory_limit / 1024:.2f} KB) */",
-                f"/* Peak memory required: {unified_plan.peak_memory} bytes ({unified_plan.peak_memory / 1024:.2f} KB) */",
-                f"/* Slow memory used: {unified_plan.slow_memory_size} bytes ({unified_plan.slow_memory_size / 1024:.2f} KB) */",
-                f"/* Buffers: {unified_plan.buffer_count}, Spill points: {unified_plan.spill_count} */",
-                "",
-                f"/* Fast Memory Pool (SRAM/On-chip) */",
-                f"#define NNC_FAST_MEMORY_SIZE {unified_plan.fast_memory_limit}",
-                f"#define NNC_MEMORY_ALIGNMENT 16",
-                f"uint8_t _nnc_fast_pool[NNC_FAST_MEMORY_SIZE] "
-                f"__attribute__((aligned(NNC_MEMORY_ALIGNMENT))) = {{0}};",
-                "",
-                f"/* Slow Memory Pool (DRAM/External) */",
-                f"#define NNC_SLOW_MEMORY_SIZE {unified_plan.slow_memory_size}",
                 f"uint8_t _nnc_slow_pool[NNC_SLOW_MEMORY_SIZE] "
                 f"__attribute__((aligned(NNC_MEMORY_ALIGNMENT))) = {{0}};",
                 "",
