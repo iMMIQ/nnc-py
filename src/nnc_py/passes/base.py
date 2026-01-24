@@ -25,7 +25,7 @@ class PassBase(ABC):
         self._execute(ctx)
         self._after_pass(ctx)
 
-    def _before_pass(self, ctx: CompileContext):
+    def _before_pass(self, ctx: CompileContext) -> None:
         """Hook called before pass execution."""
         pass
 
@@ -34,7 +34,7 @@ class PassBase(ABC):
         """Core pass logic to be implemented by subclasses."""
         pass
 
-    def _after_pass(self, ctx: CompileContext):
+    def _after_pass(self, ctx: CompileContext) -> None:
         """Hook called after pass execution."""
         pass
 
@@ -42,7 +42,7 @@ class PassBase(ABC):
 class PassManager:
     """Pass manager for running optimization passes."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.passes: List[PassBase] = []
         self.applied_passes: List[str] = []
 

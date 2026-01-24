@@ -7,11 +7,15 @@ This information is used for memory reuse in the MemoryPlanningPass.
 """
 
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import TYPE_CHECKING, Dict, List, Tuple
 
 from nnc_py.ir.context import CompileContext
 from nnc_py.ir.graph import Graph
+from nnc_py.ir.node import Node
 from nnc_py.passes.base import PassBase
+
+if TYPE_CHECKING:
+    from typing import Any
 
 
 @dataclass
@@ -73,7 +77,7 @@ class LivenessAnalysisPass(PassBase):
         graph: Graph,
         tensor_name: str,
         node_index: Dict[str, int],
-        nodes: List,
+        nodes: List[Node],
     ) -> TensorLiveness:
         """Analyze liveness for a single tensor."""
         # Find producers and consumers
@@ -110,7 +114,7 @@ class LivenessAnalysisPass(PassBase):
             is_constant=is_constant,
         )
 
-    def _log_summary(self, liveness_map: Dict[str, TensorLiveness], nodes: List) -> None:
+    def _log_summary(self, liveness_map: Dict[str, TensorLiveness], nodes: List[Node]) -> None:
         """Log a summary of liveness analysis."""
         print(f"\n{'='*60}")
         print(f"Liveness Analysis Summary")
@@ -192,7 +196,7 @@ def get_liveness(ctx: CompileContext, tensor_name: str) -> TensorLiveness:
     Raises:
         KeyError: If liveness analysis hasn't been run or tensor not found
     """
-    liveness_map = ctx.metadata.get("tensor_liveness")
+    liveness_map: Dict[str, TensorLiveness] | None = ctx.metadata.get("tensor_liveness")
     if liveness_map is None:
         raise RuntimeError("LivenessAnalysisPass must be run before calling get_liveness")
     return liveness_map[tensor_name]

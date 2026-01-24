@@ -4,7 +4,7 @@ This pass provides a single entry point for memory allocation with
 runtime-selectable strategies.
 """
 
-from typing import Optional
+from typing import TYPE_CHECKING, Dict, Optional
 
 from nnc_py.ir.context import CompileContext
 from nnc_py.passes.base import PassBase
@@ -15,6 +15,9 @@ from nnc_py.passes.memory_strategy import (
     MemoryAllocationStrategy,
     StrategyRegistry,
 )
+
+if TYPE_CHECKING:
+    from typing import Any
 
 
 class MemoryPlanningPassV2(PassBase):
@@ -45,20 +48,29 @@ class MemoryPlanningPassV2(PassBase):
                 "LivenessAnalysisPass must be run before MemoryPlanningPassV2"
             )
 
-        liveness_map: dict = ctx.metadata["tensor_liveness"]
+        liveness_map: Dict[str, TensorLiveness] = ctx.metadata["tensor_liveness"]
 
         # Get strategy from metadata or use default
-        strategy_config = ctx.metadata.get("memory_strategy", self.DEFAULT_STRATEGY)
-        max_memory = ctx.metadata.get("max_memory", float("inf"))
+        strategy_config: str | AllocationStrategy | None = ctx.metadata.get(
+            "memory_strategy", self.DEFAULT_STRATEGY
+        )
+        max_memory_raw: float | int | None = ctx.metadata.get("max_memory", float("inf"))
 
         # Get strategy instance
         strategy = self._get_strategy(strategy_config)
 
+        # Convert float infinity to None for the allocate call
+        max_memory_for_alloc: int | None
+        if max_memory_raw == float("inf") or max_memory_raw is None:
+            max_memory_for_alloc = None
+        else:
+            max_memory_for_alloc = int(max_memory_raw)
+
         if ctx.debug:
-            self._log_start(strategy, max_memory)
+            self._log_start(strategy, max_memory_raw)
 
         # Run allocation
-        plan = strategy.allocate(ctx, liveness_map, max_memory)
+        plan = strategy.allocate(ctx, liveness_map, max_memory_for_alloc)
 
         # Store result
         ctx.metadata["memory_allocation_plan"] = plan
@@ -71,7 +83,7 @@ class MemoryPlanningPassV2(PassBase):
 
     def _get_strategy(
         self,
-        strategy_config: Optional[str],
+        strategy_config: str | AllocationStrategy | None,
     ) -> MemoryAllocationStrategy:
         """Get strategy instance from config."""
         if strategy_config is None:
@@ -132,11 +144,13 @@ class MemoryPlanningPassV2(PassBase):
 
         ctx.metadata["memory_plan"] = legacy_plan
 
-    def _log_start(self, strategy: MemoryAllocationStrategy, max_memory: int) -> None:
+    def _log_start(
+        self, strategy: MemoryAllocationStrategy, max_memory: float | int | None
+    ) -> None:
         """Log start of memory planning."""
         print(f"\n{'='*60}")
         print(f"Memory Planning with strategy: {strategy.name}")
-        if max_memory == float("inf"):
+        if max_memory == float("inf") or max_memory is None:
             print(f"Max memory: unlimited")
         else:
             print(f"Max memory: {max_memory} bytes ({max_memory / 1024:.2f} KB)")
