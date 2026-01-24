@@ -14,6 +14,7 @@ used for snapshot testing the nnc-py compiler.
 | `simple_lstm.onnx` | (1, 16, 32) | LSTM for sequence processing |
 | `simple_transformer.onnx` | (1, 16, 32) | Self-attention mechanism, Transformer core |
 | `operator_coverage.onnx` | (1, 4, 8) | Comprehensive operator coverage test |
+| `operator_coverage_large.onnx` | (4, 64, 128) | Large model for memory constraint testing |
 
 ### Operator Coverage Model
 
@@ -24,6 +25,14 @@ The `operator_coverage.onnx` model includes the following operators:
 - **Reduction**: ReduceMean, ReduceSum
 - **Activation**: Relu, Clip
 - **Other**: Constant, MatMul, Cast
+
+### Large Operator Coverage Model
+
+The `operator_coverage_large.onnx` model is a memory-constrained variant with the same
+operator coverage but larger tensor dimensions:
+- Input: (4, 64, 128) vs (1, 4, 8) for the small model
+- Forces memory spill when compiled with constraints (e.g., 32KB limit)
+- Tests correctness of spill/reload code generation
 
 ## Usage
 

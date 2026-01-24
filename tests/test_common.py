@@ -476,11 +476,17 @@ class BaseSnapshotTest:
             lines.append("")
         return "\n".join(lines)
 
-    def _run_runtime_test(self, model_path: Path, model_name: str, opt_level: str = "O0") -> None:
+    def _run_runtime_test(self, model_path: Path, model_name: str, opt_level: str = "O0", timeout: int = 30) -> None:
         """Run runtime test with sanitizers and compare intermediate outputs with ONNX Runtime.
 
         Uses debug mode to capture intermediate tensor outputs and compare each layer's
         output with ONNX Runtime reference implementation.
+
+        Args:
+            model_path: Path to the ONNX model file.
+            model_name: Name of the model for logging.
+            opt_level: Optimization level (O0 or O3).
+            timeout: Timeout in seconds for running the executable. Larger models need more time.
         """
         from nnc_py.tools.debug_compare import DebugComparator
 
@@ -494,7 +500,7 @@ class BaseSnapshotTest:
 
             exe_path = self._compile_with_sanitizer(tmpdir, runtime_dir, opt_level)
 
-            stdout, stderr, returncode = self._run_executable(exe_path)
+            stdout, stderr, returncode = self._run_executable(exe_path, timeout=timeout)
 
             assert returncode == 0, f"Program failed with return code {returncode}\\nstdout: {stdout}\\nstderr: {stderr}"
             assert "ERROR: AddressSanitizer" not in stderr, f"AddressSanitizer detected errors:\\n{stderr}"

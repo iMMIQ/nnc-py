@@ -137,6 +137,28 @@ def export_resnet18(output_dir: Path) -> Path:
     return output_path
 
 
+def export_vgg19(output_dir: Path) -> Path:
+    """Export VGG-19 model to ONNX.
+
+    VGG-19 is a classic deep CNN architecture from Oxford's Visual Geometry Group.
+    Features 16 convolutional layers and 3 fully connected layers.
+    Known for its simplicity and depth, using only 3x3 convolutions.
+
+    Args:
+        output_dir: Directory to save the model.
+
+    Returns:
+        Path to the exported model.
+    """
+    # Load VGG-19
+    model = models.vgg19(weights=None)
+    model.eval()
+
+    output_path = output_dir / "vgg19.onnx"
+    export_to_onnx(model, output_path, (1, 3, 224, 224), "VGG-19")
+    return output_path
+
+
 def export_simple_cnn(output_dir: Path) -> Path:
     """Export a simple CNN model to ONNX.
 
@@ -819,6 +841,7 @@ def main() -> int:
     models_to_export = [
         export_lenet5,
         export_resnet18,
+        export_vgg19,
         export_simple_cnn,
         export_simple_mlp,
         export_simple_lstm,

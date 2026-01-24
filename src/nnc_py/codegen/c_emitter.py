@@ -106,6 +106,8 @@ class CEmitter:
             self._emit_gemm_call(ctx, node)
         elif node.op_type == OpType.MAXPOOL:
             self._emit_maxpool_call(ctx, node)
+        elif node.op_type == OpType.AVGPOOL:
+            self._emit_avgpool_call(ctx, node)
         elif node.op_type == OpType.GLOBAL_AVGPOOL:
             self._emit_global_avgpool_call(ctx, node)
         elif node.op_type == OpType.REDUCE_MEAN:
@@ -267,6 +269,55 @@ class CEmitter:
             args.extend(["0", "0"])
 
         self.write_line(f"nnc_maxpool2d({', '.join(args)});")
+
+    def _emit_avgpool_call(self, ctx: CompileContext, node: Node) -> None:
+        """Emit AveragePool operation call."""
+        # nnc_avgpool2d(Tensor* input, Tensor* output,
+        #              int kernel_h, int kernel_w,
+        #              int stride_h, int stride_w,
+        #              int pad_h, int pad_w)
+        args = []
+
+        # Input tensor
+        if len(node.inputs) >= 1:
+            var_name = ctx.tensor_symbols.get(node.inputs[0], node.inputs[0])
+            args.append(f"&{var_name}")
+
+        # Output tensor
+        if len(node.outputs) >= 1:
+            var_name = ctx.tensor_symbols.get(node.outputs[0], node.outputs[0])
+            args.append(f"&{var_name}")
+
+        # Get kernel_shape, strides, pads from attributes
+        kernel_shape = node.attrs.get("kernel_shape", [2, 2])
+        strides = node.attrs.get("strides", [2, 2])
+        pads = node.attrs.get("pads", [0, 0, 0, 0])
+        count_include_pad = node.attrs.get("count_include_pad", 0)
+
+        # Add kernel size
+        if len(kernel_shape) >= 2:
+            args.append(str(kernel_shape[0]))  # kernel_h
+            args.append(str(kernel_shape[1]))  # kernel_w
+        else:
+            args.extend(["2", "2"])
+
+        # Add strides
+        if len(strides) >= 2:
+            args.append(str(strides[0]))  # stride_h
+            args.append(str(strides[1]))  # stride_w
+        else:
+            args.extend(["2", "2"])
+
+        # Add padding (use top and left pads)
+        if len(pads) >= 2:
+            args.append(str(pads[0]))  # pad_h (top)
+            args.append(str(pads[1]))  # pad_w (left)
+        else:
+            args.extend(["0", "0"])
+
+        # Note: count_include_pad is not passed to runtime since current
+        # implementation uses effective window size for averaging
+        self.write_line(f"nnc_avgpool2d({', '.join(args)});")
 
     def _emit_global_avgpool_call(self, ctx: CompileContext, node: Node) -> None:
         """Emit GlobalAveragePool operation call."""
