@@ -1,15 +1,24 @@
 """x86 backend for simulation."""
 
-from typing import List
+from typing import TYPE_CHECKING, Any, List, Union
 
 import numpy as np
 
 from nnc_py.codegen.base import BackendBase, CodeGenResult
 from nnc_py.codegen.c_emitter import CEmitter
 from nnc_py.ir.context import CompileContext
-from nnc_py.ir.node import OpType
+from nnc_py.ir.node import Node, OpType
 from nnc_py.ir.types import DataType
+from nnc_py.passes.memory_strategy import (
+    MemoryAllocationPlan,
+    ReloadPoint,
+    SpillPoint,
+    TensorAllocation,
+)
 from nnc_py.utils.name_manager import NameManager
+
+if TYPE_CHECKING:
+    from nnc_py.passes.spill import SpillPlan
 
 
 class X86Backend(BackendBase):
@@ -77,7 +86,7 @@ class X86Backend(BackendBase):
             emitter = CEmitter()
             return emitter.emit(ctx)
 
-    def _generate_source_with_spill(self, ctx: CompileContext, spill_plan) -> str:
+    def _generate_source_with_spill(self, ctx: CompileContext, spill_plan: "SpillPlan") -> str:
         """Generate source file with spill/reload wrapper functions."""
         from nnc_py.codegen.c_emitter import CEmitter
 
@@ -222,7 +231,7 @@ class X86Backend(BackendBase):
 
         return "\n".join(output)
 
-    def _generate_source_with_unified_spill(self, ctx: CompileContext, plan) -> str:
+    def _generate_source_with_unified_spill(self, ctx: CompileContext, plan: "MemoryAllocationPlan") -> str:
         """Generate source file with spill/reload wrapper functions using MemoryAllocationPlan.
 
         The key requirement: ALL operators must execute with inputs/outputs in fast memory.
@@ -267,10 +276,11 @@ class X86Backend(BackendBase):
             input_slots = len(reloads_before)
 
             # Count outputs that are spilled (need temp buffers)
-            output_slots = sum(
-                1 for o in node.outputs
-                if plan.tensor_allocations.get(o) and plan.tensor_allocations.get(o).is_spilled
-            )
+            output_slots = 0
+            for o in node.outputs:
+                alloc = plan.tensor_allocations.get(o)
+                if alloc is not None and alloc.is_spilled:
+                    output_slots += 1
 
             max_total_slots = max(max_total_slots, input_slots + output_slots)
 
@@ -311,7 +321,7 @@ class X86Backend(BackendBase):
             has_spill = len(plan.get_spill_points_after(node_idx)) > 0
             has_reload = len(plan.get_reload_points_before(node_idx)) > 0
             has_spilled_output = any(
-                plan.tensor_allocations.get(o) and plan.tensor_allocations.get(o).is_spilled
+                plan.tensor_allocations.get(o) is not None and plan.tensor_allocations.get(o).is_spilled  # type: ignore[union-attr]
                 for o in node.outputs
             )
 
@@ -337,23 +347,24 @@ class X86Backend(BackendBase):
             reloads_before = plan.get_reload_points_before(node_idx)
 
             # Determine which inputs need reload (have reload points before this node)
-            inputs_need_reload = {rp.tensor_name: rp for rp in reloads_before}
+            inputs_need_reload: dict[str, Union["ReloadPoint", "SpillPoint"]] = {
+                rp.tensor_name: rp for rp in reloads_before
+            }
 
             # Also check if any input tensors are spilled (allocated in slow memory)
             # This handles model inputs that happen to be in slow memory
-            additional_inputs = []
+            additional_inputs: list[tuple[str, "TensorAllocation"]] = []
             for input_name in node.inputs:
                 if input_name in inputs_need_reload:
                     continue  # Already has a reload point
                 alloc = plan.tensor_allocations.get(input_name)
-                if alloc and alloc.is_spilled:
+                if alloc is not None and alloc.is_spilled:
                     # Input is spilled but no reload point - create a synthetic one
                     # Look up the correct slow offset from existing reload points
                     existing_reload = next((rp for rp in plan.reload_points if rp.tensor_name == input_name), None)
                     slow_offset = existing_reload.from_slow_offset if existing_reload else 0
-                    from nnc_py.passes.memory_strategy import ReloadPoint
                     additional_inputs.append((input_name, alloc))
-                    inputs_need_reload[input_name] = ReloadPoint(
+                    new_reload_point = ReloadPoint(
                         tensor_name=input_name,
                         before_node=node.name,
                         before_node_idx=node_idx,
@@ -363,21 +374,27 @@ class X86Backend(BackendBase):
                         size=alloc.size,
                         reload_slot_id=-1,  # Will assign below
                     )
+                    inputs_need_reload[input_name] = new_reload_point
 
             # Assign slot IDs to synthetic reload points
-            current_slot = max([rp.reload_slot_id for rp in inputs_need_reload.values()], default=-1) + 1
+            current_slot = max(
+                [rp.reload_slot_id for rp in inputs_need_reload.values() if isinstance(rp, ReloadPoint)],
+                default=-1,
+            ) + 1
             for input_name, _ in additional_inputs:
-                inputs_need_reload[input_name].reload_slot_id = current_slot
+                rp = inputs_need_reload[input_name]
+                if isinstance(rp, ReloadPoint):
+                    rp.reload_slot_id = current_slot
                 current_slot += 1
 
             # Determine which outputs need temp tensors
             # An output needs a temp tensor if:
             # 1. It's spilled (allocated in slow memory), OR
             # 2. There's a spill point after this node for it
-            outputs_need_temp = {}
+            outputs_need_temp: dict[str, Union["ReloadPoint", "SpillPoint"]] = {}
             for output_name in node.outputs:
                 alloc = plan.tensor_allocations.get(output_name)
-                if alloc and alloc.is_spilled:
+                if alloc is not None and alloc.is_spilled:
                     # Output lives in slow memory - need temp tensor
                     # Find the spill point for this output
                     sp = next((s for s in spills_after if s.tensor_name == output_name), None)
@@ -388,7 +405,6 @@ class X86Backend(BackendBase):
                         # Look up the correct slow offset from existing spill points
                         existing_spill = next((sp for sp in plan.spill_points if sp.tensor_name == output_name), None)
                         slow_offset = existing_spill.to_slow_offset if existing_spill else 0
-                        from nnc_py.passes.memory_strategy import SpillPoint
                         outputs_need_temp[output_name] = SpillPoint(
                             tensor_name=output_name,
                             after_node=node.name,
@@ -403,22 +419,22 @@ class X86Backend(BackendBase):
             lines.append(f"static void {func_name}(void) {{")
 
             # Declare temp tensors for spilled inputs
-            temp_tensor_decls = []
+            temp_tensor_decls: list[tuple[str, int, str, int, str]] = []
             for input_name in node.inputs:
                 if input_name in inputs_need_reload:
                     rp = inputs_need_reload[input_name]
                     temp_name = f"temp_{ctx.tensor_symbols.get(input_name, input_name)}"
-                    slot_id = rp.reload_slot_id
+                    slot_id = rp.reload_slot_id if isinstance(rp, ReloadPoint) else -1
                     temp_tensor_decls.append((temp_name, slot_id, input_name, rp.size, 'input'))
 
             # Declare temp tensors for spilled outputs
             output_slot_idx = len(inputs_need_reload)
             for output_name in node.outputs:
                 if output_name in outputs_need_temp:
-                    sp = outputs_need_temp[output_name]
+                    sp_val = outputs_need_temp[output_name]
                     temp_name = f"temp_{ctx.tensor_symbols.get(output_name, output_name)}"
                     slot_id = output_slot_idx
-                    temp_tensor_decls.append((temp_name, slot_id, output_name, sp.size, 'output'))
+                    temp_tensor_decls.append((temp_name, slot_id, output_name, sp_val.size, 'output'))
                     output_slot_idx += 1
 
             # Generate temp tensor declarations
@@ -431,6 +447,8 @@ class X86Backend(BackendBase):
             for input_name in node.inputs:
                 if input_name in inputs_need_reload:
                     rp = inputs_need_reload[input_name]
+                    if not isinstance(rp, ReloadPoint):
+                        continue
                     temp_name = f"temp_{ctx.tensor_symbols.get(input_name, input_name)}"
                     var_name = ctx.tensor_symbols.get(input_name, input_name)
                     lines.extend([
@@ -449,18 +467,20 @@ class X86Backend(BackendBase):
             output_slot_idx = len(inputs_need_reload)
             for output_name in node.outputs:
                 if output_name in outputs_need_temp:
-                    sp = outputs_need_temp[output_name]
+                    sp_val = outputs_need_temp[output_name]
                     temp_name = f"temp_{ctx.tensor_symbols.get(output_name, output_name)}"
                     var_name = ctx.tensor_symbols.get(output_name, output_name)
                     # Get the slot_id from temp_tensor_decls
                     slot_id = next((s for tn, s, _, _, _ in temp_tensor_decls if tn == temp_name), output_slot_idx)
+                    # Both ReloadPoint and SpillPoint have 'size' attribute
+                    sp_size = sp_val.size
                     lines.extend([
                         f"    /* Setup temp output for {output_name} */",
                         f"    {temp_name}.data = _nnc_reload_buffer_{slot_id};",
                         f"    {temp_name}.dtype = {var_name}.dtype;",
                         f"    {temp_name}.shape = {var_name}.shape;",
                         f"    {temp_name}.ndim = {var_name}.ndim;",
-                        f"    {temp_name}.nbytes = {sp.size};",
+                        f"    {temp_name}.nbytes = {sp_size};",
                         "",
                     ])
 
@@ -475,16 +495,19 @@ class X86Backend(BackendBase):
             output_slot_idx = len(inputs_need_reload)
             for output_name in node.outputs:
                 if output_name in outputs_need_temp:
-                    sp = outputs_need_temp[output_name]
+                    sp_val = outputs_need_temp[output_name]
                     temp_name = f"temp_{ctx.tensor_symbols.get(output_name, output_name)}"
                     # Get the slot_id from temp_tensor_decls
                     slot_id = next((s for tn, s, _, _, _ in temp_tensor_decls if tn == temp_name), output_slot_idx)
-                    lines.extend([
-                        "",
-                        f"    /* Spill {output_name} from fast to slow memory */",
-                        f"    memcpy(_nnc_slow_pool + {sp.to_slow_offset},",
-                        f"           _nnc_reload_buffer_{slot_id}, {sp.size});",
-                    ])
+                    # Both ReloadPoint and SpillPoint have these attributes (or should)
+                    # SpillPoint has to_slow_offset, ReloadPoint doesn't (but we shouldn't spill to ReloadPoint)
+                    if isinstance(sp_val, SpillPoint):
+                        lines.extend([
+                            "",
+                            f"    /* Spill {output_name} from fast to slow memory */",
+                            f"    memcpy(_nnc_slow_pool + {sp_val.to_slow_offset},",
+                            f"           _nnc_reload_buffer_{slot_id}, {sp_val.size});",
+                        ])
 
             lines.append("}")
             lines.append("")
@@ -508,7 +531,7 @@ class X86Backend(BackendBase):
             has_spill = len(plan.get_spill_points_after(node_idx)) > 0
             has_reload = len(plan.get_reload_points_before(node_idx)) > 0
             has_spilled_output = any(
-                plan.tensor_allocations.get(o) and plan.tensor_allocations.get(o).is_spilled
+                plan.tensor_allocations.get(o) is not None and plan.tensor_allocations.get(o).is_spilled  # type: ignore[union-attr]
                 for o in node.outputs
             )
 
@@ -543,9 +566,9 @@ class X86Backend(BackendBase):
     def _generate_operator_call_with_temps(
         self,
         ctx: CompileContext,
-        node: "Node",
-        inputs_need_reload: dict,
-        outputs_need_temp: dict,
+        node: Node,
+        inputs_need_reload: dict[str, Union["ReloadPoint", "SpillPoint"]],
+        outputs_need_temp: dict[str, Union["ReloadPoint", "SpillPoint"]],
     ) -> str:
         """Generate operator call using temp tensors for spilled inputs/outputs.
 
@@ -628,7 +651,7 @@ class X86Backend(BackendBase):
 
         return f"{op_name}({', '.join(args)});"
 
-    def _generate_operator_call(self, ctx: CompileContext, node: "Node", use_temps: bool = False) -> str:
+    def _generate_operator_call(self, ctx: CompileContext, node: Node, use_temps: bool = False) -> str:
         """Generate operator call (for non-spill nodes).
 
         Args:
@@ -755,7 +778,7 @@ class X86Backend(BackendBase):
 
         return "\n".join(lines)
 
-    def _generate_constants_binary(self, ctx: CompileContext) -> tuple[bytes, dict]:
+    def _generate_constants_binary(self, ctx: CompileContext) -> tuple[bytes, dict[str, Any]]:
         """Generate constants as binary file with metadata.
 
         Binary format:
@@ -778,12 +801,12 @@ class X86Backend(BackendBase):
         VERSION = 1
 
         # Build metadata dict for C code generation
-        metadata = {}
+        metadata: dict[str, Any] = {}
 
         # First pass: calculate offsets
         offset = 12  # header: magic (4) + version (4) + num_constants (4)
 
-        constant_entries = []
+        constant_entries: list[dict[str, Any]] = []
         for name, arr in ctx.graph.constants.items():
             var_name = ctx.tensor_symbols.get(name, name)
             dtype, element_size, nnc_dtype = self._get_constant_type_info(arr)
@@ -837,27 +860,34 @@ class X86Backend(BackendBase):
             offset = data_offset + nbytes
 
         # Build binary data with interleaved headers and data
-        parts = []
+        parts: list[bytes] = []
         parts.append(MAGIC)
         parts.append(struct.pack('<I', VERSION))
         parts.append(struct.pack('<I', len(constant_entries)))
 
         for entry in constant_entries:
-            name_bytes = entry['name'].encode('utf-8')
+            name = str(entry['name'])
+            name_bytes = name.encode('utf-8')
             parts.append(struct.pack('<I', len(name_bytes) + 1))  # name_len
             parts.append(name_bytes + b'\x00')  # name (null-terminated)
-            parts.append(struct.pack('<I', entry['dtype_enum']))  # dtype
-            parts.append(struct.pack('<I', entry['ndim']))  # ndim
+            parts.append(struct.pack('<I', int(entry['dtype_enum'])))  # dtype
+            parts.append(struct.pack('<I', int(entry['ndim'])))  # ndim
             # shape
-            for dim in entry['shape']:
-                parts.append(struct.pack('<q', dim))
-            parts.append(struct.pack('<Q', entry['nbytes']))  # nbytes
+            shape = entry['shape']
+            if isinstance(shape, list):
+                for dim in shape:
+                    parts.append(struct.pack('<q', int(dim)))
+            parts.append(struct.pack('<Q', int(entry['nbytes'])))  # nbytes
             # Data immediately follows header
-            parts.append(entry['data'])
+            data = entry['data']
+            if isinstance(data, bytes):
+                parts.append(data)
+            else:
+                parts.append(bytes(data))
 
         return b''.join(parts), metadata
 
-    def _generate_constants_loader(self, ctx: CompileContext, metadata: dict) -> str:
+    def _generate_constants_loader(self, ctx: CompileContext, metadata: dict[str, Any]) -> str:
         """Generate C code to load constants from binary file."""
         lines = [
             "/* Auto-generated by NNC - DO NOT EDIT */",
@@ -1256,7 +1286,7 @@ run: model
         # Check if we have spill (overflow)
         has_spill = spill_plan is not None and spill_plan.has_overflow
 
-        if has_spill:
+        if has_spill and spill_plan is not None:
             # Generate dual memory pools
             lines = [
                 "/* Dual Memory Pools (Fast + Slow for overflow) */",
@@ -1280,6 +1310,17 @@ run: model
             return lines
         else:
             # Single memory pool (no overflow)
+            if plan is None:
+                # Fallback if no plan available
+                lines = [
+                    "/* Static Memory Pool */",
+                    "#define NNC_MEMORY_SIZE 4096",
+                    "#define NNC_MEMORY_ALIGNMENT 16",
+                    "static uint8_t _nnc_memory_pool[NNC_MEMORY_SIZE] "
+                    "__attribute__((aligned(NNC_MEMORY_ALIGNMENT))) = {0};",
+                    "",
+                ]
+                return lines
             lines = [
                 "/* Static Memory Pool */",
                 f"/* Total size: {plan.total_size} bytes ({plan.total_size / 1024:.2f} KB) */",
@@ -1498,7 +1539,7 @@ int main(void) {{
 }}
 """
 
-    def _assign_symbols(self, ctx: CompileContext):
+    def _assign_symbols(self, ctx: CompileContext) -> None:
         """Assign C symbol names using NameManager."""
         name_manager = NameManager()
 
@@ -1525,7 +1566,7 @@ int main(void) {{
         }
         return mapping.get(dtype, "float")
 
-    def _map_numpy_dtype(self, np_dtype) -> str:
+    def _map_numpy_dtype(self, np_dtype: Any) -> str:
         """Map numpy dtype to C dtype."""
         import numpy as np
 

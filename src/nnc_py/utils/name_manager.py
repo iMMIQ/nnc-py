@@ -7,7 +7,7 @@ from typing import Dict
 class NameManager:
     """Manages C symbol names generated from ONNX names."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._symbol_map: Dict[str, str] = {}
         self._used_names: Dict[str, int] = {}
 

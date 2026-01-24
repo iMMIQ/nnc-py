@@ -2,7 +2,10 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Dict
+from typing import TYPE_CHECKING, Any, Dict
+
+if TYPE_CHECKING:
+    from nnc_py.ir.context import CompileContext
 
 
 @dataclass
@@ -21,7 +24,7 @@ class CodeGenResult:
     files: list[CodeArtifact] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
-    def add_file(self, filename: str, content: str | bytes, file_type: str = "source"):
+    def add_file(self, filename: str, content: str | bytes, file_type: str = "source") -> None:
         """Add a generated file."""
         self.files.append(CodeArtifact(filename, content, file_type))
 
@@ -30,7 +33,7 @@ class BackendBase(ABC):
     """Base class for code generation backends."""
 
     @abstractmethod
-    def generate(self, ctx) -> CodeGenResult:
+    def generate(self, ctx: "CompileContext") -> CodeGenResult:
         """Generate code for the given compilation context.
 
         Args:

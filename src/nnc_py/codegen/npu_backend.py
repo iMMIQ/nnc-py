@@ -1,12 +1,17 @@
 """NPU backend for actual chip deployment."""
 
+from typing import TYPE_CHECKING
+
 from nnc_py.codegen.base import BackendBase, CodeGenResult
+
+if TYPE_CHECKING:
+    from nnc_py.ir.context import CompileContext
 
 
 class NPUBackend(BackendBase):
     """NPU target backend - generates code linking to actual chip binary."""
 
-    def generate(self, ctx) -> CodeGenResult:
+    def generate(self, ctx: "CompileContext") -> CodeGenResult:
         """Generate NPU C code.
 
         This backend generates code that links to the actual NPU chip binary.

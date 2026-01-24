@@ -1,6 +1,12 @@
 # Temporary file for the new test runner generator
 
-def _generate_test_runner(ctx):
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from nnc_py.ir.context import CompileContext
+
+
+def _generate_test_runner(ctx: "CompileContext") -> str:
     """Generate test runner."""
     # Generate tensor setup code
     tensor_setups = []
