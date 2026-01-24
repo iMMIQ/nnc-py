@@ -24,6 +24,14 @@ if TYPE_CHECKING:
 class X86Backend(BackendBase):
     """x86 target backend - generates code for simulation."""
 
+    def __init__(self, debug_mode: bool = False):
+        """Initialize the x86 backend.
+
+        Args:
+            debug_mode: Whether to enable debug mode with intermediate tensor dumps.
+        """
+        self.debug_mode = debug_mode
+
     def generate(self, ctx: CompileContext) -> CodeGenResult:
         """Generate x86 C code."""
         result = CodeGenResult()
@@ -77,14 +85,78 @@ class X86Backend(BackendBase):
         # Determine which plan to use
         if alloc_plan is not None and alloc_plan.has_spill:
             # Use new MemoryAllocationPlan with reload code generation
-            return self._generate_source_with_unified_spill(ctx, alloc_plan)
+            source = self._generate_source_with_unified_spill(ctx, alloc_plan)
         elif spill_plan is not None and spill_plan.has_overflow:
             # Use legacy spill plan
-            return self._generate_source_with_spill(ctx, spill_plan)
+            source = self._generate_source_with_spill(ctx, spill_plan)
         else:
             # No overflow, use standard emitter
             emitter = CEmitter()
-            return emitter.emit(ctx)
+            source = emitter.emit(ctx)
+
+        # Add debug macros if in debug mode
+        source = self._add_debug_macros(source)
+
+        # Inject debug code if enabled
+        return self._inject_debug_into_nnc_run(source, ctx)
+
+    def _add_debug_macros(self, source_code: str) -> str:
+        """Add debug macro definitions to source code.
+
+        Args:
+            source_code: Generated C source code.
+
+        Returns:
+            Modified source code with debug macros if debug mode is enabled.
+        """
+        if not self.debug_mode:
+            return source_code
+
+        # Define debug macros - use debug_file for output (declared as extern in test_runner.c)
+        debug_macros = """
+/* Debug mode: macros for intermediate tensor output */
+/* Note: debug_file is defined in test_runner.c as a FILE* */
+extern FILE* debug_file;
+
+#ifndef DEBUG_PRINTF
+#define DEBUG_PRINTF(fmt, ...) do { \\
+    if (debug_file) { \\
+        fprintf(debug_file, fmt, ##__VA_ARGS__); \\
+    } else { \\
+        printf(fmt, ##__VA_ARGS__); \\
+    } \\
+} while(0)
+#endif
+
+#define DEBUG_PRINT_TENSOR_START(name, idx) DEBUG_PRINTF("DEBUG_TENSOR_START %s %d\\n", name, idx)
+#define DEBUG_PRINT_SHAPE(ndim) DEBUG_PRINTF("SHAPE %d\\n", ndim)
+#define DEBUG_PRINT_DIM(i, val) DEBUG_PRINTF("DIM %d %d\\n", i, val)
+#define DEBUG_PRINT_DATA_START() DEBUG_PRINTF("DATA_START\\n")
+#define DEBUG_PRINT_VALUE(val) DEBUG_PRINTF("%f\\n", val)
+#define DEBUG_PRINT_DATA_END() DEBUG_PRINTF("DATA_END\\n")
+#define DEBUG_PRINT_TENSOR_END(name) DEBUG_PRINTF("DEBUG_TENSOR_END %s\\n\\n", name)
+
+"""
+
+        # Insert after the includes
+        lines = source_code.split("\n")
+        output = []
+        inserted = False
+
+        for line in lines:
+            output.append(line)
+            # Insert after all #include and #define statements
+            if not inserted and (line.startswith("#include") or line.startswith("/*")):
+                # Check if next line is not an include
+                continue
+            elif not inserted and (line.startswith("#include") or line.startswith("/*") or line.strip() == ""):
+                continue
+            elif not inserted:
+                # This is the first non-include line, insert macros here
+                output.append(debug_macros)
+                inserted = True
+
+        return "\n".join(output)
 
     def _generate_source_with_spill(self, ctx: CompileContext, spill_plan: "SpillPlan") -> str:
         """Generate source file with spill/reload wrapper functions."""
@@ -1392,6 +1464,45 @@ run: model
         # Check if memory planning was performed
         has_memory_plan = "memory_plan" in ctx.metadata
 
+        # Debug mode: add file setup for debug output
+        debug_decl = ""
+        debug_setup = ""
+        debug_cleanup = ""
+        debug_macros = ""
+        if self.debug_mode:
+            # Declare debug_file as a global variable (extern declaration in model.c)
+            debug_decl = """
+/* Global debug file pointer (also declared as extern in model.c) */
+FILE* debug_file = NULL;
+"""
+            debug_setup = """
+    /* Open debug output file */
+    debug_file = fopen("nnc_debug_output.txt", "w");
+    if (!debug_file) {
+        fprintf(stderr, "Failed to open debug output file\\n");
+        return 1;
+    }
+"""
+            debug_cleanup = """
+    /* Close debug output file */
+    if (debug_file) {
+        fclose(debug_file);
+        debug_file = NULL;
+    }
+    printf("Debug output written to nnc_debug_output.txt\\n");"""
+            # Define macros to redirect debug printf to file
+            debug_macros = """
+/* Debug mode: redirect debug output to file */
+#define DEBUG_PRINTF(fmt, ...) fprintf(debug_file, fmt, ##__VA_ARGS__)
+#define DEBUG_PRINT_TENSOR_START(name, idx) DEBUG_PRINTF("DEBUG_TENSOR_START %s %d\\n", name, idx)
+#define DEBUG_PRINT_SHAPE(ndim) DEBUG_PRINTF("SHAPE %d\\n", ndim)
+#define DEBUG_PRINT_DIM(i, val) DEBUG_PRINTF("DIM %d %d\\n", i, val)
+#define DEBUG_PRINT_DATA_START() DEBUG_PRINTF("DATA_START\\n")
+#define DEBUG_PRINT_VALUE(val) DEBUG_PRINTF("%f\\n", val)
+#define DEBUG_PRINT_DATA_END() DEBUG_PRINTF("DATA_END\\n")
+#define DEBUG_PRINT_TENSOR_END(name) DEBUG_PRINTF("DEBUG_TENSOR_END %s\\n\\n", name)
+"""
+
         # Generate tensor setup code
         tensor_setups = []
 
@@ -1562,18 +1673,19 @@ run: model
 #include <string.h>
 #include "nnc_types.h"
 #include "model.h"
-
+{debug_macros}
+{debug_decl}
 int main(void) {{
     printf("NNC Model Runner\\n");
     printf("================\\n");
-
+{debug_setup}
     /* Setup all tensors */
 {setup_code}
 {print_code}
 
     /* Free memory */
 {frees_code}
-
+{debug_cleanup}
     printf("\\nInference complete.\\n");
     return 0;
 }}
@@ -1622,3 +1734,134 @@ int main(void) {{
             return "uint8_t"
         else:
             return "float"
+
+    def _generate_debug_dump_code(self, ctx: CompileContext, tensor_name: str, node_idx: int, node_name: str) -> str:
+        """Generate C code to dump tensor values for debug comparison.
+
+        Args:
+            ctx: Compilation context.
+            tensor_name: Name of the tensor to dump.
+            node_idx: Index of the node that produced this tensor.
+            node_name: Name of the node that produced this tensor.
+
+        Returns:
+            C code string that dumps tensor values.
+        """
+        tensor = ctx.graph.get_tensor(tensor_name)
+        if tensor is None:
+            return ""
+
+        var_name = ctx.tensor_symbols.get(tensor_name, tensor_name)
+        # Calculate number of elements from byte size
+        byte_size = tensor.byte_size()
+        if byte_size < 0:
+            # Unknown size due to symbolic dimensions
+            num_elements = -1
+        else:
+            # Element size for float32
+            num_elements = byte_size // 4
+
+        # Get number of dimensions
+        ndim = len(tensor.shape.dims)
+
+        if self.debug_mode:
+            # Use debug macros for file output
+            code = f"""
+    /* Debug dump: {tensor_name} after node {node_idx} ({node_name}) */
+    DEBUG_PRINT_TENSOR_START("{tensor_name}", {node_idx});
+    DEBUG_PRINT_SHAPE({ndim});
+"""
+            for i, dim in enumerate(tensor.shape.dims):
+                if isinstance(dim, int):
+                    code += f'    DEBUG_PRINT_DIM({i}, {dim});\n'
+                else:
+                    code += f'    DEBUG_PRINT_DIM({i}, (int){var_name}.shape[i]);\n'
+
+            code += f"""
+    DEBUG_PRINT_DATA_START();
+    for (int i = 0; i < {num_elements}; i++) {{
+        DEBUG_PRINT_VALUE(((float*){var_name}.data)[i]);
+    }}
+    DEBUG_PRINT_DATA_END();
+    DEBUG_PRINT_TENSOR_END("{tensor_name}");
+"""
+        else:
+            # Standard printf output (for debugging compiler itself)
+            code = f"""
+    /* Debug dump: {tensor_name} after node {node_idx} ({node_name}) */
+    printf("DEBUG_TENSOR_START %s %d\\n", "{tensor_name}", {node_idx});
+    printf("SHAPE %d\\n", {ndim});
+"""
+            for i, dim in enumerate(tensor.shape.dims):
+                if isinstance(dim, int):
+                    code += f'    printf("DIM {i} %d\\\\n", {dim});\n'
+                else:
+                    code += f'    printf("DIM {i} %d\\\\n", (int){var_name}.shape[i]);\n'
+
+            code += f"""
+    printf("DATA_START\\\\n");
+    for (int i = 0; i < {num_elements}; i++) {{
+        printf("%f\\\\n", ((float*){var_name}.data)[i]);
+    }}
+    printf("DATA_END\\\\n");
+    printf("DEBUG_TENSOR_END %s\\\\n\\n", "{tensor_name}");
+"""
+        return code
+
+    def _inject_debug_into_nnc_run(self, source_code: str, ctx: CompileContext) -> str:
+        """Inject debug dump code into nnc_run function.
+
+        Args:
+            source_code: Generated C source code.
+            ctx: Compilation context.
+
+        Returns:
+            Modified source code with debug dumps.
+        """
+        if not self.debug_mode:
+            return source_code
+
+        lines = source_code.split("\n")
+        output = []
+        in_nnc_run = False
+        brace_count = 0
+        node_idx = 0
+        nodes = ctx.graph.topological_sort()
+
+        for i, line in enumerate(lines):
+            output.append(line)
+
+            # Detect nnc_run function start
+            if "void nnc_run(void)" in line:
+                in_nnc_run = True
+                brace_count = 0
+                continue
+
+            if in_nnc_run:
+                # Count braces to track function scope
+                brace_count += line.count("{") - line.count("}")
+
+                # After each function call, add debug dump for outputs
+                for node in nodes:
+                    if node.op_type == OpType.CONSTANT:
+                        continue
+                    func_name = ctx.node_symbols.get(node.name, node.name)
+                    if f"{func_name}();" in line:
+                        # Add debug dump for each output tensor of this node
+                        for out_name in node.outputs:
+                            tensor = ctx.graph.get_tensor(out_name)
+                            if tensor is not None and out_name not in ctx.graph.constants:
+                                debug_code = self._generate_debug_dump_code(
+                                    ctx, out_name, node_idx, node.name
+                                )
+                                # Add indentation and lines
+                                for debug_line in debug_code.strip().split("\n"):
+                                    output.append(debug_line)
+                        node_idx += 1
+                        break
+
+                # End of function
+                if brace_count == 0 and "}" in line:
+                    in_nnc_run = False
+
+        return "\n".join(output)

@@ -70,6 +70,7 @@ class Compiler:
         opt_level: int = 0,
         memory_strategy: str = None,
         enable_constant_folding: bool = True,
+        debug_mode: bool = False,
     ):
         """Initialize the compiler.
 
@@ -78,11 +79,13 @@ class Compiler:
             opt_level: Optimization level (0-3).
             memory_strategy: Memory allocation strategy (e.g., "basic").
             enable_constant_folding: Whether to enable ONNX constant folding (via onnxsim).
+            debug_mode: Whether to enable debug mode with intermediate tensor dumps.
         """
         self.target = target
         self.opt_level = opt_level
         self.memory_strategy = memory_strategy
         self.enable_constant_folding = enable_constant_folding
+        self.debug_mode = debug_mode
         self.console = Console()
 
         # Initialize compiler stages
@@ -198,9 +201,9 @@ class Compiler:
             ValueError: If target is unknown.
         """
         if target == "x86":
-            return X86Backend()
+            return X86Backend(debug_mode=self.debug_mode)
         elif target == "npu":
-            return NPUBackend()
+            return NPUBackend(debug_mode=self.debug_mode)
         else:
             raise ValueError(f"Unknown target: {target}")
 

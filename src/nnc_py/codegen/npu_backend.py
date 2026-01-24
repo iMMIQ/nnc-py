@@ -11,6 +11,14 @@ if TYPE_CHECKING:
 class NPUBackend(BackendBase):
     """NPU target backend - generates code linking to actual chip binary."""
 
+    def __init__(self, debug_mode: bool = False):
+        """Initialize the NPU backend.
+
+        Args:
+            debug_mode: Whether to enable debug mode with intermediate tensor dumps.
+        """
+        self.debug_mode = debug_mode
+
     def generate(self, ctx: "CompileContext") -> CodeGenResult:
         """Generate NPU C code.
 

@@ -66,7 +66,12 @@ def main():
     default=True,
     help="Enable/disable ONNX constant folding optimization (default: enabled)",
 )
-def compile(onnx_model, output, target, opt_level, entry_name, verbose, max_memory, memory_strategy, enable_constant_folding):
+@click.option(
+    "--debug",
+    is_flag=True,
+    help="Enable debug mode: dump intermediate tensor outputs for comparison with ONNX Runtime",
+)
+def compile(onnx_model, output, target, opt_level, entry_name, verbose, max_memory, memory_strategy, enable_constant_folding, debug):
     """Compile an ONNX model to C code.
 
     Example:
@@ -80,6 +85,7 @@ def compile(onnx_model, output, target, opt_level, entry_name, verbose, max_memo
     console.print(f"[bold blue]Optimization[/bold blue]: O{opt_level}")
     console.print(f"[bold blue]Memory Strategy[/bold blue]: {memory_strategy}")
     console.print(f"[bold blue]Constant Folding[/bold blue]: {'enabled' if enable_constant_folding else 'disabled'}")
+    console.print(f"[bold blue]Debug Mode[/bold blue]: {'enabled' if debug else 'disabled'}")
     if max_memory:
         console.print(f"[bold blue]Max Memory[/bold blue]: {max_memory}")
     console.print()
@@ -89,6 +95,7 @@ def compile(onnx_model, output, target, opt_level, entry_name, verbose, max_memo
             target=target,
             opt_level=opt_level,
             enable_constant_folding=enable_constant_folding,
+            debug_mode=debug,
         )
         compiler.compile(
             onnx_path=onnx_model,
@@ -172,6 +179,63 @@ def targets():
     table.add_row("npu", "Generate code for NPU acceleration")
 
     console.print(table)
+
+
+@main.group()
+def debug():
+    """Debug mode commands for comparing NNC output with ONNX Runtime."""
+    pass
+
+
+@debug.command()
+@click.argument("nnc_debug_file", type=click.Path(exists=True))
+@click.argument("onnx_model", type=click.Path(exists=True))
+@click.option(
+    "--rtol",
+    type=float,
+    default=1e-4,
+    help="Relative tolerance for comparison (default: 1e-4)",
+)
+@click.option(
+    "--atol",
+    type=float,
+    default=1e-5,
+    help="Absolute tolerance for comparison (default: 1e-5)",
+)
+@click.option(
+    "--output",
+    "-o",
+    type=click.Path(),
+    help="Output JSON file for detailed comparison results",
+)
+def compare(nnc_debug_file, onnx_model, rtol, atol, output):
+    """Compare NNC debug output with ONNX Runtime output.
+
+    Example:
+        nnc debug compare nnc_debug_output.txt model.onnx
+        nnc debug compare nnc_debug_output.txt model.onnx --rtol 1e-3 --output results.json
+    """
+    from nnc_py.tools.debug_compare import DebugComparator
+
+    console.print(f"[bold blue]Comparing:[/bold blue] {nnc_debug_file} vs {onnx_model}")
+    console.print(f"[bold blue]Tolerances:[/bold blue] rtol={rtol}, atol={atol}")
+    console.print()
+
+    comparator = DebugComparator(nnc_debug_file, onnx_model, rtol, atol)
+    results = comparator.compare()
+
+    # Print report
+    exit_code = comparator.print_report(results)
+
+    # Write JSON output if requested
+    if output:
+        import json
+
+        with open(output, "w") as f:
+            json.dump(results, f, indent=2)
+        console.print(f"\n[green]Results written to:[/green] {output}")
+
+    return exit_code
 
 
 def _format_tensor_shape(tensor):
