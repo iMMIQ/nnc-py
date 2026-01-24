@@ -885,7 +885,8 @@ class X86Backend(BackendBase):
             var_name = ctx.tensor_symbols.get(name, name)
             shape = list(arr.shape)
             dtype, element_size, nnc_dtype = self._get_constant_type_info(arr)
-            shape_str = ", ".join(str(s) for s in shape)
+            # Handle symbolic dimensions (strings) by converting to -1
+            shape_str = ", ".join(str(s) if isinstance(s, (int, float)) else "-1" for s in shape)
 
             lines.append(f"static const int64_t {var_name}_shape[] = {{{shape_str}}};")
             lines.append(f"Tensor {var_name} = {{")
@@ -945,7 +946,8 @@ class X86Backend(BackendBase):
             var_name = ctx.tensor_symbols.get(name, name)
             dtype, element_size, nnc_dtype = self._get_constant_type_info(arr)
             ndim = len(arr.shape)
-            shape_str = ", ".join(str(s) for s in arr.shape)
+            # Handle symbolic dimensions (strings) by converting to -1
+            shape_str = ", ".join(str(s) if isinstance(s, (int, float)) else "-1" for s in arr.shape)
             data_size = arr.nbytes
 
             lines.extend([
@@ -1179,7 +1181,8 @@ run: model
 
             var_name = ctx.tensor_symbols.get(tensor_name, tensor_name)
             shape_list = tensor.shape.dims
-            shape_init = ", ".join(str(d) for d in shape_list)
+            # Handle symbolic dimensions (strings) by converting to -1
+            shape_init = ", ".join(str(d) if isinstance(d, (int, float)) else "-1" for d in shape_list)
 
             lines.append(f"/* Tensor: {tensor_name} */")
             lines.append(f"static int64_t {var_name}_shape[] = {{{shape_init}}};")
@@ -1343,7 +1346,8 @@ run: model
 
                 # Generate shape array
                 shape_list = tensor.shape.dims
-                shape_init = ", ".join(str(d) for d in shape_list)
+                # Handle symbolic dimensions (strings) by converting to -1
+                shape_init = ", ".join(str(d) if isinstance(d, (int, float)) else "-1" for d in shape_list)
 
                 # Setup code
                 tensor_setups.append(f"    /* Setup {var_name} */")
@@ -1370,7 +1374,8 @@ run: model
                 var_name = ctx.tensor_symbols.get(tensor_name, tensor_name)
                 size = tensor.byte_size()
                 shape_list = tensor.shape.dims
-                shape_init = ", ".join(str(d) for d in shape_list)
+                # Handle symbolic dimensions (strings) by converting to -1
+                shape_init = ", ".join(str(d) if isinstance(d, (int, float)) else "-1" for d in shape_list)
 
                 tensor_setups.append(f"    /* Setup {var_name} */")
                 tensor_setups.append(f"    static int64_t {var_name}_shape[] = {{{shape_init}}};")

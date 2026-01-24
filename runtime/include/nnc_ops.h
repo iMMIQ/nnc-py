@@ -223,6 +223,79 @@ void nnc_split(Tensor* input, Tensor** outputs, int num_outputs, int axis);
 
 void nnc_clip(Tensor* input, Tensor* output, float min_val, float max_val);
 
+/* ============================================================================
+ * Type Conversion Operations
+ * ============================================================================ */
+
+/* Cast - convert tensor data type
+ * Args:
+ *   input:   Input tensor
+ *   output:  Output tensor
+ *   to_dtype: Target data type (NNC_DTYPE_* constant)
+ */
+void nnc_cast(Tensor* input, Tensor* output, int to_dtype);
+
+/* ============================================================================
+ * Shape Query Operations
+ * ============================================================================ */
+
+/* Shape - extract the shape of a tensor as 1D int64 array
+ * Args:
+ *   input:      Input tensor
+ *   output:     Output tensor (1D int64 tensor with shape values)
+ *   shape_data: Pre-computed shape data (can be NULL)
+ *   ndim:       Number of dimensions
+ */
+void nnc_shape(Tensor* input, Tensor* output, int64_t* shape_data, int ndim);
+
+/* ConstantOfShape - create tensor filled with constant value
+ * Args:
+ *   output: Output tensor (shape determines output dimensions)
+ *   value:  Fill value
+ *   ndim:   Number of dimensions
+ */
+void nnc_constantofshape(Tensor* output, float value, int ndim);
+
+/* Expand - broadcast tensor to larger shape
+ * Args:
+ *   input:  Input tensor
+ *   output: Output tensor
+ *   shape:  Target shape (can be NULL)
+ *   ndim:   Number of dimensions
+ */
+void nnc_expand(Tensor* input, Tensor* output, int64_t* shape, int ndim);
+
+/* ============================================================================
+ * Comparison Operations (continued)
+ * ============================================================================ */
+
+/* Greater - element-wise greater-than comparison
+ * Args:
+ *   a:   First input tensor
+ *   b:   Second input tensor
+ *   out: Output tensor (1 where a > b, 0 otherwise)
+ */
+void nnc_greater(Tensor* a, Tensor* b, Tensor* out);
+
+/* ============================================================================
+ * Logical Operations (continued)
+ * ============================================================================ */
+
+/* Or - element-wise logical OR
+ * Args:
+ *   a:   First input tensor (BOOL type)
+ *   b:   Second input tensor (BOOL type)
+ *   out: Output tensor (1 where a OR b is true, 0 otherwise)
+ */
+void nnc_or(Tensor* a, Tensor* b, Tensor* out);
+
+/* Not - element-wise logical NOT
+ * Args:
+ *   input:  Input tensor (BOOL type)
+ *   output: Output tensor (1 where input is 0, 0 otherwise)
+ */
+void nnc_not(Tensor* input, Tensor* output);
+
 #ifdef __cplusplus
 }
 #endif

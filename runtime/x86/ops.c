@@ -1402,3 +1402,144 @@ void nnc_neg(Tensor* input, Tensor* output) {
         out_data[i] = -in_data[i];
     }
 }
+
+void nnc_cast(Tensor* input, Tensor* output, int to_dtype) {
+    /* Cast operation - convert tensor data type
+     * to_dtype: NNC_DTYPE_* constant
+     */
+    int64_t n = tensor_numel(input);
+
+    switch (to_dtype) {
+        case NNC_DTYPE_FLOAT32:
+        case NNC_DTYPE_FLOAT16:
+            /* Float to float - copy */
+            memcpy(output->data, input->data, n * sizeof(float));
+            break;
+        case NNC_DTYPE_INT32: {
+            /* Float to int32 */
+            const float* in_data = (float*)input->data;
+            int32_t* out_data = (int32_t*)output->data;
+            for (int64_t i = 0; i < n; i++) {
+                out_data[i] = (int32_t)in_data[i];
+            }
+            break;
+        }
+        case NNC_DTYPE_INT64: {
+            /* Float to int64 */
+            const float* in_data = (float*)input->data;
+            int64_t* out_data = (int64_t*)output->data;
+            for (int64_t i = 0; i < n; i++) {
+                out_data[i] = (int64_t)in_data[i];
+            }
+            break;
+        }
+        case NNC_DTYPE_BOOL: {
+            /* Float to bool (non-zero is true) */
+            const float* in_data = (float*)input->data;
+            uint8_t* out_data = (uint8_t*)output->data;
+            for (int64_t i = 0; i < n; i++) {
+                out_data[i] = in_data[i] != 0.0f ? 1 : 0;
+            }
+            break;
+        }
+        default:
+            /* Unsupported cast, copy as fallback */
+            memcpy(output->data, input->data, n * sizeof(float));
+            break;
+    }
+}
+
+void nnc_shape(Tensor* input, Tensor* output, int64_t* shape_data, int ndim) {
+    /* Shape operation - extracts the shape of input tensor
+     * If shape_data is provided, use it (compile-time known shape)
+     * Otherwise, extract from input tensor
+     */
+    int64_t* out_data = (int64_t*)output->data;
+
+    if (shape_data != NULL) {
+        /* Compile-time known shape - just copy */
+        for (int i = 0; i < ndim; i++) {
+            out_data[i] = shape_data[i];
+        }
+    } else {
+        /* Runtime shape extraction */
+        for (int i = 0; i < ndim; i++) {
+            out_data[i] = input->shape[i];
+        }
+    }
+}
+
+void nnc_constantofshape(Tensor* output, float value, int ndim) {
+    /* ConstantOfShape operation - create tensor filled with value
+     * The shape is determined from the tensor's shape field
+     */
+    int64_t n = tensor_numel(output);
+    float* out_data = (float*)output->data;
+
+    for (int64_t i = 0; i < n; i++) {
+        out_data[i] = value;
+    }
+}
+
+void nnc_expand(Tensor* input, Tensor* output, int64_t* shape, int ndim) {
+    /* Expand operation - broadcast tensor to larger shape
+     * For simplicity, we just copy the data with broadcasting logic
+     * In a full implementation, this would handle proper broadcasting
+     */
+    int64_t in_n = tensor_numel(input);
+    int64_t out_n = tensor_numel(output);
+
+    const float* in_data = (float*)input->data;
+    float* out_data = (float*)output->data;
+
+    if (in_n == out_n) {
+        /* Same size, just copy */
+        memcpy(out_data, in_data, in_n * sizeof(float));
+    } else {
+        /* Simple broadcast - repeat input data */
+        for (int64_t i = 0; i < out_n; i++) {
+            out_data[i] = in_data[i % in_n];
+        }
+    }
+}
+
+void nnc_greater(Tensor* a, Tensor* b, Tensor* out) {
+    /* Greater comparison: out = (a > b)
+     * Output is uint8_t (BOOL type)
+     */
+    int64_t n = tensor_numel(out);
+    const float* a_data = (float*)a->data;
+    const float* b_data = (float*)b->data;
+    uint8_t* out_data = (uint8_t*)out->data;
+
+    for (int64_t i = 0; i < n; i++) {
+        out_data[i] = a_data[i] > b_data[i] ? 1 : 0;
+    }
+}
+
+void nnc_or(Tensor* a, Tensor* b, Tensor* out) {
+    /* Logical OR operation
+     * Inputs and output are uint8_t (BOOL type)
+     */
+    int64_t n = tensor_numel(out);
+    const uint8_t* a_data = (uint8_t*)a->data;
+    const uint8_t* b_data = (uint8_t*)b->data;
+    uint8_t* out_data = (uint8_t*)out->data;
+
+    for (int64_t i = 0; i < n; i++) {
+        out_data[i] = a_data[i] || b_data[i] ? 1 : 0;
+    }
+}
+
+void nnc_not(Tensor* input, Tensor* output) {
+    /* Logical NOT operation
+     * Input and output are uint8_t (BOOL type)
+     */
+    int64_t n = tensor_numel(output);
+    const uint8_t* in_data = (uint8_t*)input->data;
+    uint8_t* out_data = (uint8_t*)output->data;
+
+    for (int64_t i = 0; i < n; i++) {
+        out_data[i] = !in_data[i] ? 1 : 0;
+    }
+}

@@ -107,8 +107,28 @@ class CEmitter:
             self._emit_global_avgpool_call(ctx, node)
         elif node.op_type == OpType.REDUCE_MEAN:
             self._emit_reducemean_call(ctx, node)
+        elif node.op_type == OpType.REDUCE_SUM:
+            self._emit_reducesum_call(ctx, node)
         elif node.op_type == OpType.POW:
             self._emit_pow_call(ctx, node)
+        elif node.op_type == OpType.UNSQUEEZE:
+            self._emit_unsqueeze_call(ctx, node)
+        elif node.op_type == OpType.CLIP:
+            self._emit_clip_call(ctx, node)
+        elif node.op_type == OpType.SHAPE:
+            self._emit_shape_call(ctx, node)
+        elif node.op_type == OpType.CONSTANT_OF_SHAPE:
+            self._emit_constantofshape_call(ctx, node)
+        elif node.op_type == OpType.EXPAND:
+            self._emit_expand_call(ctx, node)
+        elif node.op_type == OpType.GREATER:
+            self._emit_greater_call(ctx, node)
+        elif node.op_type == OpType.OR:
+            self._emit_or_call(ctx, node)
+        elif node.op_type == OpType.NOT:
+            self._emit_not_call(ctx, node)
+        elif node.op_type == OpType.CAST:
+            self._emit_cast_call(ctx, node)
         else:
             # Generic handling for other operations
             self._emit_generic_call(ctx, node, op_name)
@@ -395,6 +415,12 @@ class CEmitter:
                 output_tensor = ctx.graph.get_tensor(node.outputs[0])
                 ndim = output_tensor.shape.rank()
                 shape_name = f"{output_var}_shape"
+                # Declare static array with output shape
+                if output_tensor and output_tensor.shape and output_tensor.shape.dims:
+                    shape_dims = output_tensor.shape.dims
+                    self.write_line(f"static const int64_t {shape_name}[] = {{{', '.join(map(str, shape_dims))}}};")
+                else:
+                    self.write_line(f"static const int64_t {shape_name}[] = {{}};")
                 self.write_line(f"nnc_reshape(&{input_var}, &{output_var}, (int64_t*){shape_name}, {ndim});")
 
     def _emit_transpose_call(self, ctx: CompileContext, node: Node):
@@ -486,6 +512,190 @@ class CEmitter:
         # We use the unary nnc_pow function that computes x^2
         self.write_line(f"nnc_pow(&{input_var}, &{output_var});")
 
+    def _emit_reducesum_call(self, ctx: CompileContext, node: Node):
+        """Emit ReduceSum operation call."""
+        input_var = ctx.tensor_symbols.get(node.inputs[0], node.inputs[0])
+        output_var = ctx.tensor_symbols.get(node.outputs[0], node.outputs[0])
+
+        # Get axes from attributes (may be "axes" or "axis")
+        axes = node.attrs.get("axes", None)
+        axis = node.attrs.get("axis", None)
+        keepdims = node.attrs.get("keepdims", 1)
+
+        # Handle axes as a list (take first element if it's a list)
+        if axes is not None:
+            if isinstance(axes, list) and len(axes) > 0:
+                axis_val = axes[0]
+            else:
+                axis_val = axes
+        elif axis is not None:
+            axis_val = axis
+        else:
+            axis_val = -1
+
+        self.write_line(f"nnc_reducesum(&{input_var}, &{output_var}, {axis_val}, {keepdims});")
+
+    def _emit_unsqueeze_call(self, ctx: CompileContext, node: Node):
+        """Emit Unsqueeze operation call."""
+        input_var = ctx.tensor_symbols.get(node.inputs[0], node.inputs[0])
+        output_var = ctx.tensor_symbols.get(node.outputs[0], node.outputs[0])
+
+        # Get axis from attributes
+        axis = node.attrs.get("axis", 0)
+
+        self.write_line(f"nnc_unsqueeze(&{input_var}, &{output_var}, {axis});")
+
+    def _emit_clip_call(self, ctx: CompileContext, node: Node):
+        """Emit Clip operation call.
+
+        Clip can have min/max as inputs or as attributes.
+        """
+        input_var = ctx.tensor_symbols.get(node.inputs[0], node.inputs[0])
+        output_var = ctx.tensor_symbols.get(node.outputs[0], node.outputs[0])
+
+        # Try to get min/max from attributes first
+        min_val = node.attrs.get("min", None)
+        max_val = node.attrs.get("max", None)
+
+        # If not in attributes, try inputs
+        if min_val is None and len(node.inputs) >= 2:
+            min_input = node.inputs[1]
+            if min_input in ctx.graph.constants:
+                min_val = ctx.graph.constants[min_input]
+                if hasattr(min_val, 'item'):
+                    min_val = min_val.item()
+                elif hasattr(min_val, '__iter__') and len(min_val) == 1:
+                    min_val = min_val[0]
+
+        if max_val is None and len(node.inputs) >= 3:
+            max_input = node.inputs[2]
+            if max_input in ctx.graph.constants:
+                max_val = ctx.graph.constants[max_input]
+                if hasattr(max_val, 'item'):
+                    max_val = max_val.item()
+                elif hasattr(max_val, '__iter__') and len(max_val) == 1:
+                    max_val = max_val[0]
+
+        # Default values if not found
+        if min_val is None:
+            min_val = -float('inf')
+        if max_val is None:
+            max_val = float('inf')
+
+        # Use a very large negative/positive value for infinity
+        min_c = "-3.402823e38f" if min_val == -float('inf') else f"{float(min_val)}f"
+        max_c = "3.402823e38f" if max_val == float('inf') else f"{float(max_val)}f"
+
+        self.write_line(f"nnc_clip(&{input_var}, &{output_var}, {min_c}, {max_c});")
+
+    def _emit_shape_call(self, ctx: CompileContext, node: Node):
+        """Emit Shape operation call.
+
+        Shape extracts the shape of a tensor as a 1D int64 array.
+        This is typically a compile-time operation, so we create a constant.
+        """
+        input_var = ctx.tensor_symbols.get(node.inputs[0], node.inputs[0])
+        output_var = ctx.tensor_symbols.get(node.outputs[0], node.outputs[0])
+
+        # Get input tensor shape
+        input_tensor = ctx.graph.get_tensor(node.inputs[0])
+        if input_tensor and input_tensor.shape and input_tensor.shape.dims:
+            shape_dims = input_tensor.shape.dims
+            ndim = len(shape_dims)
+            # Create static array with the shape
+            shape_name = f"{output_var}_data"
+            self.write_line(f"static const int64_t {shape_name}[] = {{{', '.join(map(str, shape_dims))}}};")
+            # The Shape operation should copy this to the output tensor
+            self.write_line(f"nnc_shape(&{input_var}, &{output_var}, (int64_t*){shape_name}, {ndim});")
+        else:
+            # Unknown shape - use runtime function
+            self.write_line(f"nnc_shape(&{input_var}, &{output_var}, NULL, 0);")
+
+    def _emit_constantofshape_call(self, ctx: CompileContext, node: Node):
+        """Emit ConstantOfShape operation call.
+
+        Creates a constant tensor filled with a specified value.
+        """
+        output_var = ctx.tensor_symbols.get(node.outputs[0], node.outputs[0])
+
+        # Get the fill value from attributes
+        value = node.attrs.get("value", 0.0)
+
+        # Get the shape from input (should be a constant shape tensor)
+        shape_input = node.inputs[0] if len(node.inputs) > 0 else None
+        if shape_input and shape_input in ctx.graph.constants:
+            shape = ctx.graph.constants[shape_input]
+            ndim = len(shape) if hasattr(shape, '__len__') else 1
+            self.write_line(f"nnc_constantofshape(&{output_var}, {value}f, {ndim});")
+        else:
+            output_tensor = ctx.graph.get_tensor(node.outputs[0])
+            ndim = output_tensor.shape.rank() if output_tensor.shape else 1
+            self.write_line(f"nnc_constantofshape(&{output_var}, {value}f, {ndim});")
+
+    def _emit_expand_call(self, ctx: CompileContext, node: Node):
+        """Emit Expand operation call.
+
+        Expands a tensor to a larger shape by broadcasting.
+        """
+        input_var = ctx.tensor_symbols.get(node.inputs[0], node.inputs[0])
+        shape_input = node.inputs[1] if len(node.inputs) > 1 else None
+        output_var = ctx.tensor_symbols.get(node.outputs[0], node.outputs[0])
+
+        if shape_input and shape_input in ctx.graph.constants:
+            shape = ctx.graph.constants[shape_input]
+            shape_var = ctx.tensor_symbols.get(shape_input, shape_input)
+            ndim = len(shape) if hasattr(shape, '__len__') else 1
+            self.write_line(f"nnc_expand(&{input_var}, &{output_var}, (int64_t*){shape_var}_data, {ndim});")
+        else:
+            output_tensor = ctx.graph.get_tensor(node.outputs[0])
+            ndim = output_tensor.shape.rank() if output_tensor.shape else 1
+            self.write_line(f"nnc_expand(&{input_var}, &{output_var}, NULL, {ndim});")
+
+    def _emit_greater_call(self, ctx: CompileContext, node: Node):
+        """Emit Greater comparison operation call."""
+        input_var1 = ctx.tensor_symbols.get(node.inputs[0], node.inputs[0])
+        input_var2 = ctx.tensor_symbols.get(node.inputs[1], node.inputs[1])
+        output_var = ctx.tensor_symbols.get(node.outputs[0], node.outputs[0])
+
+        self.write_line(f"nnc_greater(&{input_var1}, &{input_var2}, &{output_var});")
+
+    def _emit_or_call(self, ctx: CompileContext, node: Node):
+        """Emit Or logical operation call."""
+        input_var1 = ctx.tensor_symbols.get(node.inputs[0], node.inputs[0])
+        input_var2 = ctx.tensor_symbols.get(node.inputs[1], node.inputs[1])
+        output_var = ctx.tensor_symbols.get(node.outputs[0], node.outputs[0])
+
+        self.write_line(f"nnc_or(&{input_var1}, &{input_var2}, &{output_var});")
+
+    def _emit_not_call(self, ctx: CompileContext, node: Node):
+        """Emit Not logical operation call."""
+        input_var = ctx.tensor_symbols.get(node.inputs[0], node.inputs[0])
+        output_var = ctx.tensor_symbols.get(node.outputs[0], node.outputs[0])
+
+        self.write_line(f"nnc_not(&{input_var}, &{output_var});")
+
+    def _emit_cast_call(self, ctx: CompileContext, node: Node):
+        """Emit Cast operation call."""
+        input_var = ctx.tensor_symbols.get(node.inputs[0], node.inputs[0])
+        output_var = ctx.tensor_symbols.get(node.outputs[0], node.outputs[0])
+
+        # Get target type from attributes
+        to_type = node.attrs.get("to", DataType.FLOAT32)
+
+        # Map to NNC dtype constant
+        dtype_map = {
+            DataType.FLOAT32: "NNC_DTYPE_FLOAT32",
+            DataType.FLOAT16: "NNC_DTYPE_FLOAT16",
+            DataType.INT32: "NNC_DTYPE_INT32",
+            DataType.INT64: "NNC_DTYPE_INT64",
+            DataType.INT8: "NNC_DTYPE_INT8",
+            DataType.UINT8: "NNC_DTYPE_UINT8",
+            DataType.BOOL: "NNC_DTYPE_BOOL",
+        }
+        dtype_const = dtype_map.get(to_type, "NNC_DTYPE_FLOAT32")
+
+        self.write_line(f"nnc_cast(&{input_var}, &{output_var}, {dtype_const});")
+
     def _emit_generic_call(self, ctx: CompileContext, node: Node, op_name: str):
         """Emit generic operation call."""
         args = []
@@ -536,6 +746,7 @@ class CEmitter:
             DataType.FLOAT32: "float",
             DataType.FLOAT16: "uint16_t",
             DataType.INT32: "int32_t",
+            DataType.INT64: "int64_t",
             DataType.INT8: "int8_t",
             DataType.UINT8: "uint8_t",
             DataType.BOOL: "uint8_t",

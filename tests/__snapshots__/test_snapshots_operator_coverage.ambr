@@ -83,7 +83,7 @@
   
   /* Clip: /Clip */
   void node_Clip(void) {
-      nnc_clip(&tensor_Pow_output_0, &tensor_Constant_9_output_0, &, &tensor_Clip_output_0);
+      nnc_clip(&tensor_Pow_output_0, &tensor_Clip_output_0, 0.0f, 3.402823e38f);
   }
   
   /* Add: /Add_1 */
@@ -98,7 +98,7 @@
   
   /* Clip: /Clip_1 */
   void node_Clip_1(void) {
-      nnc_clip(&tensor_Sqrt_output_0, &tensor_Cast_2_output_0, &tensor_constant1, &tensor_Clip_1_output_0);
+      nnc_clip(&tensor_Sqrt_output_0, &tensor_Clip_1_output_0, -1.0f, 1.0f);
   }
   
   /* Relu: /Relu */
@@ -123,7 +123,7 @@
   
   /* ReduceSum: /ReduceSum */
   void node_ReduceSum(void) {
-      nnc_reducesum(&tensor_Reshape_output_0, &tensor_onnx_ReduceSum_36, &tensor_ReduceSum_output_0);
+      nnc_reducesum(&tensor_Reshape_output_0, &tensor_ReduceSum_output_0, -1, 1);
   }
   
   /* Concat: /Concat_1 */
@@ -137,7 +137,7 @@
   
   /* Unsqueeze: /Unsqueeze_2 */
   void node_Unsqueeze_2(void) {
-      nnc_unsqueeze(&tensor_Concat_1_output_0, &tensor_Constant_7_output_0, &tensor_Unsqueeze_2_output_0);
+      nnc_unsqueeze(&tensor_Concat_1_output_0, &tensor_Unsqueeze_2_output_0, 0);
   }
   
   /* Tile: /Tile */
@@ -187,17 +187,17 @@
   
   /* Cast: /Cast_7 */
   void node_Cast_7(void) {
-      nnc_cast(&tensor_Not_output_0, &tensor_Cast_7_output_0);
+      nnc_cast(&tensor_Not_output_0, &tensor_Cast_7_output_0, NNC_DTYPE_FLOAT32);
   }
   
   /* Cast: /Cast_4 */
   void node_Cast_4(void) {
-      nnc_cast(&tensor_And_output_0, &tensor_Cast_4_output_0);
+      nnc_cast(&tensor_And_output_0, &tensor_Cast_4_output_0, NNC_DTYPE_FLOAT32);
   }
   
   /* Cast: /Cast_5 */
   void node_Cast_5(void) {
-      nnc_cast(&tensor_Or_output_0, &tensor_Cast_5_output_0);
+      nnc_cast(&tensor_Or_output_0, &tensor_Cast_5_output_0, NNC_DTYPE_FLOAT32);
   }
   
   /* Concat: /Concat_2 */
