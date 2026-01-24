@@ -57,10 +57,10 @@ class ONNXFrontend:
         model = onnx.load(onnx_path)
 
         # Apply onnxsim to simplify the model (constant folding, etc.)
-        # Disable optimizer to prevent incorrect CSE that breaks semantic correctness
+        # Apply onnxsim optimizer
         if self.enable_simplify:
             try:
-                model, _ = onnxsim.simplify(model, perform_optimization=False)
+                model, _ = onnxsim.simplify(model, perform_optimization=True)
             except Exception as e:
                 # Simplification failed, continue with original model
                 pass

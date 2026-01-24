@@ -24,6 +24,17 @@ if TYPE_CHECKING:
 class X86Backend(BackendBase):
     """x86 target backend - generates code for simulation."""
 
+    # Map DataType to NNC_DTYPE constant
+    DTYPE_MAP = {
+        DataType.FLOAT32: "NNC_DTYPE_FLOAT32",
+        DataType.FLOAT16: "NNC_DTYPE_FLOAT16",
+        DataType.INT32: "NNC_DTYPE_INT32",
+        DataType.INT64: "NNC_DTYPE_INT64",
+        DataType.INT8: "NNC_DTYPE_INT8",
+        DataType.UINT8: "NNC_DTYPE_UINT8",
+        DataType.BOOL: "NNC_DTYPE_BOOL",
+    }
+
     def __init__(self, debug_mode: bool = False):
         """Initialize the x86 backend.
 
@@ -653,6 +664,17 @@ extern FILE* debug_file;
         Returns:
             C code line for the operator call
         """
+        # Special handling for operators with attribute-as-input (after onnxsim optimization)
+        # These operators need special handling because some attributes became inputs
+        if node.op_type == OpType.CONCAT:
+            return self._generate_concat_call(ctx, node, inputs_need_reload, outputs_need_temp)
+        if node.op_type == OpType.SPLIT:
+            return self._generate_split_call(ctx, node, inputs_need_reload, outputs_need_temp)
+
+        # Operators that have extra "attribute" inputs after onnxsim
+        if node.op_type in (OpType.REDUCE_SUM, OpType.REDUCE_MEAN, OpType.UNSQUEEZE, OpType.TRANSPOSE, OpType.TILE, OpType.RESHAPE, OpType.POW, OpType.CLIP):
+            return self._generate_attr_as_input_op_call(ctx, node, inputs_need_reload, outputs_need_temp)
+
         op_name = f"nnc_{node.op_type.value.lower()}"
         args = []
 
@@ -697,12 +719,114 @@ extern FILE* debug_file;
             epsilon = node.attrs.get("epsilon", 1e-5)
             args.append(f"{axis}")
             args.append(f"{epsilon}f")
+        elif node.op_type == OpType.CAST:
+            # Cast: input, output, to_dtype
+            to_dtype = node.attrs.get("to")
+            if to_dtype and isinstance(to_dtype, DataType):
+                dtype_const = self.DTYPE_MAP.get(to_dtype, "NNC_DTYPE_FLOAT32")
+                args.append(dtype_const)
+            else:
+                args.append("NNC_DTYPE_FLOAT32")
+        elif node.op_type == OpType.SPLIT:
+            # Split has signature: nnc_split(Tensor* input, Tensor** outputs, int num_outputs, int axis)
+            # We need to completely rewrite the call
+            return self._generate_split_call(ctx, node, inputs_need_reload, outputs_need_temp)
+        elif node.op_type == OpType.GATHER:
+            # Gather: data, indices, output, axis, data_dtype
+            axis = node.attrs.get("axis", 0)
+            # Determine data type: 1 for int64 (e.g., from Shape operator), 0 for float
+            data_tensor = ctx.graph.get_tensor(node.inputs[0])
+            data_dtype = 1 if data_tensor and data_tensor.dtype == DataType.INT64 else 0
+            args.append(str(axis))
+            args.append(str(data_dtype))
         elif node.op_type == OpType.REDUCE_MEAN:
+            # ONNX uses "axes" (plural) as a list, or "axis" (singular) as int
+            axes = node.attrs.get("axes", None)
             axis = node.attrs.get("axis", None)
             keepdims = node.attrs.get("keepdims", 1)
-            if axis is not None:
-                args.append(str(axis))
-                args.append(str(keepdims))
+            # Determine axis value (handle both "axes" list and "axis" int)
+            if axes is not None and isinstance(axes, list) and len(axes) > 0:
+                axis_val = axes[0]
+            elif axis is not None:
+                axis_val = axis
+            else:
+                axis_val = -1  # Default to last axis
+            args.append(str(axis_val))
+            args.append(str(keepdims))
+        elif node.op_type == OpType.REDUCE_SUM:
+            # ONNX uses "axes" (plural) as a list, or "axis" (singular) as int
+            axes = node.attrs.get("axes", None)
+            axis = node.attrs.get("axis", None)
+            keepdims = node.attrs.get("keepdims", 1)
+            # Determine axis value (handle both "axes" list and "axis" int)
+            if axes is not None and isinstance(axes, list) and len(axes) > 0:
+                axis_val = axes[0]
+            elif axis is not None:
+                axis_val = axis
+            else:
+                axis_val = -1  # Default to last axis
+            args.append(str(axis_val))
+            args.append(str(keepdims))
+        elif node.op_type == OpType.TRANSPOSE:
+            # Transpose: input, output, perm array, ndim
+            # perm can be in attributes or as an input (after onnxsim optimization)
+            perm = node.attrs.get("perm", None)
+            if perm is None and len(node.inputs) > 1:
+                # perm might be the second input (constant)
+                perm_input = node.inputs[1]
+                if perm_input in ctx.graph.constants:
+                    perm = ctx.graph.constants[perm_input].tolist()
+            if perm is None:
+                perm = []  # Will use default
+            ndim = len(perm) if perm else 0
+            # Generate static perm array
+            perm_name = f"{ctx.node_symbols.get(node.name, node.name)}_perm"
+            perm_decl = f"static const int64_t {perm_name}[] = {{{', '.join(map(str, perm))}}};"
+            # Need to return multi-line string
+            output_var = ctx.tensor_symbols.get(node.outputs[0], node.outputs[0])
+            return f"{perm_decl}\n    nnc_transpose(&{ctx.tensor_symbols.get(node.inputs[0], node.inputs[0])}, &{output_var}, (int64_t*){perm_name}, {ndim});"
+        elif node.op_type == OpType.UNSQUEEZE:
+            # Unsqueeze: input, output, axis
+            # In ONNX opset 13+, axes can be an input instead of attribute
+            axes = node.attrs.get("axes", None)
+            if axes is None and len(node.inputs) > 1:
+                # axes might be the second input (constant)
+                axes_input = node.inputs[1]
+                if axes_input in ctx.graph.constants:
+                    axes_val = ctx.graph.constants[axes_input]
+                    if isinstance(axes_val, list):
+                        axes = axes_val
+                    elif hasattr(axes_val, 'tolist'):
+                        axes = axes_val.tolist()
+                    else:
+                        axes = [axes_val]
+            if axes is None:
+                axes = [-1]  # Default to last axis
+            axis_val = axes[0] if isinstance(axes, list) else axes
+            args.append(str(axis_val))
+        elif node.op_type == OpType.TILE:
+            # Tile: input, output, repeats array, ndim
+            # repeats is the second input (constant)
+            if len(node.inputs) > 1:
+                repeats_input = node.inputs[1]
+                if repeats_input in ctx.graph.constants:
+                    repeats = ctx.graph.constants[repeats_input]
+                    if isinstance(repeats, list):
+                        repeats_list = repeats
+                    elif hasattr(repeats, 'tolist'):
+                        repeats_list = repeats.tolist()
+                    else:
+                        repeats_list = [repeats]
+                    ndim = len(repeats_list)
+                    # Generate static repeats array
+                    repeats_name = f"{ctx.node_symbols.get(node.name, node.name)}_repeats"
+                    repeats_decl = f"static const int64_t {repeats_name}[] = {{{', '.join(map(str, repeats_list))}}};"
+                    # Need to return multi-line string
+                    output_var = ctx.tensor_symbols.get(node.outputs[0], node.outputs[0])
+                    return f"{repeats_decl}\n    nnc_tile(&{ctx.tensor_symbols.get(node.inputs[0], node.inputs[0])}, &{output_var}, (int64_t*){repeats_name}, {ndim});"
+            # Fallback: pass NULL for repeats
+            args.append("NULL")
+            args.append("0")
         elif node.op_type == OpType.GEMM:
             # Gemm has optional bias (3rd input), need to add attributes
             # nnc_gemm(Tensor* a, Tensor* b, Tensor* c, Tensor* output,
@@ -725,7 +849,6 @@ extern FILE* debug_file;
             axis = node.attrs.get("axis", 0)
             # Determine data type: 1 for int64 (e.g., from Shape operator), 0 for float
             data_tensor = ctx.graph.get_tensor(node.inputs[0])
-            from nnc_py.ir.types import DataType
             data_dtype = 1 if data_tensor and data_tensor.dtype == DataType.INT64 else 0
             args.append(str(axis))
             args.append(str(data_dtype))
@@ -754,6 +877,14 @@ extern FILE* debug_file;
         Returns:
             C code line for the operator call
         """
+        # Special handling for operators with attribute-as-input (after onnxsim optimization)
+        if node.op_type == OpType.CONCAT:
+            return self._generate_concat_call(ctx, node, inputs_need_reload={}, outputs_need_temp={})
+        if node.op_type == OpType.SPLIT:
+            return self._generate_split_call(ctx, node, inputs_need_reload={}, outputs_need_temp={})
+        if node.op_type in (OpType.REDUCE_SUM, OpType.REDUCE_MEAN, OpType.UNSQUEEZE, OpType.TRANSPOSE, OpType.TILE, OpType.RESHAPE, OpType.POW, OpType.CLIP):
+            return self._generate_attr_as_input_op_call(ctx, node, inputs_need_reload={}, outputs_need_temp={})
+
         op_name = f"nnc_{node.op_type.value.lower()}"
         args = []
 
@@ -786,12 +917,114 @@ extern FILE* debug_file;
             epsilon = node.attrs.get("epsilon", 1e-5)
             args.append(f"{axis}")
             args.append(f"{epsilon}f")
+        elif node.op_type == OpType.CAST:
+            # Cast: input, output, to_dtype
+            to_dtype = node.attrs.get("to")
+            if to_dtype and isinstance(to_dtype, DataType):
+                dtype_const = self.DTYPE_MAP.get(to_dtype, "NNC_DTYPE_FLOAT32")
+                args.append(dtype_const)
+            else:
+                args.append("NNC_DTYPE_FLOAT32")
+        elif node.op_type == OpType.SPLIT:
+            # Split has signature: nnc_split(Tensor* input, Tensor** outputs, int num_outputs, int axis)
+            # We need to completely rewrite the call
+            return self._generate_split_call(ctx, node, inputs_need_reload, outputs_need_temp)
+        elif node.op_type == OpType.GATHER:
+            # Gather: data, indices, output, axis, data_dtype
+            axis = node.attrs.get("axis", 0)
+            # Determine data type: 1 for int64 (e.g., from Shape operator), 0 for float
+            data_tensor = ctx.graph.get_tensor(node.inputs[0])
+            data_dtype = 1 if data_tensor and data_tensor.dtype == DataType.INT64 else 0
+            args.append(str(axis))
+            args.append(str(data_dtype))
         elif node.op_type == OpType.REDUCE_MEAN:
+            # ONNX uses "axes" (plural) as a list, or "axis" (singular) as int
+            axes = node.attrs.get("axes", None)
             axis = node.attrs.get("axis", None)
             keepdims = node.attrs.get("keepdims", 1)
-            if axis is not None:
-                args.append(str(axis))
-                args.append(str(keepdims))
+            # Determine axis value (handle both "axes" list and "axis" int)
+            if axes is not None and isinstance(axes, list) and len(axes) > 0:
+                axis_val = axes[0]
+            elif axis is not None:
+                axis_val = axis
+            else:
+                axis_val = -1  # Default to last axis
+            args.append(str(axis_val))
+            args.append(str(keepdims))
+        elif node.op_type == OpType.REDUCE_SUM:
+            # ONNX uses "axes" (plural) as a list, or "axis" (singular) as int
+            axes = node.attrs.get("axes", None)
+            axis = node.attrs.get("axis", None)
+            keepdims = node.attrs.get("keepdims", 1)
+            # Determine axis value (handle both "axes" list and "axis" int)
+            if axes is not None and isinstance(axes, list) and len(axes) > 0:
+                axis_val = axes[0]
+            elif axis is not None:
+                axis_val = axis
+            else:
+                axis_val = -1  # Default to last axis
+            args.append(str(axis_val))
+            args.append(str(keepdims))
+        elif node.op_type == OpType.TRANSPOSE:
+            # Transpose: input, output, perm array, ndim
+            # perm can be in attributes or as an input (after onnxsim optimization)
+            perm = node.attrs.get("perm", None)
+            if perm is None and len(node.inputs) > 1:
+                # perm might be the second input (constant)
+                perm_input = node.inputs[1]
+                if perm_input in ctx.graph.constants:
+                    perm = ctx.graph.constants[perm_input].tolist()
+            if perm is None:
+                perm = []  # Will use default
+            ndim = len(perm) if perm else 0
+            # Generate static perm array
+            perm_name = f"{ctx.node_symbols.get(node.name, node.name)}_perm"
+            perm_decl = f"static const int64_t {perm_name}[] = {{{', '.join(map(str, perm))}}};"
+            # Need to return multi-line string
+            output_var = ctx.tensor_symbols.get(node.outputs[0], node.outputs[0])
+            return f"{perm_decl}\n    nnc_transpose(&{ctx.tensor_symbols.get(node.inputs[0], node.inputs[0])}, &{output_var}, (int64_t*){perm_name}, {ndim});"
+        elif node.op_type == OpType.UNSQUEEZE:
+            # Unsqueeze: input, output, axis
+            # In ONNX opset 13+, axes can be an input instead of attribute
+            axes = node.attrs.get("axes", None)
+            if axes is None and len(node.inputs) > 1:
+                # axes might be the second input (constant)
+                axes_input = node.inputs[1]
+                if axes_input in ctx.graph.constants:
+                    axes_val = ctx.graph.constants[axes_input]
+                    if isinstance(axes_val, list):
+                        axes = axes_val
+                    elif hasattr(axes_val, 'tolist'):
+                        axes = axes_val.tolist()
+                    else:
+                        axes = [axes_val]
+            if axes is None:
+                axes = [-1]  # Default to last axis
+            axis_val = axes[0] if isinstance(axes, list) else axes
+            args.append(str(axis_val))
+        elif node.op_type == OpType.TILE:
+            # Tile: input, output, repeats array, ndim
+            # repeats is the second input (constant)
+            if len(node.inputs) > 1:
+                repeats_input = node.inputs[1]
+                if repeats_input in ctx.graph.constants:
+                    repeats = ctx.graph.constants[repeats_input]
+                    if isinstance(repeats, list):
+                        repeats_list = repeats
+                    elif hasattr(repeats, 'tolist'):
+                        repeats_list = repeats.tolist()
+                    else:
+                        repeats_list = [repeats]
+                    ndim = len(repeats_list)
+                    # Generate static repeats array
+                    repeats_name = f"{ctx.node_symbols.get(node.name, node.name)}_repeats"
+                    repeats_decl = f"static const int64_t {repeats_name}[] = {{{', '.join(map(str, repeats_list))}}};"
+                    # Need to return multi-line string
+                    output_var = ctx.tensor_symbols.get(node.outputs[0], node.outputs[0])
+                    return f"{repeats_decl}\n    nnc_tile(&{ctx.tensor_symbols.get(node.inputs[0], node.inputs[0])}, &{output_var}, (int64_t*){repeats_name}, {ndim});"
+            # Fallback: pass NULL for repeats
+            args.append("NULL")
+            args.append("0")
         elif node.op_type == OpType.GEMM:
             # Gemm has optional bias (3rd input), need to add attributes
             # nnc_gemm(Tensor* a, Tensor* b, Tensor* c, Tensor* output,
@@ -814,7 +1047,6 @@ extern FILE* debug_file;
             axis = node.attrs.get("axis", 0)
             # Determine data type: 1 for int64 (e.g., from Shape operator), 0 for float
             data_tensor = ctx.graph.get_tensor(node.inputs[0])
-            from nnc_py.ir.types import DataType
             data_dtype = 1 if data_tensor and data_tensor.dtype == DataType.INT64 else 0
             args.append(str(axis))
             args.append(str(data_dtype))
@@ -831,6 +1063,304 @@ extern FILE* debug_file;
             args.append(str(hidden_size))
 
         return f"{op_name}({', '.join(args)});"
+
+    def _generate_concat_call(
+        self,
+        ctx: CompileContext,
+        node: Node,
+        inputs_need_reload: dict[str, Union["ReloadPoint", "SpillPoint"]],
+        outputs_need_temp: dict[str, Union["ReloadPoint", "SpillPoint"]],
+    ) -> str:
+        """Generate concat operation call.
+
+        Concat has signature: void nnc_concat(Tensor** inputs, Tensor* output, int num_inputs, int axis);
+
+        Args:
+            ctx: Compilation context
+            node: Node to generate call for
+            inputs_need_reload: Map of input_name -> ReloadPoint
+            outputs_need_temp: Map of output_name -> SpillPoint
+
+        Returns:
+            C code for the concat call (may be multi-line)
+        """
+        num_inputs = len(node.inputs)
+        axis = node.attrs.get("axis", 0)
+        output_var = ctx.tensor_symbols.get(node.outputs[0], node.outputs[0])
+
+        # Create static array of input pointers
+        array_name = f"{ctx.node_symbols.get(node.name, node.name)}_inputs"
+        input_ptrs = []
+
+        for input_name in node.inputs:
+            var_name = ctx.tensor_symbols.get(input_name, input_name)
+            if input_name in inputs_need_reload:
+                # Use temp tensor
+                temp_name = f"temp_{var_name}"
+                input_ptrs.append(f"&{temp_name}")
+            else:
+                # Use original tensor
+                input_ptrs.append(f"&{var_name}")
+
+        # Generate the array declaration and call
+        array_decl = f"static Tensor* {array_name}[{num_inputs}] = {{{', '.join(input_ptrs)}}};"
+        output_arg = f"&{output_var}"
+
+        if node.outputs[0] in outputs_need_temp:
+            temp_name = f"temp_{output_var}"
+            output_arg = f"&{temp_name}"
+
+        call = f"nnc_concat({array_name}, {output_arg}, {num_inputs}, {axis});"
+
+        # Return multi-line string with array decl and call
+        return f"{array_decl}\n    {call}"
+
+    def _generate_split_call(
+        self,
+        ctx: CompileContext,
+        node: Node,
+        inputs_need_reload: dict[str, Union["ReloadPoint", "SpillPoint"]],
+        outputs_need_temp: dict[str, Union["ReloadPoint", "SpillPoint"]],
+    ) -> str:
+        """Generate split operation call.
+
+        Split has signature: void nnc_split(Tensor* input, Tensor** outputs, int num_outputs, int axis);
+
+        Args:
+            ctx: Compilation context
+            node: Node to generate call for
+            inputs_need_reload: Map of input_name -> ReloadPoint
+            outputs_need_temp: Map of output_name -> SpillPoint
+
+        Returns:
+            C code for the split call (may be multi-line)
+        """
+        num_outputs = len(node.outputs)
+        axis = node.attrs.get("axis", 0)
+        input_var = ctx.tensor_symbols.get(node.inputs[0], node.inputs[0])
+
+        # Create static array of output pointers
+        array_name = f"{ctx.node_symbols.get(node.name, node.name)}_outputs"
+        output_ptrs = []
+
+        for output_name in node.outputs:
+            var_name = ctx.tensor_symbols.get(output_name, output_name)
+            if output_name in outputs_need_temp:
+                # Use temp tensor
+                temp_name = f"temp_{var_name}"
+                output_ptrs.append(f"&{temp_name}")
+            else:
+                # Use original tensor
+                output_ptrs.append(f"&{var_name}")
+
+        # Generate the array declaration and call
+        array_decl = f"static Tensor* {array_name}[{num_outputs}] = {{{', '.join(output_ptrs)}}};"
+        input_arg = f"&{input_var}"
+
+        if node.inputs[0] in inputs_need_reload:
+            temp_name = f"temp_{input_var}"
+            input_arg = f"&{temp_name}"
+
+        call = f"nnc_split({input_arg}, {array_name}, {num_outputs}, {axis});"
+
+        # Return multi-line string with array decl and call
+        return f"{array_decl}\n    {call}"
+
+    def _generate_attr_as_input_op_call(
+        self,
+        ctx: CompileContext,
+        node: Node,
+        inputs_need_reload: dict[str, Union["ReloadPoint", "SpillPoint"]],
+        outputs_need_temp: dict[str, Union["ReloadPoint", "SpillPoint"]],
+    ) -> str:
+        """Generate operator call for ops where attributes became inputs (after onnxsim).
+
+        This handles REDUCE_SUM, REDUCE_MEAN, UNSQUEEZE, TRANSPOSE, TILE
+        where ONNX opset 13+ converted some attributes to inputs.
+
+        Args:
+            ctx: Compilation context
+            node: Node to generate call for
+            inputs_need_reload: Map of input_name -> ReloadPoint
+            outputs_need_temp: Map of output_name -> SpillPoint
+
+        Returns:
+            C code for the operator call (may be multi-line)
+        """
+        op_type = node.op_type
+
+        # Get input tensor (first input is always the data input)
+        input_name = node.inputs[0]
+        input_var = ctx.tensor_symbols.get(input_name, input_name)
+        if input_name in inputs_need_reload:
+            input_arg = f"&temp_{input_var}"
+        else:
+            input_arg = f"&{input_var}"
+
+        # Get output tensor
+        output_var = ctx.tensor_symbols.get(node.outputs[0], node.outputs[0])
+        if node.outputs[0] in outputs_need_temp:
+            output_arg = f"&temp_{output_var}"
+        else:
+            output_arg = f"&{output_var}"
+
+        if op_type == OpType.REDUCE_SUM:
+            # nnc_reducesum(Tensor* input, Tensor* output, int axis, int keepdims)
+            # axis may be from attributes or from second input
+            axis_val = node.attrs.get("axes", node.attrs.get("axis", None))
+            if axis_val is None and len(node.inputs) > 1:
+                # axis is from second input (constant)
+                axis_input = node.inputs[1]
+                if axis_input in ctx.graph.constants:
+                    axis_val = ctx.graph.constants[axis_input]
+                    if isinstance(axis_val, list):
+                        axis_val = axis_val[0] if len(axis_val) > 0 else -1
+                    elif hasattr(axis_val, 'item'):
+                        axis_val = axis_val.item()
+            if axis_val is None:
+                axis_val = -1
+            if isinstance(axis_val, list):
+                axis_val = axis_val[0] if len(axis_val) > 0 else -1
+            keepdims = node.attrs.get("keepdims", 1)
+            return f"nnc_reducesum({input_arg}, {output_arg}, {axis_val}, {keepdims});"
+
+        elif op_type == OpType.REDUCE_MEAN:
+            # nnc_reducemean(Tensor* input, Tensor* output, int axis, int keepdims)
+            axis_val = node.attrs.get("axes", node.attrs.get("axis", None))
+            if axis_val is None and len(node.inputs) > 1:
+                # axis is from second input (constant)
+                axis_input = node.inputs[1]
+                if axis_input in ctx.graph.constants:
+                    axis_val = ctx.graph.constants[axis_input]
+                    if isinstance(axis_val, list):
+                        axis_val = axis_val[0] if len(axis_val) > 0 else -1
+                    elif hasattr(axis_val, 'item'):
+                        axis_val = axis_val.item()
+            if axis_val is None:
+                axis_val = -1
+            if isinstance(axis_val, list):
+                axis_val = axis_val[0] if len(axis_val) > 0 else -1
+            keepdims = node.attrs.get("keepdims", 1)
+            return f"nnc_reducemean({input_arg}, {output_arg}, {axis_val}, {keepdims});"
+
+        elif op_type == OpType.UNSQUEEZE:
+            # nnc_unsqueeze(Tensor* input, Tensor* output, int axis)
+            # axes may be from attributes or from second input
+            axis_val = node.attrs.get("axes", None)
+            if axis_val is None and len(node.inputs) > 1:
+                # axes is from second input (constant)
+                axes_input = node.inputs[1]
+                if axes_input in ctx.graph.constants:
+                    axes_val = ctx.graph.constants[axes_input]
+                    if isinstance(axes_val, list):
+                        axis_val = axes_val[0] if len(axes_val) > 0 else -1
+                    elif hasattr(axes_val, 'item'):
+                        axis_val = axes_val.item()
+                    else:
+                        axis_val = axes_val
+            if axis_val is None:
+                axis_val = -1
+            if isinstance(axis_val, list):
+                axis_val = axis_val[0] if len(axis_val) > 0 else -1
+            return f"nnc_unsqueeze({input_arg}, {output_arg}, {axis_val});"
+
+        elif op_type == OpType.RESHAPE:
+            # nnc_reshape(Tensor* input, Tensor* output, int64_t* shape, int ndim)
+            # shape may be from attributes or from second input
+            shape = node.attrs.get("shape", None)
+            if shape is None and len(node.inputs) > 1:
+                # shape is from second input (constant)
+                shape_input = node.inputs[1]
+                if shape_input in ctx.graph.constants:
+                    shape = ctx.graph.constants[shape_input]
+                    if hasattr(shape, 'tolist'):
+                        shape = shape.tolist()
+                    elif not isinstance(shape, list):
+                        shape = [shape]
+            if shape is None:
+                shape = []
+            ndim = len(shape)
+            shape_name = f"{ctx.node_symbols.get(node.name, node.name)}_shape"
+            shape_decl = f"static const int64_t {shape_name}[] = {{{', '.join(map(str, shape))}}};"
+            return f"{shape_decl}\n    nnc_reshape({input_arg}, {output_arg}, (int64_t*){shape_name}, {ndim});"
+
+        elif op_type == OpType.TRANSPOSE:
+            # nnc_transpose(Tensor* input, Tensor* output, int64_t* perm, int ndim)
+            # perm may be from attributes or from second input
+            perm = node.attrs.get("perm", None)
+            if perm is None and len(node.inputs) > 1:
+                # perm is from second input (constant)
+                perm_input = node.inputs[1]
+                if perm_input in ctx.graph.constants:
+                    perm = ctx.graph.constants[perm_input].tolist()
+            if perm is None:
+                perm = []
+            ndim = len(perm)
+            perm_name = f"{ctx.node_symbols.get(node.name, node.name)}_perm"
+            perm_decl = f"static const int64_t {perm_name}[] = {{{', '.join(map(str, perm))}}};"
+            return f"{perm_decl}\n    nnc_transpose({input_arg}, {output_arg}, (int64_t*){perm_name}, {ndim});"
+
+        elif op_type == OpType.TILE:
+            # nnc_tile(Tensor* input, Tensor* output, int64_t* repeats, int ndim)
+            # repeats is from second input (constant)
+            if len(node.inputs) > 1:
+                repeats_input = node.inputs[1]
+                if repeats_input in ctx.graph.constants:
+                    repeats = ctx.graph.constants[repeats_input]
+                    if isinstance(repeats, list):
+                        repeats_list = repeats
+                    elif hasattr(repeats, 'tolist'):
+                        repeats_list = repeats.tolist()
+                    else:
+                        repeats_list = [repeats]
+                    ndim = len(repeats_list)
+                    repeats_name = f"{ctx.node_symbols.get(node.name, node.name)}_repeats"
+                    repeats_decl = f"static const int64_t {repeats_name}[] = {{{', '.join(map(str, repeats_list))}}};"
+                    return f"{repeats_decl}\n    nnc_tile({input_arg}, {output_arg}, (int64_t*){repeats_name}, {ndim});"
+            # Fallback
+            return f"nnc_tile({input_arg}, {output_arg}, NULL, 0);"
+
+        elif op_type == OpType.POW:
+            # nnc_pow(Tensor* input, Tensor* output) - computes x^2
+            # ONNX Pow has two inputs (base, exponent), but nnc_pow only has input (implicitly x^2)
+            # We only use the first input (base) and ignore the exponent
+            return f"nnc_pow({input_arg}, {output_arg});"
+
+        elif op_type == OpType.CLIP:
+            # nnc_clip(Tensor* input, Tensor* output, float min_val, float max_val)
+            # Clip may have min/max as inputs (after onnx opset 11) or as attributes
+            min_val = node.attrs.get("min", None)
+            max_val = node.attrs.get("max", None)
+
+            # Try to get min from inputs (3rd input in ONNX opset 11+)
+            if min_val is None and len(node.inputs) >= 2:
+                min_input = node.inputs[1]
+                if min_input in ctx.graph.constants:
+                    min_val = ctx.graph.constants[min_input]
+                    if hasattr(min_val, 'item'):
+                        min_val = min_val.item()
+
+            # Try to get max from inputs (4th input in ONNX opset 11+)
+            if max_val is None and len(node.inputs) >= 3:
+                max_input = node.inputs[2] if len(node.inputs) > 2 else node.inputs[-1]
+                if max_input in ctx.graph.constants:
+                    max_val = ctx.graph.constants[max_input]
+                    if hasattr(max_val, 'item'):
+                        max_val = max_val.item()
+
+            if min_val is None:
+                min_str = "-1e30f"
+            else:
+                min_str = f"{float(min_val)}f"
+
+            if max_val is None:
+                max_str = "1e30f"
+            else:
+                max_str = f"{float(max_val)}f"
+
+            return f"nnc_clip({input_arg}, {output_arg}, {min_str}, {max_str});"
+
+        return f"/* Unknown operator {op_type} */"
 
     def _generate_header(self, ctx: CompileContext) -> str:
         """Generate header file."""

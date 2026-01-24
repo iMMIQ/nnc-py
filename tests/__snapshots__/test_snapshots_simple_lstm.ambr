@@ -17,16 +17,6 @@
   extern Tensor tensor_embedding_Add_output_0;
   extern Tensor tensor_Relu_output_0;
   extern Tensor tensor_lstm_Transpose_output_0;
-  extern Tensor tensor_lstm_Shape_output_0;
-  extern Tensor tensor_lstm_Gather_output_0;
-  extern Tensor tensor_onnx_Concat_81;
-  extern Tensor tensor_lstm_Concat_output_0;
-  extern Tensor tensor_lstm_Expand_output_0;
-  extern Tensor tensor_lstm_Shape_1_output_0;
-  extern Tensor tensor_lstm_Gather_1_output_0;
-  extern Tensor tensor_onnx_Concat_92;
-  extern Tensor tensor_lstm_Concat_1_output_0;
-  extern Tensor tensor_lstm_Expand_1_output_0;
   extern Tensor tensor_lstm_LSTM_output_0;
   extern Tensor tensor_lstm_LSTM_output_1;
   extern Tensor tensor_lstm_LSTM_output_2;
@@ -42,16 +32,8 @@
   extern Tensor tensor_onnx_LSTM_125;
   extern Tensor tensor_onnx_LSTM_126;
   extern Tensor tensor_onnx_LSTM_127;
-  extern Tensor tensor_lstm_Constant_output_0;
-  extern Tensor tensor_lstm_Constant_1_output_0;
-  extern Tensor tensor_onnx_Unsqueeze_80;
-  extern Tensor tensor_lstm_Constant_2_output_0;
-  extern Tensor tensor_onnx_Concat_128;
-  extern Tensor tensor_lstm_Constant_3_output_0;
-  extern Tensor tensor_onnx_Unsqueeze_91;
-  extern Tensor tensor_lstm_Constant_4_output_0;
-  extern Tensor tensor_onnx_Concat_129;
   extern Tensor tensor_Constant_output_0;
+  extern Tensor tensor_lstm_Expand_output_0;
   
   /* MatMul: /embedding/MatMul */
   void node_embedding_MatMul(void) {
@@ -72,68 +54,6 @@
   void node_lstm_Transpose(void) {
       static const int64_t node_lstm_Transpose_perm[] = {1, 0, 2};
       nnc_transpose(&tensor_Relu_output_0, &tensor_lstm_Transpose_output_0, (int64_t*)node_lstm_Transpose_perm, 3);
-  }
-  
-  /* Shape: /lstm/Shape */
-  void node_lstm_Shape(void) {
-      static const int64_t tensor_lstm_Shape_output_0_data[] = {16, 1, 64};
-      nnc_shape(&tensor_lstm_Transpose_output_0, &tensor_lstm_Shape_output_0, (int64_t*)tensor_lstm_Shape_output_0_data, 3);
-  }
-  
-  /* Shape: /lstm/Shape_1 */
-  void node_lstm_Shape_1(void) {
-      static const int64_t tensor_lstm_Shape_1_output_0_data[] = {16, 1, 64};
-      nnc_shape(&tensor_lstm_Transpose_output_0, &tensor_lstm_Shape_1_output_0, (int64_t*)tensor_lstm_Shape_1_output_0_data, 3);
-  }
-  
-  /* Gather: /lstm/Gather */
-  void node_lstm_Gather(void) {
-      nnc_gather(&tensor_lstm_Shape_output_0, &tensor_lstm_Constant_1_output_0, &tensor_lstm_Gather_output_0, 0, 1);
-  }
-  
-  /* Gather: /lstm/Gather_1 */
-  void node_lstm_Gather_1(void) {
-      nnc_gather(&tensor_lstm_Shape_1_output_0, &tensor_lstm_Constant_3_output_0, &tensor_lstm_Gather_1_output_0, 0, 1);
-  }
-  
-  /* Unsqueeze: Unsqueeze_19 */
-  void node_Unsqueeze_19(void) {
-      nnc_unsqueeze(&tensor_lstm_Gather_output_0, &tensor_onnx_Concat_81, 0);
-  }
-  
-  /* Unsqueeze: Unsqueeze_28 */
-  void node_Unsqueeze_28(void) {
-      nnc_unsqueeze(&tensor_lstm_Gather_1_output_0, &tensor_onnx_Concat_92, 0);
-  }
-  
-  /* Concat: /lstm/Concat */
-  void node_lstm_Concat(void) {
-      static Tensor* node_lstm_Concat_inputs[3] = {
-          &tensor_onnx_Concat_128,
-          &tensor_onnx_Concat_81,
-          &tensor_lstm_Constant_2_output_0,
-      };
-      nnc_concat(node_lstm_Concat_inputs, &tensor_lstm_Concat_output_0, 3, 0);
-  }
-  
-  /* Concat: /lstm/Concat_1 */
-  void node_lstm_Concat_1(void) {
-      static Tensor* node_lstm_Concat_1_inputs[3] = {
-          &tensor_onnx_Concat_129,
-          &tensor_onnx_Concat_92,
-          &tensor_lstm_Constant_4_output_0,
-      };
-      nnc_concat(node_lstm_Concat_1_inputs, &tensor_lstm_Concat_1_output_0, 3, 0);
-  }
-  
-  /* Expand: /lstm/Expand */
-  void node_lstm_Expand(void) {
-      nnc_expand(&tensor_lstm_Constant_output_0, &tensor_lstm_Expand_output_0, NULL, 3);
-  }
-  
-  /* Expand: /lstm/Expand_1 */
-  void node_lstm_Expand_1(void) {
-      nnc_expand(&tensor_lstm_Constant_output_0, &tensor_lstm_Expand_1_output_0, NULL, 3);
   }
   
   /* LSTM: /lstm/LSTM */
@@ -167,16 +87,6 @@
       node_embedding_Add();
       node_Relu();
       node_lstm_Transpose();
-      node_lstm_Shape();
-      node_lstm_Shape_1();
-      node_lstm_Gather();
-      node_lstm_Gather_1();
-      node_Unsqueeze_19();
-      node_Unsqueeze_28();
-      node_lstm_Concat();
-      node_lstm_Concat_1();
-      node_lstm_Expand();
-      node_lstm_Expand_1();
       node_lstm_LSTM();
       node_Gather();
       node_classifier_classifier_0_Gemm();
@@ -201,16 +111,6 @@
   extern Tensor tensor_embedding_Add_output_0;
   extern Tensor tensor_Relu_output_0;
   extern Tensor tensor_lstm_Transpose_output_0;
-  extern Tensor tensor_lstm_Shape_output_0;
-  extern Tensor tensor_lstm_Gather_output_0;
-  extern Tensor tensor_onnx_Concat_81;
-  extern Tensor tensor_lstm_Concat_output_0;
-  extern Tensor tensor_lstm_Expand_output_0;
-  extern Tensor tensor_lstm_Shape_1_output_0;
-  extern Tensor tensor_lstm_Gather_1_output_0;
-  extern Tensor tensor_onnx_Concat_92;
-  extern Tensor tensor_lstm_Concat_1_output_0;
-  extern Tensor tensor_lstm_Expand_1_output_0;
   extern Tensor tensor_lstm_LSTM_output_0;
   extern Tensor tensor_lstm_LSTM_output_1;
   extern Tensor tensor_lstm_LSTM_output_2;
@@ -226,24 +126,8 @@
   extern Tensor tensor_onnx_LSTM_125;
   extern Tensor tensor_onnx_LSTM_126;
   extern Tensor tensor_onnx_LSTM_127;
-  extern Tensor tensor_lstm_Constant_output_0;
-  extern Tensor tensor_lstm_Constant_1_output_0;
-  extern Tensor tensor_onnx_Unsqueeze_80;
-  extern Tensor tensor_lstm_Constant_2_output_0;
-  extern Tensor tensor_onnx_Concat_128;
-  extern Tensor tensor_lstm_Constant_3_output_0;
-  extern Tensor tensor_onnx_Unsqueeze_91;
-  extern Tensor tensor_lstm_Constant_4_output_0;
-  extern Tensor tensor_onnx_Concat_129;
   extern Tensor tensor_Constant_output_0;
-  extern const int64_t tensor_lstm_Constant_1_output_0_data[1];
-  extern const int64_t tensor_onnx_Unsqueeze_80_data[1];
-  extern const int64_t tensor_lstm_Constant_2_output_0_data[1];
-  extern const int64_t tensor_onnx_Concat_128_data[1];
-  extern const int64_t tensor_lstm_Constant_3_output_0_data[1];
-  extern const int64_t tensor_onnx_Unsqueeze_91_data[1];
-  extern const int64_t tensor_lstm_Constant_4_output_0_data[1];
-  extern const int64_t tensor_onnx_Concat_129_data[1];
+  extern Tensor tensor_lstm_Expand_output_0;
   extern const int64_t tensor_Constant_output_0_data[1];
   
   /* Constants loading function */
@@ -327,106 +211,6 @@
       .nbytes = <SIZE>,
   };
   
-  /* Tensor: /lstm/Shape_output_0 */
-  static int64_t tensor_lstm_Shape_output_0_shape[] = {3};
-  Tensor tensor_lstm_Shape_output_0 = {
-      .data = _nnc_memory_pool + <OFFSET>,
-      .dtype = NNC_DTYPE_INT64,
-      .shape = tensor_lstm_Shape_output_0_shape,
-      .ndim = 1,
-      .nbytes = <SIZE>,
-  };
-  
-  /* Tensor: /lstm/Gather_output_0 */
-  static int64_t tensor_lstm_Gather_output_0_shape[] = {};
-  Tensor tensor_lstm_Gather_output_0 = {
-      .data = _nnc_memory_pool + <OFFSET>,
-      .dtype = NNC_DTYPE_INT64,
-      .shape = tensor_lstm_Gather_output_0_shape,
-      .ndim = 0,
-      .nbytes = <SIZE>,
-  };
-  
-  /* Tensor: onnx::Concat_81 */
-  static int64_t tensor_onnx_Concat_81_shape[] = {1};
-  Tensor tensor_onnx_Concat_81 = {
-      .data = _nnc_memory_pool + <OFFSET>,
-      .dtype = NNC_DTYPE_INT64,
-      .shape = tensor_onnx_Concat_81_shape,
-      .ndim = 1,
-      .nbytes = <SIZE>,
-  };
-  
-  /* Tensor: /lstm/Concat_output_0 */
-  static int64_t tensor_lstm_Concat_output_0_shape[] = {3};
-  Tensor tensor_lstm_Concat_output_0 = {
-      .data = _nnc_memory_pool + <OFFSET>,
-      .dtype = NNC_DTYPE_INT64,
-      .shape = tensor_lstm_Concat_output_0_shape,
-      .ndim = 1,
-      .nbytes = <SIZE>,
-  };
-  
-  /* Tensor: /lstm/Expand_output_0 */
-  static int64_t tensor_lstm_Expand_output_0_shape[] = {1, 1, 64};
-  Tensor tensor_lstm_Expand_output_0 = {
-      .data = _nnc_memory_pool + <OFFSET>,
-      .dtype = NNC_DTYPE_FLOAT32,
-      .shape = tensor_lstm_Expand_output_0_shape,
-      .ndim = 3,
-      .nbytes = <SIZE>,
-  };
-  
-  /* Tensor: /lstm/Shape_1_output_0 */
-  static int64_t tensor_lstm_Shape_1_output_0_shape[] = {3};
-  Tensor tensor_lstm_Shape_1_output_0 = {
-      .data = _nnc_memory_pool + <OFFSET>,
-      .dtype = NNC_DTYPE_INT64,
-      .shape = tensor_lstm_Shape_1_output_0_shape,
-      .ndim = 1,
-      .nbytes = <SIZE>,
-  };
-  
-  /* Tensor: /lstm/Gather_1_output_0 */
-  static int64_t tensor_lstm_Gather_1_output_0_shape[] = {};
-  Tensor tensor_lstm_Gather_1_output_0 = {
-      .data = _nnc_memory_pool + <OFFSET>,
-      .dtype = NNC_DTYPE_INT64,
-      .shape = tensor_lstm_Gather_1_output_0_shape,
-      .ndim = 0,
-      .nbytes = <SIZE>,
-  };
-  
-  /* Tensor: onnx::Concat_92 */
-  static int64_t tensor_onnx_Concat_92_shape[] = {1};
-  Tensor tensor_onnx_Concat_92 = {
-      .data = _nnc_memory_pool + <OFFSET>,
-      .dtype = NNC_DTYPE_INT64,
-      .shape = tensor_onnx_Concat_92_shape,
-      .ndim = 1,
-      .nbytes = <SIZE>,
-  };
-  
-  /* Tensor: /lstm/Concat_1_output_0 */
-  static int64_t tensor_lstm_Concat_1_output_0_shape[] = {3};
-  Tensor tensor_lstm_Concat_1_output_0 = {
-      .data = _nnc_memory_pool + <OFFSET>,
-      .dtype = NNC_DTYPE_INT64,
-      .shape = tensor_lstm_Concat_1_output_0_shape,
-      .ndim = 1,
-      .nbytes = <SIZE>,
-  };
-  
-  /* Tensor: /lstm/Expand_1_output_0 */
-  static int64_t tensor_lstm_Expand_1_output_0_shape[] = {1, 1, 64};
-  Tensor tensor_lstm_Expand_1_output_0 = {
-      .data = _nnc_memory_pool + <OFFSET>,
-      .dtype = NNC_DTYPE_FLOAT32,
-      .shape = tensor_lstm_Expand_1_output_0_shape,
-      .ndim = 3,
-      .nbytes = <SIZE>,
-  };
-  
   /* Tensor: /lstm/LSTM_output_0 */
   static int64_t tensor_lstm_LSTM_output_0_shape[] = {16, 1, 1, 64};
   Tensor tensor_lstm_LSTM_output_0 = {
@@ -492,6 +276,6 @@
 # ---
 # name: TestIRSnapshots.test_simple_lstm_ir_snapshot
   GraphSnapshotWrapper(
-    graph=Graph(name=main_graph, nodes=19, inputs=1, outputs=1),
+    graph=Graph(name=main_graph, nodes=9, inputs=1, outputs=1),
   )
 # ---
