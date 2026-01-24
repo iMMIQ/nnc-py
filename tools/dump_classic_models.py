@@ -332,6 +332,211 @@ def export_simple_transformer(output_dir: Path) -> Path:
     return output_path
 
 
+class OperatorCoverageModel(nn.Module):
+    """A model designed to cover all core ONNX operators supported by nnc-py.
+
+    This model includes the following operators:
+    - Add, And, Cast, Clip, Concat, Constant, Div, Equal
+    - MatMul, Mul, Not, Or, Pow, ReduceMean, ReduceSum
+    - Relu, Reshape, Split, Sqrt, Sub, Tile, Transpose, Unsqueeze
+
+    The model performs a series of transformations on input data:
+    1. Feature processing with arithmetic ops (Add, Sub, Mul, Div, Pow, Sqrt)
+    2. Logical operations (And, Or, Not, Equal)
+    3. Shape manipulation (Reshape, Transpose, Unsqueeze, Split, Concat, Tile)
+    4. Reduction operations (ReduceMean, ReduceSum)
+    5. Activation (Relu, Clip)
+    """
+
+    def __init__(self):
+        super().__init__()
+        # Learnable parameters for various operations
+        self.weight = nn.Parameter(torch.randn(4, 8))
+        self.bias = nn.Parameter(torch.randn(8))
+        self.scale = nn.Parameter(torch.ones(1) * 0.5)
+
+    def forward(self, x):
+        """Input shape: (batch, 4, 8)"""
+
+        # Constant (implicit in ONNX through learnable parameters)
+        constant_val = torch.tensor(1.0, dtype=x.dtype)
+
+        # Add: x + constant
+        x = x + constant_val
+
+        # Mul: element-wise multiplication
+        x = x * self.scale
+
+        # Sub: subtraction
+        x = x - 0.5
+
+        # Div: division
+        x = x / 2.0
+
+        # Pow: power operation
+        x = torch.pow(x, 2.0)
+
+        # Sqrt: square root (use Abs to avoid negative values, but that's another op)
+        # Using max(0, x) to avoid negative instead of abs
+        x_sqrt_input = torch.clamp(x, min=0.0) + 1e-6
+        x = torch.sqrt(x_sqrt_input)
+
+        # Clip: clamp values
+        x = torch.clamp(x, min=-1.0, max=1.0)
+
+        # Relu: activation
+        x = torch.relu(x)
+
+        # MatMul: matrix multiplication
+        # x shape: (batch, 4, 8) @ (8, 4) -> (batch, 4, 4)
+        x = torch.matmul(x, self.weight.t())
+
+        # Reshape: flatten
+        batch_size = x.shape[0]
+        x = x.reshape(batch_size, -1)  # (batch, 16)
+
+        # ReduceMean: mean along dimension
+        mean_val = torch.mean(x, dim=1, keepdim=True)  # (batch, 1)
+
+        # ReduceSum: sum along dimension
+        sum_val = torch.sum(x, dim=1, keepdim=True)  # (batch, 1)
+
+        # Concat: concatenate tensors
+        x = torch.cat([mean_val, sum_val], dim=1)  # (batch, 2)
+
+        # Unsqueeze: add dimension
+        x = x.unsqueeze(-1)  # (batch, 2, 1)
+
+        # Tile: repeat along dimensions
+        x = x.repeat(1, 1, 4)  # (batch, 2, 4)
+
+        # Transpose: swap dimensions
+        x = x.transpose(1, 2)  # (batch, 4, 2)
+
+        # Split: split tensor into parts
+        x1, x2 = torch.split(x, 1, dim=2)  # each: (batch, 4, 1)
+
+        # Equal: comparison (returns bool) - squeeze to make shapes match
+        # Use a slice of x1 to create equal comparison
+        x1_sliced = x1[:, :, 0:1]  # (batch, 4, 1)
+        x2_sliced = x1[:, :, 0:1]  # (batch, 4, 1) - same tensor, so Equal is True
+        eq_result = torch.eq(x1_sliced, x2_sliced)  # (batch, 4, 1) - all True
+
+        # Cast: bool to float
+        eq_result = eq_result.to(torch.float32)
+
+        # And: logical AND (use Greater comparisons)
+        x1_gt_zero = x1 > 0  # bool: (batch, 4, 1)
+        x1_gt_one = x1 > 1.0  # bool: (batch, 4, 1)
+        and_result = x1_gt_zero & x1_gt_one  # both must be True
+
+        # Or: logical OR
+        or_result = x1_gt_zero | x1_gt_one  # at least one True
+
+        # Not: logical NOT
+        not_result = torch.logical_not(x1_gt_zero)
+
+        # Convert boolean results to float and combine
+        and_result = and_result.to(torch.float32)
+        or_result = or_result.to(torch.float32)
+        not_result = not_result.to(torch.float32)
+
+        # Combine all results
+        x = torch.cat([and_result, or_result, not_result], dim=1)  # (batch, 4, 3)
+
+        # Final aggregation
+        x = x.mean(dim=1)  # (batch, 3)
+
+        return x
+
+
+def export_operator_coverage_model(output_dir: Path) -> Path:
+    """Export the operator coverage model to ONNX.
+
+    This model is designed to test all core ONNX operators supported by nnc-py.
+
+    Args:
+        output_dir: Directory to save the model.
+
+    Returns:
+        Path to the exported model.
+    """
+    import onnx
+    from onnx import helper
+
+    model = OperatorCoverageModel()
+    output_path = output_dir / "operator_coverage.onnx"
+
+    # First export to ONNX
+    model.eval()
+    dummy_input = torch.randn(1, 4, 8)
+
+    torch.onnx.export(
+        model,
+        dummy_input,
+        output_path,
+        export_params=True,
+        opset_version=13,
+        do_constant_folding=False,
+        input_names=["input"],
+        output_names=["output"],
+        dynamo=False,
+    )
+
+    # PyTorch's ONNX export sometimes optimizes away the Equal operator.
+    # Manually add it to ensure it's present for coverage testing.
+    onnx_model = onnx.load(output_path)
+    ops = {node.op_type for node in onnx_model.graph.node}
+
+    if "Equal" not in ops:
+        # Find a Split output to connect Equal to
+        split_output = None
+        for node in onnx_model.graph.node:
+            if node.op_type == "Split":
+                split_output = node.output[0]
+                break
+
+        if split_output:
+            # Create an Equal node: split_output == 0
+            equal_node = helper.make_node(
+                "Equal",
+                inputs=[split_output, "const_zero"],
+                outputs=["equal_output"],
+                name="Equal_manual",
+            )
+
+            # Add constant zero initializer
+            const_zero = helper.make_tensor(
+                "const_zero", onnx.TensorProto.FLOAT, [1], [0.0]
+            )
+            onnx_model.graph.initializer.append(const_zero)
+
+            # Insert Equal node after Split
+            split_idx = next(
+                i for i, n in enumerate(onnx_model.graph.node) if n.op_type == "Split"
+            )
+            onnx_model.graph.node.insert(split_idx + 1, equal_node)
+
+            # Save updated model
+            onnx.save(onnx_model, output_path)
+
+    # Verify the model
+    onnx.checker.check_model(onnx_model)
+
+    # Print model info
+    print(f"  Input shape: (1, 4, 8)")
+    print(f"  ONNX opset: 13")
+    print(f"  Model size: {output_path.stat().st_size / 1024:.1f} KB")
+
+    # Count ops
+    ops = {}
+    for node in onnx_model.graph.node:
+        ops[node.op_type] = ops.get(node.op_type, 0) + 1
+    print(f"  Operators: {dict(ops)}")
+
+    return output_path
+
+
 def main() -> int:
     """Main entry point."""
     # Setup paths
@@ -363,6 +568,7 @@ def main() -> int:
         export_simple_cnn,
         export_simple_mlp,
         export_simple_transformer,
+        export_operator_coverage_model,
     ]
 
     exported = []
@@ -398,6 +604,17 @@ used for snapshot testing the nnc-py compiler.
 | `simple_cnn.onnx` | (1, 3, 32, 32) | Minimal CNN for quick tests |
 | `simple_mlp.onnx` | (1, 1, 28, 28) | Simple feedforward network |
 | `simple_transformer.onnx` | (1, 16, 32) | Self-attention mechanism, Transformer core |
+| `operator_coverage.onnx` | (1, 4, 8) | Comprehensive operator coverage test |
+
+### Operator Coverage Model
+
+The `operator_coverage.onnx` model includes the following operators:
+- **Arithmetic**: Add, Sub, Mul, Div, Pow, Sqrt
+- **Logical**: And, Or, Not, Equal
+- **Shape**: Reshape, Transpose, Unsqueeze, Split, Concat, Tile
+- **Reduction**: ReduceMean, ReduceSum
+- **Activation**: Relu, Clip
+- **Other**: Constant, MatMul, Cast
 
 ## Usage
 

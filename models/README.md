@@ -12,6 +12,17 @@ used for snapshot testing the nnc-py compiler.
 | `simple_cnn.onnx` | (1, 3, 32, 32) | Minimal CNN for quick tests |
 | `simple_mlp.onnx` | (1, 1, 28, 28) | Simple feedforward network |
 | `simple_transformer.onnx` | (1, 16, 32) | Self-attention mechanism, Transformer core |
+| `operator_coverage.onnx` | (1, 4, 8) | Comprehensive operator coverage test |
+
+### Operator Coverage Model
+
+The `operator_coverage.onnx` model includes the following operators:
+- **Arithmetic**: Add, Sub, Mul, Div, Pow, Sqrt
+- **Logical**: And, Or, Not, Equal
+- **Shape**: Reshape, Transpose, Unsqueeze, Split, Concat, Tile
+- **Reduction**: ReduceMean, ReduceSum
+- **Activation**: Relu, Clip
+- **Other**: Constant, MatMul, Cast
 
 ## Usage
 
