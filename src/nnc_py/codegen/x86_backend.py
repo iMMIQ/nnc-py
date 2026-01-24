@@ -348,13 +348,16 @@ class X86Backend(BackendBase):
                 alloc = plan.tensor_allocations.get(input_name)
                 if alloc and alloc.is_spilled:
                     # Input is spilled but no reload point - create a synthetic one
+                    # Look up the correct slow offset from existing reload points
+                    existing_reload = next((rp for rp in plan.reload_points if rp.tensor_name == input_name), None)
+                    slow_offset = existing_reload.from_slow_offset if existing_reload else 0
                     from nnc_py.passes.memory_strategy import ReloadPoint
                     additional_inputs.append((input_name, alloc))
                     inputs_need_reload[input_name] = ReloadPoint(
                         tensor_name=input_name,
                         before_node=node.name,
                         before_node_idx=node_idx,
-                        from_slow_offset=alloc.offset,
+                        from_slow_offset=slow_offset,
                         to_buffer_id=alloc.buffer_id,
                         to_fast_offset=0,
                         size=alloc.size,
@@ -382,6 +385,9 @@ class X86Backend(BackendBase):
                         outputs_need_temp[output_name] = sp
                     else:
                         # Create a synthetic spill point for temp allocation
+                        # Look up the correct slow offset from existing spill points
+                        existing_spill = next((sp for sp in plan.spill_points if sp.tensor_name == output_name), None)
+                        slow_offset = existing_spill.to_slow_offset if existing_spill else 0
                         from nnc_py.passes.memory_strategy import SpillPoint
                         outputs_need_temp[output_name] = SpillPoint(
                             tensor_name=output_name,
@@ -389,7 +395,7 @@ class X86Backend(BackendBase):
                             after_node_idx=node_idx,
                             from_buffer_id=alloc.buffer_id,
                             from_fast_offset=0,
-                            to_slow_offset=alloc.offset,
+                            to_slow_offset=slow_offset,
                             size=alloc.size,
                         )
 

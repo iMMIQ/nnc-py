@@ -1273,15 +1273,45 @@ void nnc_equal(Tensor* a, Tensor* b, Tensor* out) {
 
 void nnc_and(Tensor* a, Tensor* b, Tensor* out) {
     /* Logical AND operation
-     * Inputs and output are uint8_t (BOOL type)
+     * Inputs are float (non-zero = true), output is float (1.0 = true, 0.0 = false)
      */
     int64_t n = tensor_numel(out);
-    const uint8_t* a_data = (uint8_t*)a->data;
-    const uint8_t* b_data = (uint8_t*)b->data;
-    uint8_t* out_data = (uint8_t*)out->data;
+    int64_t a_n = tensor_numel(a);
+    int64_t b_n = tensor_numel(b);
 
-    for (int64_t i = 0; i < n; i++) {
-        out_data[i] = (a_data[i] && b_data[i]) ? 1 : 0;
+    const float* a_data = (float*)a->data;
+    const float* b_data = (float*)b->data;
+    float* out_data = (float*)out->data;
+
+    /* Handle broadcasting */
+    int64_t and_n = n;
+    if (a_n < and_n) and_n = a_n;
+    if (b_n < and_n) and_n = b_n;
+
+    /* Compute AND for overlapping region */
+    for (int64_t i = 0; i < and_n; i++) {
+        out_data[i] = (a_data[i] != 0.0f && b_data[i] != 0.0f) ? 1.0f : 0.0f;
+    }
+
+    /* Handle broadcast: if one input is smaller, broadcast its value */
+    if (a_n == 1 && b_n == n) {
+        for (int64_t i = and_n; i < n; i++) {
+            out_data[i] = (a_data[0] != 0.0f && b_data[i] != 0.0f) ? 1.0f : 0.0f;
+        }
+    } else if (a_n == n && b_n == 1) {
+        for (int64_t i = and_n; i < n; i++) {
+            out_data[i] = (a_data[i] != 0.0f && b_data[0] != 0.0f) ? 1.0f : 0.0f;
+        }
+    } else if (a_n < n && b_n == n) {
+        /* Broadcast a (e.g., [2] to [2, 2]) */
+        for (int64_t i = and_n; i < n; i++) {
+            out_data[i] = (a_data[i % a_n] != 0.0f && b_data[i] != 0.0f) ? 1.0f : 0.0f;
+        }
+    } else if (a_n == n && b_n < n) {
+        /* Broadcast b (e.g., [2] to [2, 2]) */
+        for (int64_t i = and_n; i < n; i++) {
+            out_data[i] = (a_data[i] != 0.0f && b_data[i % b_n] != 0.0f) ? 1.0f : 0.0f;
+        }
     }
 }
 

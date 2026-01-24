@@ -29,32 +29,53 @@
   extern Tensor tensor_ReduceSum_output_0;
   extern Tensor tensor_Concat_1_output_0;
   extern Tensor tensor_Unsqueeze_2_output_0;
+  extern Tensor tensor_Expand_output_0;
   extern Tensor tensor_Tile_output_0;
   extern Tensor tensor_Transpose_1_output_0;
   extern Tensor tensor_Split_output_0;
   extern Tensor tensor_Split_output_1;
+  extern Tensor tensor_equal_output;
   extern Tensor tensor_Greater_output_0;
   extern Tensor tensor_Greater_1_output_0;
   extern Tensor tensor_And_output_0;
   extern Tensor tensor_Cast_4_output_0;
   extern Tensor tensor_Or_output_0;
   extern Tensor tensor_Cast_5_output_0;
+  extern Tensor tensor_Cast_6_output_0;
   extern Tensor tensor_Not_output_0;
   extern Tensor tensor_Cast_7_output_0;
   extern Tensor tensor_Concat_2_output_0;
+  extern Tensor tensor_weight;
   extern Tensor tensor_scale;
   extern Tensor tensor_constant1;
   extern Tensor tensor_constant2;
   extern Tensor tensor_constant3;
+  extern Tensor tensor_const_zero;
+  extern Tensor tensor_Constant_output_0;
+  extern Tensor tensor_Constant_1_output_0;
+  extern Tensor tensor_Cast_output_0;
+  extern Tensor tensor_Cast_1_output_0;
   extern Tensor tensor_Constant_2_output_0;
+  extern Tensor tensor_Constant_3_output_0;
+  extern Tensor tensor_Constant_4_output_0;
+  extern Tensor tensor_Cast_2_output_0;
+  extern Tensor tensor_Cast_3_output_0;
+  extern Tensor tensor_Transpose_output_0;
+  extern Tensor tensor_Constant_5_output_0;
+  extern Tensor tensor_Constant_6_output_0;
+  extern Tensor tensor_onnx_Unsqueeze_30;
+  extern Tensor tensor_Unsqueeze_output_0;
+  extern Tensor tensor_onnx_Unsqueeze_32;
+  extern Tensor tensor_Unsqueeze_1_output_0;
+  extern Tensor tensor_Concat_output_0;
   extern Tensor tensor_onnx_ReduceSum_36;
   extern Tensor tensor_Constant_7_output_0;
   extern Tensor tensor_onnx_Shape_42;
+  extern Tensor tensor_Shape_output_0;
+  extern Tensor tensor_ConstantOfShape_output_0;
   extern Tensor tensor_Constant_8_output_0;
   extern Tensor tensor_Constant_9_output_0;
-  extern Tensor tensor_Cast_2_output_0;
-  extern Tensor tensor_Transpose_output_0;
-  extern Tensor tensor_Concat_output_0;
+  extern Tensor tensor_Constant_10_output_0;
   
   /* Add: /Add */
   void node_Add(void) {
@@ -140,9 +161,14 @@
       nnc_unsqueeze(&tensor_Concat_1_output_0, &tensor_Unsqueeze_2_output_0, 0);
   }
   
+  /* Expand: /Expand */
+  void node_Expand(void) {
+      nnc_expand(&tensor_Unsqueeze_2_output_0, &tensor_Expand_output_0, (int64_t*)tensor_ConstantOfShape_output_0_data, 3);
+  }
+  
   /* Tile: /Tile */
   void node_Tile(void) {
-      nnc_tile(&tensor_Unsqueeze_2_output_0, &tensor_Tile_output_0, (int64_t*)tensor_onnx_Shape_42_data, 3);
+      nnc_tile(&tensor_Expand_output_0, &tensor_Tile_output_0, (int64_t*)tensor_onnx_Shape_42_data, 3);
   }
   
   /* Transpose: /Transpose_1 */
@@ -160,6 +186,11 @@
       nnc_split(&tensor_Transpose_1_output_0, node_Split_outputs, 2, 2);
   }
   
+  /* Equal: Equal_manual */
+  void node_Equal_manual(void) {
+      nnc_equal(&tensor_Split_output_0, &tensor_const_zero, &tensor_equal_output);
+  }
+  
   /* Greater: /Greater */
   void node_Greater(void) {
       nnc_greater(&tensor_Split_output_0, &tensor_Constant_9_output_0, &tensor_Greater_output_0);
@@ -167,12 +198,12 @@
   
   /* Greater: /Greater_1 */
   void node_Greater_1(void) {
-      nnc_greater(&tensor_Split_output_0, &tensor_constant1, &tensor_Greater_1_output_0);
+      nnc_greater(&tensor_Split_output_0, &tensor_Constant_10_output_0, &tensor_Greater_1_output_0);
   }
   
-  /* Not: /Not */
-  void node_Not(void) {
-      nnc_not(&tensor_Greater_output_0, &tensor_Not_output_0);
+  /* Cast: /Cast_6 */
+  void node_Cast_6(void) {
+      nnc_cast(&tensor_Greater_output_0, &tensor_Cast_6_output_0, NNC_DTYPE_FLOAT32);
   }
   
   /* And: /And */
@@ -185,9 +216,9 @@
       nnc_or(&tensor_Greater_output_0, &tensor_Greater_1_output_0, &tensor_Or_output_0);
   }
   
-  /* Cast: /Cast_7 */
-  void node_Cast_7(void) {
-      nnc_cast(&tensor_Not_output_0, &tensor_Cast_7_output_0, NNC_DTYPE_FLOAT32);
+  /* Not: /Not */
+  void node_Not(void) {
+      nnc_not(&tensor_Cast_6_output_0, &tensor_Not_output_0);
   }
   
   /* Cast: /Cast_4 */
@@ -198,6 +229,11 @@
   /* Cast: /Cast_5 */
   void node_Cast_5(void) {
       nnc_cast(&tensor_Or_output_0, &tensor_Cast_5_output_0, NNC_DTYPE_FLOAT32);
+  }
+  
+  /* Cast: /Cast_7 */
+  void node_Cast_7(void) {
+      nnc_cast(&tensor_Not_output_0, &tensor_Cast_7_output_0, NNC_DTYPE_FLOAT32);
   }
   
   /* Concat: /Concat_2 */
@@ -233,17 +269,20 @@
       node_ReduceSum();
       node_Concat_1();
       node_Unsqueeze_2();
+      node_Expand();
       node_Tile();
       node_Transpose_1();
       node_Split();
+      node_Equal_manual();
       node_Greater();
       node_Greater_1();
-      node_Not();
+      node_Cast_6();
       node_And();
       node_Or();
-      node_Cast_7();
+      node_Not();
       node_Cast_4();
       node_Cast_5();
+      node_Cast_7();
       node_Concat_2();
       node_ReduceMean_1();
   }
@@ -277,37 +316,66 @@
   extern Tensor tensor_ReduceSum_output_0;
   extern Tensor tensor_Concat_1_output_0;
   extern Tensor tensor_Unsqueeze_2_output_0;
+  extern Tensor tensor_Expand_output_0;
   extern Tensor tensor_Tile_output_0;
   extern Tensor tensor_Transpose_1_output_0;
   extern Tensor tensor_Split_output_0;
   extern Tensor tensor_Split_output_1;
+  extern Tensor tensor_equal_output;
   extern Tensor tensor_Greater_output_0;
   extern Tensor tensor_Greater_1_output_0;
   extern Tensor tensor_And_output_0;
   extern Tensor tensor_Cast_4_output_0;
   extern Tensor tensor_Or_output_0;
   extern Tensor tensor_Cast_5_output_0;
+  extern Tensor tensor_Cast_6_output_0;
   extern Tensor tensor_Not_output_0;
   extern Tensor tensor_Cast_7_output_0;
   extern Tensor tensor_Concat_2_output_0;
+  extern Tensor tensor_weight;
   extern Tensor tensor_scale;
   extern Tensor tensor_constant1;
   extern Tensor tensor_constant2;
   extern Tensor tensor_constant3;
+  extern Tensor tensor_const_zero;
+  extern Tensor tensor_Constant_output_0;
+  extern Tensor tensor_Constant_1_output_0;
+  extern Tensor tensor_Cast_output_0;
+  extern Tensor tensor_Cast_1_output_0;
   extern Tensor tensor_Constant_2_output_0;
+  extern Tensor tensor_Constant_3_output_0;
+  extern Tensor tensor_Constant_4_output_0;
+  extern Tensor tensor_Cast_2_output_0;
+  extern Tensor tensor_Cast_3_output_0;
+  extern Tensor tensor_Transpose_output_0;
+  extern Tensor tensor_Constant_5_output_0;
+  extern Tensor tensor_Constant_6_output_0;
+  extern Tensor tensor_onnx_Unsqueeze_30;
+  extern Tensor tensor_Unsqueeze_output_0;
+  extern Tensor tensor_onnx_Unsqueeze_32;
+  extern Tensor tensor_Unsqueeze_1_output_0;
+  extern Tensor tensor_Concat_output_0;
   extern Tensor tensor_onnx_ReduceSum_36;
   extern Tensor tensor_Constant_7_output_0;
   extern Tensor tensor_onnx_Shape_42;
+  extern Tensor tensor_Shape_output_0;
+  extern Tensor tensor_ConstantOfShape_output_0;
   extern Tensor tensor_Constant_8_output_0;
   extern Tensor tensor_Constant_9_output_0;
-  extern Tensor tensor_Cast_2_output_0;
-  extern Tensor tensor_Transpose_output_0;
-  extern Tensor tensor_Concat_output_0;
+  extern Tensor tensor_Constant_10_output_0;
+  extern const int64_t tensor_Constant_5_output_0_data[1];
+  extern const int64_t tensor_Constant_6_output_0_data[1];
+  extern const int64_t tensor_onnx_Unsqueeze_30_data[1];
+  extern const int64_t tensor_Unsqueeze_output_0_data[1];
+  extern const int64_t tensor_onnx_Unsqueeze_32_data[1];
+  extern const int64_t tensor_Unsqueeze_1_output_0_data[1];
+  extern const int64_t tensor_Concat_output_0_data[2];
   extern const int64_t tensor_onnx_ReduceSum_36_data[1];
   extern const int64_t tensor_Constant_7_output_0_data[1];
   extern const int64_t tensor_onnx_Shape_42_data[3];
+  extern const int64_t tensor_Shape_output_0_data[1];
+  extern const int64_t tensor_ConstantOfShape_output_0_data[3];
   extern const int64_t tensor_Constant_8_output_0_data[2];
-  extern const int64_t tensor_Concat_output_0_data[2];
   
   /* Constants loading function */
   int nnc_load_constants(const char* path);
@@ -510,6 +578,16 @@
       .nbytes = <SIZE>,
   };
   
+  /* Tensor: /Expand_output_0 */
+  static int64_t tensor_Expand_output_0_shape[] = {1, 2, 1};
+  Tensor tensor_Expand_output_0 = {
+      .data = _nnc_memory_pool + <OFFSET>,
+      .dtype = NNC_DTYPE_FLOAT32,
+      .shape = tensor_Expand_output_0_shape,
+      .ndim = 3,
+      .nbytes = <SIZE>,
+  };
+  
   /* Tensor: /Tile_output_0 */
   static int64_t tensor_Tile_output_0_shape[] = {1, 2, 4};
   Tensor tensor_Tile_output_0 = {
@@ -546,6 +624,16 @@
       .data = _nnc_memory_pool + <OFFSET>,
       .dtype = NNC_DTYPE_FLOAT32,
       .shape = tensor_Split_output_1_shape,
+      .ndim = 3,
+      .nbytes = <SIZE>,
+  };
+  
+  /* Tensor: equal_output */
+  static int64_t tensor_equal_output_shape[] = {1, 4, 1};
+  Tensor tensor_equal_output = {
+      .data = _nnc_memory_pool + <OFFSET>,
+      .dtype = NNC_DTYPE_BOOL,
+      .shape = tensor_equal_output_shape,
       .ndim = 3,
       .nbytes = <SIZE>,
   };
@@ -610,6 +698,16 @@
       .nbytes = <SIZE>,
   };
   
+  /* Tensor: /Cast_6_output_0 */
+  static int64_t tensor_Cast_6_output_0_shape[] = {1, 4, 1};
+  Tensor tensor_Cast_6_output_0 = {
+      .data = _nnc_memory_pool + <OFFSET>,
+      .dtype = NNC_DTYPE_BOOL,
+      .shape = tensor_Cast_6_output_0_shape,
+      .ndim = 3,
+      .nbytes = <SIZE>,
+  };
+  
   /* Tensor: /Not_output_0 */
   static int64_t tensor_Not_output_0_shape[] = {1, 4, 1};
   Tensor tensor_Not_output_0 = {
@@ -645,6 +743,6 @@
 # ---
 # name: TestIRSnapshots.test_operator_coverage_ir_snapshot
   GraphSnapshotWrapper(
-    graph=Graph(name=main_graph, nodes=29, inputs=1, outputs=1),
+    graph=Graph(name=main_graph, nodes=32, inputs=1, outputs=1),
   )
 # ---
