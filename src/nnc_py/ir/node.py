@@ -70,6 +70,8 @@ class OpType(Enum):
     LAYER_NORM = "LayerNormalization"
     IDENTITY = "Identity"
     CONSTANT = "Constant"
+    CONSTANT_OF_SHAPE = "ConstantOfShape"
+    EXPAND = "Expand"
     CLIP = "Clip"
     CAST = "Cast"
 
