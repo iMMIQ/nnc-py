@@ -146,6 +146,9 @@
   extern Tensor tensor_fc3_weight;
   extern Tensor tensor_fc3_bias;
   
+  /* Constants loading function */
+  int nnc_load_constants(const char* path);
+  
   /* Main inference function */
   void nnc_run(void);
   

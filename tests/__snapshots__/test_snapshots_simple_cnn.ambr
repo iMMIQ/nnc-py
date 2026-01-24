@@ -126,6 +126,9 @@
   extern Tensor tensor_classifier_3_weight;
   extern Tensor tensor_classifier_3_bias;
   
+  /* Constants loading function */
+  int nnc_load_constants(const char* path);
+  
   /* Main inference function */
   void nnc_run(void);
   

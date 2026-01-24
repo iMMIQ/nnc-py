@@ -34,10 +34,14 @@ class X86Backend(BackendBase):
         tensors = self._generate_tensors(ctx)
         result.add_file("tensors.c", tensors, "source")
 
-        # Generate constants data file
+        # Generate constants binary file and loader code
         if ctx.graph.constants:
-            constants = self._generate_constants(ctx)
-            result.add_file("constants.c", constants, "source")
+            constants_binary, constants_metadata = self._generate_constants_binary(ctx)
+            result.add_file("constants.bin", constants_binary, "binary")
+
+            # Generate constants loader code
+            constants_loader = self._generate_constants_loader(ctx, constants_metadata)
+            result.add_file("constants_loader.c", constants_loader, "source")
 
         # Generate Makefile
         makefile = self._generate_makefile(ctx)
@@ -716,7 +720,7 @@ class X86Backend(BackendBase):
             if f"extern Tensor {var_name};" not in lines:
                 lines.append(f"extern Tensor {var_name};")
 
-        # Declare constant tensors (defined in constants.c)
+        # Declare constant tensors (defined in constants_loader.c)
         for tensor_name in ctx.graph.constants:
             var_name = ctx.tensor_symbols.get(tensor_name, tensor_name)
             if f"extern Tensor {var_name};" not in lines:
@@ -734,6 +738,9 @@ class X86Backend(BackendBase):
 
         lines.extend([
             "",
+            "/* Constants loading function */",
+            "int nnc_load_constants(const char* path);",
+            "",
             "/* Main inference function */",
             "void nnc_run(void);",
             "",
@@ -742,62 +749,251 @@ class X86Backend(BackendBase):
 
         return "\n".join(lines)
 
-    def _generate_constants(self, ctx: CompileContext) -> str:
-        """Generate constants data file."""
+    def _generate_constants_binary(self, ctx: CompileContext) -> tuple[bytes, dict]:
+        """Generate constants as binary file with metadata.
+
+        Binary format:
+        - Header: magic number (4 bytes), version (4 bytes), num_constants (4 bytes)
+        - For each constant:
+            - name_len (4 bytes), name (null-terminated string)
+            - dtype (4 bytes: 0=float32, 1=float16, 2=int32, 3=int8, 4=uint8, 5=bool)
+            - ndim (4 bytes)
+            - shape (ndim * 8 bytes, int64_t each)
+            - nbytes (8 bytes)
+            - data (nbytes)
+
+        Returns:
+            Tuple of (binary_data, metadata_dict)
+        """
+        import struct
+        import numpy as np
+
+        MAGIC = b'NNCB'
+        VERSION = 1
+
+        # Build metadata dict for C code generation
+        metadata = {}
+
+        # First pass: calculate offsets
+        offset = 12  # header: magic (4) + version (4) + num_constants (4)
+
+        constant_entries = []
+        for name, arr in ctx.graph.constants.items():
+            var_name = ctx.tensor_symbols.get(name, name)
+            dtype, element_size, nnc_dtype = self._get_constant_type_info(arr)
+            shape = list(arr.shape)
+            ndim = len(shape)
+            nbytes = arr.nbytes
+
+            # Map dtype to enum
+            dtype_enum = {
+                "float": 0,
+                "double": 0,
+                "uint16_t": 1,
+                "int64_t": 2,
+                "int32_t": 3,
+                "int8_t": 4,
+                "uint8_t": 5,
+            }.get(dtype, 0)
+
+            # Calculate entry size
+            name_bytes = var_name.encode('utf-8')
+            name_len = len(name_bytes) + 1  # null-terminated
+
+            entry_header_size = 4 + name_len + 4 + 4 + (ndim * 8) + 8
+            # name_len + name + dtype + ndim + shape + nbytes
+
+            data_offset = offset + entry_header_size
+
+            constant_entries.append({
+                'name': var_name,
+                'original_name': name,
+                'dtype': dtype,
+                'dtype_enum': dtype_enum,
+                'nnc_dtype': nnc_dtype,
+                'shape': shape,
+                'ndim': ndim,
+                'nbytes': nbytes,
+                'element_size': element_size,
+                'data': arr.tobytes(),
+                'offset': data_offset,
+            })
+
+            metadata[var_name] = {
+                'dtype': dtype,
+                'nnc_dtype': nnc_dtype,
+                'shape': shape,
+                'ndim': ndim,
+                'nbytes': nbytes,
+                'offset': data_offset,
+            }
+
+            offset = data_offset + nbytes
+
+        # Build binary data with interleaved headers and data
+        parts = []
+        parts.append(MAGIC)
+        parts.append(struct.pack('<I', VERSION))
+        parts.append(struct.pack('<I', len(constant_entries)))
+
+        for entry in constant_entries:
+            name_bytes = entry['name'].encode('utf-8')
+            parts.append(struct.pack('<I', len(name_bytes) + 1))  # name_len
+            parts.append(name_bytes + b'\x00')  # name (null-terminated)
+            parts.append(struct.pack('<I', entry['dtype_enum']))  # dtype
+            parts.append(struct.pack('<I', entry['ndim']))  # ndim
+            # shape
+            for dim in entry['shape']:
+                parts.append(struct.pack('<q', dim))
+            parts.append(struct.pack('<Q', entry['nbytes']))  # nbytes
+            # Data immediately follows header
+            parts.append(entry['data'])
+
+        return b''.join(parts), metadata
+
+    def _generate_constants_loader(self, ctx: CompileContext, metadata: dict) -> str:
+        """Generate C code to load constants from binary file."""
         lines = [
             "/* Auto-generated by NNC - DO NOT EDIT */",
-            '#include "nnc_runtime.h"',
+            '#include "nnc_types.h"',
+            '#include <stdio.h>',
+            '#include <stdlib.h>',
+            '#include <string.h>',
+            "",
+            "/* Constants data loaded from binary file */",
             "",
         ]
 
         import numpy as np
 
+        # Generate static data buffers for each constant
         for name, arr in ctx.graph.constants.items():
-            tensor = ctx.graph.get_tensor(name)
-            # Get correct dtype based on array type
+            var_name = ctx.tensor_symbols.get(name, name)
             dtype, element_size, nnc_dtype = self._get_constant_type_info(arr)
             size = arr.size
-            data = arr.flatten().tolist()
-            shape = list(arr.shape)
-
-            # Use sanitized C symbol name
-            var_name = ctx.tensor_symbols.get(name, name)
 
             # For INT64/INT32 constants (used as shapes), make data array non-static
-            # so it can be accessed from model.c for reshape operations
             is_shape_constant = (arr.dtype == np.int64 or arr.dtype == np.int32)
             storage_class = "" if is_shape_constant else "static "
 
             lines.append(f"/* Constant: {name} */")
-            lines.append(f"{storage_class}const {dtype} {var_name}_data[{size}] = {{")
-
-            # Format data with multiple values per line
-            values_per_line = 10
-            for i in range(0, size, values_per_line):
-                chunk = data[i:i + values_per_line]
-                if dtype == "float":
-                    line_values = ", ".join(f"{x:.9g}" for x in chunk)
-                else:
-                    # Integer types - format as integers
-                    line_values = ", ".join(f"{int(x)}" for x in chunk)
-                if i + values_per_line < size:
-                    line_values += ","
-                lines.append(f"    {line_values}")
-
-            lines.append("};")
+            lines.append(f"{storage_class}{dtype} {var_name}_data[{size}];")
             lines.append("")
 
-            # Generate Tensor structure
+        lines.append("/* Tensor structures */")
+        for name, arr in ctx.graph.constants.items():
+            var_name = ctx.tensor_symbols.get(name, name)
+            shape = list(arr.shape)
+            dtype, element_size, nnc_dtype = self._get_constant_type_info(arr)
             shape_str = ", ".join(str(s) for s in shape)
+
             lines.append(f"static const int64_t {var_name}_shape[] = {{{shape_str}}};")
             lines.append(f"Tensor {var_name} = {{")
             lines.append(f"    .data = (void*){var_name}_data,")
             lines.append(f"    .dtype = {nnc_dtype},")
             lines.append(f"    .shape = (int64_t*){var_name}_shape,")
             lines.append(f"    .ndim = {len(shape)},")
-            lines.append(f"    .nbytes = {size * element_size},")
+            lines.append(f"    .nbytes = {arr.nbytes},")
             lines.append("};")
             lines.append("")
+
+        # Generate loading code - one section per constant in order
+        lines.extend([
+            "/* Load constants from binary file */",
+            "int nnc_load_constants(const char* path) {",
+            "    FILE* f = fopen(path, \"rb\");",
+            "    if (!f) {",
+            "        fprintf(stderr, \"Failed to open constants file: %s\\n\", path);",
+            "        return -1;",
+            "    }",
+            "",
+            "    /* Check magic number */",
+            "    char magic[4];",
+            "    if (fread(magic, 1, 4, f) != 4 || memcmp(magic, \"NNCB\", 4) != 0) {",
+            "        fprintf(stderr, \"Invalid constants file format\\n\");",
+            "        fclose(f);",
+            "        return -1;",
+            "    }",
+            "",
+            "    /* Check version */",
+            "    uint32_t version;",
+            "    if (fread(&version, sizeof(uint32_t), 1, f) != 1) {",
+            "        fprintf(stderr, \"Failed to read version\\n\");",
+            "        fclose(f);",
+            "        return -1;",
+            "    }",
+            "    if (version != 1) {",
+            "        fprintf(stderr, \"Unsupported version: %u\\n\", version);",
+            "        fclose(f);",
+            "        return -1;",
+            "    }",
+            "",
+            "    /* Get number of constants */",
+            "    uint32_t num_constants;",
+            "    if (fread(&num_constants, sizeof(uint32_t), 1, f) != 1) {",
+            "        fprintf(stderr, \"Failed to read num_constants\\n\");",
+            "        fclose(f);",
+            "        return -1;",
+            "    }",
+            "",
+            f"    (void)num_constants;  /* Will be implicitly checked by loading each constant */",
+            "",
+        ])
+
+        # Generate a loading block for each constant - they must match the file order
+        for idx, (name, arr) in enumerate(ctx.graph.constants.items()):
+            var_name = ctx.tensor_symbols.get(name, name)
+            dtype, element_size, nnc_dtype = self._get_constant_type_info(arr)
+            ndim = len(arr.shape)
+            shape_str = ", ".join(str(s) for s in arr.shape)
+            data_size = arr.nbytes
+
+            lines.extend([
+                f"    /* Load constant {idx}: {name} */",
+                f"    {{",
+                f"        /* Read name */",
+                f"        uint32_t name_len;",
+                f"        if (fread(&name_len, sizeof(uint32_t), 1, f) != 1) {{",
+                f"            fprintf(stderr, \"Failed to read name_len for constant {idx}\\\\n\");",
+                f"            fclose(f);",
+                f"            return -1;",
+                f"        }}",
+                f"        char name[256];",
+                f"        if (name_len >= sizeof(name)) {{",
+                f"            fprintf(stderr, \"Name too long for constant {idx}: %u\\\\n\", name_len);",
+                f"            fclose(f);",
+                f"            return -1;",
+                f"        }}",
+                f"        if (fread(name, 1, name_len, f) != name_len) {{",
+                f"            fprintf(stderr, \"Failed to read name for constant {idx}\\\\n\");",
+                f"            fclose(f);",
+                f"            return -1;",
+                f"        }}",
+                f"        if (strcmp(name, \"{var_name}\") != 0) {{",
+                f"            fprintf(stderr, \"Name mismatch for constant {idx}: expected '{var_name}', got '%s'\\\\n\", name);",
+                f"            fclose(f);",
+                f"            return -1;",
+                f"        }}",
+                f"        /* Skip dtype, ndim, shape - we know them from codegen */",
+                f"        fseek(f, 4, SEEK_CUR);  /* dtype */",
+                f"        fseek(f, 4, SEEK_CUR);  /* ndim */",
+                f"        fseek(f, {ndim * 8}, SEEK_CUR);  /* shape ({ndim} dims) */",
+                f"        fseek(f, 8, SEEK_CUR);  /* nbytes */",
+                f"        /* Read data */",
+                f"        if (fread({var_name}_data, 1, {data_size}, f) != {data_size}) {{",
+                f"            fprintf(stderr, \"Failed to read data for {var_name}\\\\n\");",
+                f"            fclose(f);",
+                f"            return -1;",
+                f"        }}",
+                f"    }}",
+                f"",
+            ])
+
+        lines.extend([
+            "    fclose(f);",
+            "    return 0;",
+            "}",
+        ])
 
         return "\n".join(lines)
 
@@ -834,13 +1030,16 @@ class X86Backend(BackendBase):
         has_constants = bool(ctx.graph.constants)
         objs = "model.o tensors.o"
         if has_constants:
-            objs += " constants.o"
+            objs += " constants_loader.o"
         objs += " test_runner.o ops.o"
 
         # Determine runtime path relative to the output directory
         # For installed package: use NNC_RUNTIME_PATH env var
         # For development: relative path from output to project root
-        return f"""# Auto-generated by NNC - DO NOT EDIT
+
+        # Different makefile content based on whether we have constants
+        if has_constants:
+            makefile_body = f"""# Auto-generated by NNC - DO NOT EDIT
 # Set NNC_RUNTIME_PATH to point to the runtime directory if not in dev tree
 CC = gcc
 CFLAGS = -std=c11 -O2 -Wall -Wextra
@@ -869,6 +1068,38 @@ clean:
 run: model
 \t./model
 """
+        else:
+            makefile_body = f"""# Auto-generated by NNC - DO NOT EDIT
+# Set NNC_RUNTIME_PATH to point to the runtime directory if not in dev tree
+CC = gcc
+CFLAGS = -std=c11 -O2 -Wall -Wextra
+LDFLAGS = -lm
+
+# Runtime include path - can be overridden by environment
+NNC_RUNTIME ?= ../../runtime
+CFLAGS += -I$(NNC_RUNTIME)/include
+
+.PHONY: all clean run
+
+all: model
+
+model: {objs}
+\t$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+ops.o:
+\t$(CC) $(CFLAGS) -c $(NNC_RUNTIME)/x86/ops.c
+
+%.o: %.c
+\t$(CC) $(CFLAGS) -c $<
+
+clean:
+\trm -f *.o model
+
+run: model
+\t./model
+"""
+
+        return makefile_body
 
     def _generate_tensors(self, ctx: CompileContext) -> str:
         """Generate tensors definition file."""
@@ -1178,8 +1409,24 @@ run: model
 
         # Generate print code only if we have input/output tensors
         print_code = ""
+
+        # Add constants loading code if there are constants
+        has_constants = bool(ctx.graph.constants)
+        if has_constants:
+            constants_load_code = """
+    /* Load constants from binary file */
+    printf("Loading constants from constants.bin...\\n");
+    if (nnc_load_constants("constants.bin") != 0) {
+        fprintf(stderr, "Failed to load constants\\n");
+        return 1;
+    }
+    printf("Constants loaded successfully.\\n");"""
+        else:
+            constants_load_code = ""
+
         if input_var and output_var:
             print_code = f"""
+{constants_load_code}
     /* Print input info */
     printf("Input data (first 10):\\n");
     int64_t input_size = 1;
@@ -1204,7 +1451,15 @@ run: model
         printf("  output[%d] = %f\\n", i, ((float*){output_var}.data)[i]);
     }}"""
         else:
-            print_code = """
+            if constants_load_code:
+                print_code = f"""
+{constants_load_code}
+
+    /* Run inference */
+    printf("Running inference...\\n");
+    nnc_run();"""
+            else:
+                print_code = """
     /* Run inference */
     printf("Running inference...\\n");
     nnc_run();"""

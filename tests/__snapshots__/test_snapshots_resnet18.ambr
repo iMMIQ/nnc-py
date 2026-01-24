@@ -474,6 +474,9 @@
   extern Tensor tensor_onnx_Conv_247;
   extern Tensor tensor_onnx_Conv_250;
   
+  /* Constants loading function */
+  int nnc_load_constants(const char* path);
+  
   /* Main inference function */
   void nnc_run(void);
   

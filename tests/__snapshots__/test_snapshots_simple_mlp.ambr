@@ -90,6 +90,9 @@
   extern Tensor tensor_net_5_weight;
   extern Tensor tensor_net_5_bias;
   
+  /* Constants loading function */
+  int nnc_load_constants(const char* path);
+  
   /* Main inference function */
   void nnc_run(void);
   

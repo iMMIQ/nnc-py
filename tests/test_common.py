@@ -169,7 +169,11 @@ class BaseSnapshotTest:
 
     def _compile_with_sanitizer(self, tmpdir: str, runtime_dir: Path, opt_level: str = "O0") -> str:
         """Compile the generated code with -g -fsanitize=address."""
-        source_files = ["model.c", "tensors.c", "test_runner.c", "constants.c"]
+        # Try constants_loader.c first, fall back to constants.c for backward compatibility
+        constants_file = "constants_loader.c"
+        if not (Path(tmpdir) / constants_file).exists():
+            constants_file = "constants.c"
+        source_files = ["model.c", "tensors.c", "test_runner.c", constants_file]
         obj_files = []
 
         runtime_include = runtime_dir / "include"
@@ -215,11 +219,13 @@ class BaseSnapshotTest:
 
     def _run_executable(self, exe_path: str, timeout: int = 30) -> tuple[str, str, int]:
         """Run the compiled executable and capture output."""
+        exe_dir = Path(exe_path).parent
         result = subprocess.run(
             [exe_path],
             capture_output=True,
             text=True,
             timeout=timeout,
+            cwd=str(exe_dir),  # Set working directory to exe location for constants.bin
             env={"ASAN_OPTIONS": "detect_leaks=1"},
         )
         return result.stdout, result.stderr, result.returncode

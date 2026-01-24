@@ -10,8 +10,8 @@ class CodeArtifact:
     """A generated code artifact."""
 
     filename: str
-    content: str
-    file_type: str  # "source" or "header" or "build"
+    content: str | bytes
+    file_type: str  # "source" or "header" or "build" or "binary"
 
 
 @dataclass
@@ -21,7 +21,7 @@ class CodeGenResult:
     files: list[CodeArtifact] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
-    def add_file(self, filename: str, content: str, file_type: str = "source"):
+    def add_file(self, filename: str, content: str | bytes, file_type: str = "source"):
         """Add a generated file."""
         self.files.append(CodeArtifact(filename, content, file_type))
 

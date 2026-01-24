@@ -219,7 +219,10 @@ class Compiler:
 
         for artifact in artifacts.files:
             file_path = output_path / artifact.filename
-            file_path.write_text(artifact.content)
+            if artifact.file_type == "binary":
+                file_path.write_bytes(artifact.content)
+            else:
+                file_path.write_text(artifact.content)
 
         # Store metadata
         artifacts.metadata["entry_point"] = entry_point

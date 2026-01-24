@@ -48,6 +48,9 @@
   extern Tensor tensor_conv_output;
   extern Tensor tensor_conv_weight;
   
+  /* Constants loading function */
+  int nnc_load_constants(const char* path);
+  
   /* Main inference function */
   void nnc_run(void);
   

@@ -140,7 +140,8 @@ class E2ETestHelper:
                 [exe_path],
                 capture_output=True,
                 text=True,
-                timeout=30
+                timeout=30,
+                cwd=output_dir  # Set working directory for constants.bin
             )
             return result.returncode == 0, result.stdout, result.stderr
         except subprocess.TimeoutExpired:
@@ -200,7 +201,9 @@ class TestEndToEnd:
         assert os.path.exists(os.path.join(output_dir, "model.h"))
         assert os.path.exists(os.path.join(output_dir, "model.c"))
         assert os.path.exists(os.path.join(output_dir, "tensors.c"))
-        assert os.path.exists(os.path.join(output_dir, "constants.c"))
+        # New format: constants_loader.c and constants.bin instead of constants.c
+        assert os.path.exists(os.path.join(output_dir, "constants_loader.c"))
+        assert os.path.exists(os.path.join(output_dir, "constants.bin"))
         assert os.path.exists(os.path.join(output_dir, "Makefile"))
 
         # Try to build
