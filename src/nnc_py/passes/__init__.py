@@ -17,6 +17,10 @@ from nnc_py.passes.memory_strategy import (
 # New unified memory planning pass
 from nnc_py.passes.memory_planning import MemoryPlanningPassV2, get_memory_allocation_plan
 
+# Optimization passes
+from nnc_py.passes.dead_code_elimination import DeadCodeEliminationPass
+from nnc_py.passes.identity_elimination import IdentityEliminationPass
+
 __all__ = [
     # Core pass infrastructure
     "PassBase",
@@ -36,4 +40,8 @@ __all__ = [
     # New unified pass
     "MemoryPlanningPassV2",
     "get_memory_allocation_plan",
+
+    # Optimization passes
+    "DeadCodeEliminationPass",
+    "IdentityEliminationPass",
 ]
