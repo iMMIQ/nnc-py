@@ -891,27 +891,154 @@ class CEmitter:
         )
 
     def _emit_fused_operator(self, ctx: CompileContext, node: Node) -> None:
-        """Emit fused operator by expanding to individual operations.
+        """Emit fused operator as a direct function call.
 
-        For codegen, we expand fused operators back to their original operations.
-        This allows the fused operator to work in the IR while reusing existing
-        codegen for the base operations.
-
-        We create a temporary tensor for the intermediate result, perform the
-        first operation into it, then use it as input for the second operation.
+        Emits direct calls to fused operator implementations like
+        nnc_conv_relu(), nnc_conv_sigmoid(), nnc_add_relu(), etc.
         """
-        # Based on the fused operator type, emit the sequence of operations
+        # Based on the fused operator type, emit the direct call
         if node.op_type == OpType.FUSED_CONV_RELU:
-            self._emit_fused_conv_relu(ctx, node)
+            self._emit_fused_conv_relu_call(ctx, node)
         elif node.op_type == OpType.FUSED_CONV_BIAS_RELU:
-            self._emit_fused_conv_bias_relu(ctx, node)
+            self._emit_fused_conv_relu_call(ctx, node)
         elif node.op_type == OpType.FUSED_CONV_SIGMOID:
-            self._emit_fused_conv_sigmoid(ctx, node)
+            self._emit_fused_conv_sigmoid_call(ctx, node)
         elif node.op_type == OpType.FUSED_ADD_RELU:
-            self._emit_fused_add_relu(ctx, node)
+            self._emit_fused_add_relu_call(ctx, node)
         elif node.op_type == OpType.FUSED_ADD_SIGMOID:
-            self._emit_fused_add_sigmoid(ctx, node)
+            self._emit_fused_add_sigmoid_call(ctx, node)
 
+    def _emit_fused_conv_relu_call(self, ctx: CompileContext, node: Node) -> None:
+        """Emit direct nnc_conv_relu() function call.
+
+        Arguments: input, weight, bias (or NULL), output, kernel_h, kernel_w,
+                   stride_h, stride_w, pad_h, pad_w
+        """
+        args = []
+
+        if len(node.inputs) >= 1:
+            var_name = ctx.tensor_symbols.get(node.inputs[0], node.inputs[0])
+            args.append(f"&{var_name}")  # input
+        if len(node.inputs) >= 2:
+            var_name = ctx.tensor_symbols.get(node.inputs[1], node.inputs[1])
+            args.append(f"&{var_name}")  # weight
+
+        # bias parameter
+        if len(node.inputs) >= 3:
+            var_name = ctx.tensor_symbols.get(node.inputs[2], node.inputs[2])
+            args.append(f"&{var_name}")  # bias
+        else:
+            args.append("NULL")  # No bias
+
+        # Output tensor
+        if len(node.outputs) >= 1:
+            var_name = ctx.tensor_symbols.get(node.outputs[0], node.outputs[0])
+            args.append(f"&{var_name}")  # output
+
+        # Conv attributes: kernel_h, kernel_w, stride_h, stride_w, pad_h, pad_w
+        kernel_shape = node.attrs.get("kernel_shape", [1, 1])
+        strides = node.attrs.get("strides", [1, 1])
+        pads = node.attrs.get("pads", [0, 0])
+
+        args.extend([str(kernel_shape[0]), str(kernel_shape[1])])
+        args.extend([str(strides[0]), str(strides[1])])
+
+        if len(pads) == 4:
+            args.append(str(pads[0]))  # pad_h (top)
+            args.append(str(pads[1]))  # pad_w (left)
+        elif len(pads) == 2:
+            args.extend([str(pads[0]), str(pads[1])])
+        else:
+            args.extend(["0", "0"])
+
+        self.write_line(f"nnc_conv_relu({', '.join(args)});")
+
+    def _emit_fused_conv_sigmoid_call(self, ctx: CompileContext, node: Node) -> None:
+        """Emit direct nnc_conv_sigmoid() function call.
+
+        Arguments: input, weight, bias (or NULL), output, kernel_h, kernel_w,
+                   stride_h, stride_w, pad_h, pad_w
+        """
+        args = []
+
+        if len(node.inputs) >= 1:
+            var_name = ctx.tensor_symbols.get(node.inputs[0], node.inputs[0])
+            args.append(f"&{var_name}")  # input
+        if len(node.inputs) >= 2:
+            var_name = ctx.tensor_symbols.get(node.inputs[1], node.inputs[1])
+            args.append(f"&{var_name}")  # weight
+
+        # bias parameter
+        if len(node.inputs) >= 3:
+            var_name = ctx.tensor_symbols.get(node.inputs[2], node.inputs[2])
+            args.append(f"&{var_name}")  # bias
+        else:
+            args.append("NULL")  # No bias
+
+        # Output tensor
+        if len(node.outputs) >= 1:
+            var_name = ctx.tensor_symbols.get(node.outputs[0], node.outputs[0])
+            args.append(f"&{var_name}")  # output
+
+        # Conv attributes: kernel_h, kernel_w, stride_h, stride_w, pad_h, pad_w
+        kernel_shape = node.attrs.get("kernel_shape", [1, 1])
+        strides = node.attrs.get("strides", [1, 1])
+        pads = node.attrs.get("pads", [0, 0])
+
+        args.extend([str(kernel_shape[0]), str(kernel_shape[1])])
+        args.extend([str(strides[0]), str(strides[1])])
+
+        if len(pads) == 4:
+            args.append(str(pads[0]))  # pad_h (top)
+            args.append(str(pads[1]))  # pad_w (left)
+        elif len(pads) == 2:
+            args.extend([str(pads[0]), str(pads[1])])
+        else:
+            args.extend(["0", "0"])
+
+        self.write_line(f"nnc_conv_sigmoid({', '.join(args)});")
+
+    def _emit_fused_add_relu_call(self, ctx: CompileContext, node: Node) -> None:
+        """Emit direct nnc_add_relu() function call.
+
+        Arguments: a, b, output
+        """
+        args = []
+
+        # Input tensors
+        for input_name in node.inputs:
+            var_name = ctx.tensor_symbols.get(input_name, input_name)
+            args.append(f"&{var_name}")
+
+        # Output tensor
+        if len(node.outputs) >= 1:
+            var_name = ctx.tensor_symbols.get(node.outputs[0], node.outputs[0])
+            args.append(f"&{var_name}")
+
+        self.write_line(f"nnc_add_relu({', '.join(args)});")
+
+    def _emit_fused_add_sigmoid_call(self, ctx: CompileContext, node: Node) -> None:
+        """Emit direct nnc_add_sigmoid() function call.
+
+        Arguments: a, b, output
+        """
+        args = []
+
+        # Input tensors
+        for input_name in node.inputs:
+            var_name = ctx.tensor_symbols.get(input_name, input_name)
+            args.append(f"&{var_name}")
+
+        # Output tensor
+        if len(node.outputs) >= 1:
+            var_name = ctx.tensor_symbols.get(node.outputs[0], node.outputs[0])
+            args.append(f"&{var_name}")
+
+        self.write_line(f"nnc_add_sigmoid({', '.join(args)});")
+
+    # ----------------------------------------------------------------------
+    # Old expansion methods (kept for reference but no longer used)
+    # ----------------------------------------------------------------------
     def _emit_fused_conv_relu(self, ctx: CompileContext, node: Node) -> None:
         """Emit Conv+ReLU as separate operations."""
         # Get output tensor info for temp allocation

@@ -67,6 +67,14 @@ void nnc_conv(
     int pad_h, int pad_w
 );
 
+/* Fused operations */
+void nnc_conv_relu(
+    Tensor* input, Tensor* weight, Tensor* bias, Tensor* output,
+    int kernel_h, int kernel_w,
+    int stride_h, int stride_w,
+    int pad_h, int pad_w
+);
+
 /* Activation functions */
 void nnc_relu(Tensor* input, Tensor* output);
 void nnc_sigmoid(Tensor* input, Tensor* output);
@@ -336,6 +344,74 @@ void nnc_lstm(
     Tensor* Y, Tensor* Y_h, Tensor* Y_c,
     int direction, int hidden_size
 );
+
+/* ============================================================================
+ * Fused Operations
+ * ============================================================================ */
+
+/* Conv2D + ReLU - Fused convolution and ReLU activation
+ * Args:
+ *   input:     Input tensor [N, C_in, H, W]
+ *   weight:    Weight tensor [C_out, C_in, kH, kW]
+ *   bias:      Bias tensor [C_out] (can be NULL)
+ *   output:    Output tensor [N, C_out, H_out, W_out]
+ *   kernel_h:  Kernel height
+ *   kernel_w:  Kernel width
+ *   stride_h:  Stride height
+ *   stride_w:  Stride width
+ *   pad_h:     Padding height (top, bottom)
+ *   pad_w:     Padding width (left, right)
+ *
+ * Note: This fused operation is more efficient than separate conv and relu calls.
+ */
+void nnc_conv_relu(
+    Tensor* input, Tensor* weight, Tensor* bias, Tensor* output,
+    int kernel_h, int kernel_w,
+    int stride_h, int stride_w,
+    int pad_h, int pad_w
+);
+
+/* Conv2D + Sigmoid - Fused convolution and Sigmoid activation
+ * Args:
+ *   input:     Input tensor [N, C_in, H, W]
+ *   weight:    Weight tensor [C_out, C_in, kH, kW]
+ *   bias:      Bias tensor [C_out] (can be NULL)
+ *   output:    Output tensor [N, C_out, H_out, W_out]
+ *   kernel_h:  Kernel height
+ *   kernel_w:  Kernel width
+ *   stride_h:  Stride height
+ *   stride_w:  Stride width
+ *   pad_h:     Padding height (top, bottom)
+ *   pad_w:     Padding width (left, right)
+ *
+ * Note: This fused operation is more efficient than separate conv and sigmoid calls.
+ */
+void nnc_conv_sigmoid(
+    Tensor* input, Tensor* weight, Tensor* bias, Tensor* output,
+    int kernel_h, int kernel_w,
+    int stride_h, int stride_w,
+    int pad_h, int pad_w
+);
+
+/* Element-wise Add + ReLU - Fused addition and ReLU activation
+ * Args:
+ *   a:    First input tensor
+ *   b:    Second input tensor
+ *   out:  Output tensor (max(0, a + b) for each element)
+ *
+ * Note: This fused operation is more efficient than separate add and relu calls.
+ */
+void nnc_add_relu(Tensor* a, Tensor* b, Tensor* out);
+
+/* Element-wise Add + Sigmoid - Fused addition and Sigmoid activation
+ * Args:
+ *   a:    First input tensor
+ *   b:    Second input tensor
+ *   out:  Output tensor (sigmoid(a + b) for each element)
+ *
+ * Note: This fused operation is more efficient than separate add and sigmoid calls.
+ */
+void nnc_add_sigmoid(Tensor* a, Tensor* b, Tensor* out);
 
 #ifdef __cplusplus
 }

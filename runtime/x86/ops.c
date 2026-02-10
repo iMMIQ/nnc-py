@@ -2109,3 +2109,414 @@ void nnc_lstm(
         free(c);
     }
 }
+
+/* ============================================================================
+ * Fused Operations
+ * ============================================================================ */
+
+void nnc_conv_relu(
+    Tensor* input, Tensor* weight, Tensor* bias, Tensor* output,
+    int kernel_h, int kernel_w,
+    int stride_h, int stride_w,
+    int pad_h, int pad_w
+) {
+    /* Fused 2D convolution + ReLU activation implementation
+     *
+     * This function performs convolution and applies ReLU activation in a single
+     * pass, which provides several benefits:
+     * 1. Reduced memory bandwidth: Output is written once instead of twice
+     * 2. Better cache utilization: Intermediate results stay in registers
+     * 3. Eliminates need for separate ReLU pass over output tensor
+     * 4. Enables compiler optimizations across the convolution+activation boundary
+     *
+     * Input:  [N, C_in, H, W]
+     * Weight: [C_out, C_in, kH, kW]
+     * Bias:   [C_out] (optional)
+     * Output: [N, C_out, H_out, W_out]
+     *
+     * ReLU: output = max(0, conv_result)
+     */
+
+    /* Debug: Check pointers */
+    fprintf(stderr, "nnc_conv_relu: Checking pointers...\n");
+    fflush(stderr);
+
+    if (!input || !weight || !output) {
+        fprintf(stderr, "nnc_conv_relu: NULL tensor pointer\n");
+        fflush(stderr);
+        return;
+    }
+    if (!input->data || !weight->data || !output->data) {
+        fprintf(stderr, "nnc_conv_relu: NULL data pointer\n");
+        fprintf(stderr, "  input->data=%p, weight->data=%p, output->data=%p\n",
+                input->data, weight->data, output->data);
+        fflush(stderr);
+        return;
+    }
+    if (!input->shape || !weight->shape || !output->shape) {
+        fprintf(stderr, "nnc_conv_relu: NULL shape pointer\n");
+        fflush(stderr);
+        return;
+    }
+
+    fprintf(stderr, "nnc_conv_relu: All pointers valid\n");
+    fflush(stderr);
+
+    /* Extract dimensions */
+    int N = (int)input->shape[0];
+    int C_in = (int)input->shape[1];
+    int H_in = (int)input->shape[2];
+    int W_in = (int)input->shape[3];
+
+    int C_out = (int)weight->shape[0];
+    int H_out = (int)output->shape[2];
+    int W_out = (int)output->shape[3];
+
+    fprintf(stderr, "nnc_conv_relu: dimensions\n");
+    fprintf(stderr, "  input: [%d, %d, %d, %d]\n", N, C_in, H_in, W_in);
+    fprintf(stderr, "  weight: [%d, %d, %d, %d]\n", C_out, (int)weight->shape[1], (int)weight->shape[2], (int)weight->shape[3]);
+    fprintf(stderr, "  output: [%d, %d, %d, %d]\n", (int)output->shape[0], (int)output->shape[1], H_out, W_out);
+    fprintf(stderr, "  kernel: [%d, %d], stride: [%d, %d], pad: [%d, %d]\n",
+            kernel_h, kernel_w, stride_h, stride_w, pad_h, pad_w);
+    fflush(stderr);
+
+    /* Get data pointers */
+    float* in_data = (float*)input->data;
+    float* weight_data = (float*)weight->data;
+    float* bias_data = bias ? (float*)bias->data : NULL;
+    float* out_data = (float*)output->data;
+
+    /* Compute output dimensions */
+    /* H_out = (H_in + 2*pad_h - kernel_h) / stride_h + 1 */
+    /* W_out = (W_in + 2*pad_w - kernel_w) / stride_w + 1 */
+
+    /* Initialize output to zero */
+    int64_t output_size = N * C_out * H_out * W_out;
+    for (int64_t i = 0; i < output_size; i++) {
+        out_data[i] = 0.0f;
+    }
+
+    /* Perform convolution with fused ReLU activation */
+    for (int n = 0; n < N; n++) {
+        for (int c_out = 0; c_out < C_out; c_out++) {
+            for (int h_out = 0; h_out < H_out; h_out++) {
+                for (int w_out = 0; w_out < W_out; w_out++) {
+                    /* Compute convolution window start position */
+                    int h_in = h_out * stride_h - pad_h;
+                    int w_in = w_out * stride_w - pad_w;
+
+                    float sum = 0.0f;
+                    float c = 0.0f;  /* Kahan compensation */
+
+                    /* Convolve over kernel */
+                    for (int c_in = 0; c_in < C_in; c_in++) {
+                        for (int kh = 0; kh < kernel_h; kh++) {
+                            for (int kw = 0; kw < kernel_w; kw++) {
+                                int h = h_in + kh;
+                                int w = w_in + kw;
+
+                                /* Check bounds */
+                                if (h >= 0 && h < H_in && w >= 0 && w < W_in) {
+                                    /* Calculate indices */
+                                    int64_t in_idx = n * C_in * H_in * W_in
+                                                   + c_in * H_in * W_in
+                                                   + h * W_in
+                                                   + w;
+
+                                    int64_t weight_idx = c_out * C_in * kernel_h * kernel_w
+                                                      + c_in * kernel_h * kernel_w
+                                                      + kh * kernel_w
+                                                      + kw;
+
+                                    /* Kahan summation for improved numerical accuracy */
+                                    float y = in_data[in_idx] * weight_data[weight_idx] - c;
+                                    float t = sum + y;
+                                    c = (t - sum) - y;
+                                    sum = t;
+                                }
+                            }
+                        }
+                    }
+
+                    /* Add bias if present */
+                    if (bias_data) {
+                        sum += bias_data[c_out];
+                    }
+
+                    /* Apply ReLU activation: max(0, x) */
+                    float relu_result = sum > 0.0f ? sum : 0.0f;
+
+                    /* Write output */
+                    int64_t out_idx = n * C_out * H_out * W_out
+                                    + c_out * H_out * W_out
+                                    + h_out * W_out
+                                    + w_out;
+                    out_data[out_idx] = relu_result;
+                }
+            }
+        }
+    }
+}
+
+void nnc_conv_sigmoid(
+    Tensor* input, Tensor* weight, Tensor* bias, Tensor* output,
+    int kernel_h, int kernel_w,
+    int stride_h, int stride_w,
+    int pad_h, int pad_w
+) {
+    /* Fused 2D convolution + Sigmoid activation implementation
+     *
+     * This function performs convolution and applies Sigmoid activation in a single
+     * pass, which provides several benefits:
+     * 1. Reduced memory bandwidth: Output is written once instead of twice
+     * 2. Better cache utilization: Intermediate results stay in registers
+     * 3. Eliminates need for separate Sigmoid pass over output tensor
+     * 4. Enables compiler optimizations across the convolution+activation boundary
+     *
+     * Input:  [N, C_in, H, W]
+     * Weight: [C_out, C_in, kH, kW]
+     * Bias:   [C_out] (optional)
+     * Output: [N, C_out, H_out, W_out]
+     *
+     * Sigmoid: output = 1 / (1 + exp(-conv_result))
+     */
+
+    /* Debug: Check pointers */
+    fprintf(stderr, "nnc_conv_sigmoid: Checking pointers...\n");
+    fflush(stderr);
+
+    if (!input || !weight || !output) {
+        fprintf(stderr, "nnc_conv_sigmoid: NULL tensor pointer\n");
+        fflush(stderr);
+        return;
+    }
+    if (!input->data || !weight->data || !output->data) {
+        fprintf(stderr, "nnc_conv_sigmoid: NULL data pointer\n");
+        fprintf(stderr, "  input->data=%p, weight->data=%p, output->data=%p\n",
+                input->data, weight->data, output->data);
+        fflush(stderr);
+        return;
+    }
+    if (!input->shape || !weight->shape || !output->shape) {
+        fprintf(stderr, "nnc_conv_sigmoid: NULL shape pointer\n");
+        fflush(stderr);
+        return;
+    }
+
+    fprintf(stderr, "nnc_conv_sigmoid: All pointers valid\n");
+    fflush(stderr);
+
+    /* Extract dimensions */
+    int N = (int)input->shape[0];
+    int C_in = (int)input->shape[1];
+    int H_in = (int)input->shape[2];
+    int W_in = (int)input->shape[3];
+
+    int C_out = (int)weight->shape[0];
+    int H_out = (int)output->shape[2];
+    int W_out = (int)output->shape[3];
+
+    fprintf(stderr, "nnc_conv_sigmoid: dimensions\n");
+    fprintf(stderr, "  input: [%d, %d, %d, %d]\n", N, C_in, H_in, W_in);
+    fprintf(stderr, "  weight: [%d, %d, %d, %d]\n", C_out, (int)weight->shape[1], (int)weight->shape[2], (int)weight->shape[3]);
+    fprintf(stderr, "  output: [%d, %d, %d, %d]\n", (int)output->shape[0], (int)output->shape[1], H_out, W_out);
+    fprintf(stderr, "  kernel: [%d, %d], stride: [%d, %d], pad: [%d, %d]\n",
+            kernel_h, kernel_w, stride_h, stride_w, pad_h, pad_w);
+    fflush(stderr);
+
+    /* Get data pointers */
+    float* in_data = (float*)input->data;
+    float* weight_data = (float*)weight->data;
+    float* bias_data = bias ? (float*)bias->data : NULL;
+    float* out_data = (float*)output->data;
+
+    /* Compute output dimensions */
+    /* H_out = (H_in + 2*pad_h - kernel_h) / stride_h + 1 */
+    /* W_out = (W_in + 2*pad_w - kernel_w) / stride_w + 1 */
+
+    /* Initialize output to zero */
+    int64_t output_size = N * C_out * H_out * W_out;
+    for (int64_t i = 0; i < output_size; i++) {
+        out_data[i] = 0.0f;
+    }
+
+    /* Perform convolution with fused Sigmoid activation */
+    for (int n = 0; n < N; n++) {
+        for (int c_out = 0; c_out < C_out; c_out++) {
+            for (int h_out = 0; h_out < H_out; h_out++) {
+                for (int w_out = 0; w_out < W_out; w_out++) {
+                    /* Compute convolution window start position */
+                    int h_in = h_out * stride_h - pad_h;
+                    int w_in = w_out * stride_w - pad_w;
+
+                    float sum = 0.0f;
+                    float c = 0.0f;  /* Kahan compensation */
+
+                    /* Convolve over kernel */
+                    for (int c_in = 0; c_in < C_in; c_in++) {
+                        for (int kh = 0; kh < kernel_h; kh++) {
+                            for (int kw = 0; kw < kernel_w; kw++) {
+                                int h = h_in + kh;
+                                int w = w_in + kw;
+
+                                /* Check bounds */
+                                if (h >= 0 && h < H_in && w >= 0 && w < W_in) {
+                                    /* Calculate indices */
+                                    int64_t in_idx = n * C_in * H_in * W_in
+                                                   + c_in * H_in * W_in
+                                                   + h * W_in
+                                                   + w;
+
+                                    int64_t weight_idx = c_out * C_in * kernel_h * kernel_w
+                                                      + c_in * kernel_h * kernel_w
+                                                      + kh * kernel_w
+                                                      + kw;
+
+                                    /* Kahan summation for improved numerical accuracy */
+                                    float y = in_data[in_idx] * weight_data[weight_idx] - c;
+                                    float t = sum + y;
+                                    c = (t - sum) - y;
+                                    sum = t;
+                                }
+                            }
+                        }
+                    }
+
+                    /* Add bias if present */
+                    if (bias_data) {
+                        sum += bias_data[c_out];
+                    }
+
+                    /* Apply Sigmoid activation: 1 / (1 + exp(-x)) */
+                    float sigmoid_result = 1.0f / (1.0f + expf(-sum));
+
+                    /* Write output */
+                    int64_t out_idx = n * C_out * H_out * W_out
+                                    + c_out * H_out * W_out
+                                    + h_out * W_out
+                                    + w_out;
+                    out_data[out_idx] = sigmoid_result;
+                }
+            }
+        }
+    }
+}
+
+/* ============================================================================
+ * Fused Arithmetic Operations
+ * ============================================================================ */
+
+void nnc_add_relu(Tensor* a, Tensor* b, Tensor* out) {
+    /* Fused element-wise addition + ReLU activation implementation
+     *
+     * This function performs element-wise addition and applies ReLU activation
+     * in a single pass, which provides several benefits:
+     * 1. Reduced memory bandwidth: Output is written once instead of twice
+     * 2. Better cache utilization: Intermediate results stay in registers
+     * 3. Eliminates need for separate ReLU pass over output tensor
+     * 4. Enables compiler optimizations across the addition+activation boundary
+     *
+     * ReLU: output = max(0, a + b)
+     */
+
+    int64_t n = tensor_numel(out);
+    int64_t a_n = tensor_numel(a);
+    int64_t b_n = tensor_numel(b);
+    float* a_data = (float*)a->data;
+    float* b_data = (float*)b->data;
+    float* out_data = (float*)out->data;
+
+    /* Handle broadcasting - use minimum size to avoid overflow */
+    int64_t copy_n = n;
+    if (a_n < copy_n) copy_n = a_n;
+    if (b_n < copy_n) copy_n = b_n;
+
+    for (int64_t i = 0; i < copy_n; i++) {
+        float sum = a_data[i] + b_data[i];
+        /* Apply ReLU activation: max(0, x) */
+        out_data[i] = sum > 0.0f ? sum : 0.0f;
+    }
+
+    /* Handle broadcast: if one input is smaller, broadcast its value */
+    if (a_n == 1 && b_n == n) {
+        for (int64_t i = copy_n; i < n; i++) {
+            float sum = a_data[0] + b_data[i];
+            out_data[i] = sum > 0.0f ? sum : 0.0f;
+        }
+    } else if (a_n == n && b_n == 1) {
+        for (int64_t i = copy_n; i < n; i++) {
+            float sum = a_data[i] + b_data[0];
+            out_data[i] = sum > 0.0f ? sum : 0.0f;
+        }
+    } else if (a_n < n && b_n == n) {
+        /* Broadcast a (e.g., [6] to [2, 6]) */
+        for (int64_t i = copy_n; i < n; i++) {
+            float sum = a_data[i % a_n] + b_data[i];
+            out_data[i] = sum > 0.0f ? sum : 0.0f;
+        }
+    } else if (a_n == n && b_n < n) {
+        /* Broadcast b (e.g., [6] to [2, 6]) */
+        for (int64_t i = copy_n; i < n; i++) {
+            float sum = a_data[i] + b_data[i % b_n];
+            out_data[i] = sum > 0.0f ? sum : 0.0f;
+        }
+    }
+}
+
+void nnc_add_sigmoid(Tensor* a, Tensor* b, Tensor* out) {
+    /* Fused element-wise addition + Sigmoid activation implementation
+     *
+     * This function performs element-wise addition and applies Sigmoid activation
+     * in a single pass, which provides several benefits:
+     * 1. Reduced memory bandwidth: Output is written once instead of twice
+     * 2. Better cache utilization: Intermediate results stay in registers
+     * 3. Eliminates need for separate Sigmoid pass over output tensor
+     * 4. Enables compiler optimizations across the addition+activation boundary
+     *
+     * Sigmoid: output = 1.0 / (1.0 + exp(-(a + b)))
+     * Maps sum to range (0, 1), commonly used in neural networks
+     */
+
+    int64_t n = tensor_numel(out);
+    int64_t a_n = tensor_numel(a);
+    int64_t b_n = tensor_numel(b);
+    float* a_data = (float*)a->data;
+    float* b_data = (float*)b->data;
+    float* out_data = (float*)out->data;
+
+    /* Handle broadcasting - use minimum size to avoid overflow */
+    int64_t copy_n = n;
+    if (a_n < copy_n) copy_n = a_n;
+    if (b_n < copy_n) copy_n = b_n;
+
+    for (int64_t i = 0; i < copy_n; i++) {
+        float sum = a_data[i] + b_data[i];
+        /* Apply Sigmoid activation: 1 / (1 + exp(-x)) */
+        out_data[i] = 1.0f / (1.0f + expf(-sum));
+    }
+
+    /* Handle broadcast: if one input is smaller, broadcast its value */
+    if (a_n == 1 && b_n == n) {
+        for (int64_t i = copy_n; i < n; i++) {
+            float sum = a_data[0] + b_data[i];
+            out_data[i] = 1.0f / (1.0f + expf(-sum));
+        }
+    } else if (a_n == n && b_n == 1) {
+        for (int64_t i = copy_n; i < n; i++) {
+            float sum = a_data[i] + b_data[0];
+            out_data[i] = 1.0f / (1.0f + expf(-sum));
+        }
+    } else if (a_n < n && b_n == n) {
+        /* Broadcast a (e.g., [6] to [2, 6]) */
+        for (int64_t i = copy_n; i < n; i++) {
+            float sum = a_data[i % a_n] + b_data[i];
+            out_data[i] = 1.0f / (1.0f + expf(-sum));
+        }
+    } else if (a_n == n && b_n < n) {
+        /* Broadcast b (e.g., [6] to [2, 6]) */
+        for (int64_t i = copy_n; i < n; i++) {
+            float sum = a_data[i] + b_data[i % b_n];
+            out_data[i] = 1.0f / (1.0f + expf(-sum));
+        }
+    }
+}
