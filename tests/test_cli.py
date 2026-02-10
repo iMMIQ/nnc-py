@@ -230,7 +230,6 @@ def test_compile_verbose_mode(runner, simple_onnx_model, tmp_path):
     # (empty graph without proper inputs/outputs)
     graph = helper.make_graph([], "empty", [], [])
     model = helper.make_model(graph)
-    import onnx
     bad_model_path = tmp_path / "bad_model.onnx"
     onnx.save(model, bad_model_path)
 
