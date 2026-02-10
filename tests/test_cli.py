@@ -172,3 +172,42 @@ def test_compile_command_with_entry_name(runner, simple_onnx_model, tmp_path):
         "--entry-name", "my_infer",
     ])
     assert result.exit_code == 0
+
+
+def test_compile_command_constant_folding_enabled(runner, simple_onnx_model, tmp_path):
+    """Test 'nnc compile' with constant folding enabled (default)."""
+    output_dir = tmp_path / "output_cf_on"
+    result = runner.invoke(main, [
+        "compile",
+        str(simple_onnx_model),
+        "-o", str(output_dir),
+        "--enable-constant-folding",
+    ])
+    assert result.exit_code == 0
+    assert "Constant Folding: enabled" in result.output
+
+
+def test_compile_command_constant_folding_disabled(runner, simple_onnx_model, tmp_path):
+    """Test 'nnc compile' with constant folding disabled."""
+    output_dir = tmp_path / "output_cf_off"
+    result = runner.invoke(main, [
+        "compile",
+        str(simple_onnx_model),
+        "-o", str(output_dir),
+        "--disable-constant-folding",
+    ])
+    assert result.exit_code == 0
+    assert "Constant Folding: disabled" in result.output
+
+
+def test_compile_command_debug_mode(runner, simple_onnx_model, tmp_path):
+    """Test 'nnc compile' with debug mode enabled."""
+    output_dir = tmp_path / "output_debug"
+    result = runner.invoke(main, [
+        "compile",
+        str(simple_onnx_model),
+        "-o", str(output_dir),
+        "--debug",
+    ])
+    assert result.exit_code == 0
+    assert "Debug Mode: enabled" in result.output
