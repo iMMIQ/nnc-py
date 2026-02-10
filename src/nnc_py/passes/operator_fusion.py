@@ -4,9 +4,10 @@ This pass fuses compatible operator patterns (e.g., Conv+ReLU, Add+Activation)
 into single fused operations for improved performance.
 """
 
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, Optional, Set
 
 from nnc_py.ir.context import CompileContext
+from nnc_py.ir.graph import Graph
 from nnc_py.ir.node import Node, OpType
 from nnc_py.passes.base import PassBase
 
@@ -63,7 +64,7 @@ class OperatorFusionPass(PassBase):
 
     def _try_fusion_with_producer(
         self,
-        graph,
+        graph: Graph,
         consumer: Node,
         fused_nodes: Set[str],
     ) -> Optional[str]:
@@ -115,7 +116,7 @@ class OperatorFusionPass(PassBase):
 
     def _fuse_conv_relu(
         self,
-        graph,
+        graph: Graph,
         conv: Node,
         relu: Node,
         fused_nodes: Set[str],
@@ -147,7 +148,7 @@ class OperatorFusionPass(PassBase):
 
     def _fuse_conv_sigmoid(
         self,
-        graph,
+        graph: Graph,
         conv: Node,
         sigmoid: Node,
         fused_nodes: Set[str],
@@ -175,7 +176,7 @@ class OperatorFusionPass(PassBase):
 
     def _fuse_add_relu(
         self,
-        graph,
+        graph: Graph,
         add: Node,
         relu: Node,
         fused_nodes: Set[str],
@@ -203,7 +204,7 @@ class OperatorFusionPass(PassBase):
 
     def _fuse_add_sigmoid(
         self,
-        graph,
+        graph: Graph,
         add: Node,
         sigmoid: Node,
         fused_nodes: Set[str],
@@ -229,7 +230,7 @@ class OperatorFusionPass(PassBase):
 
         return "Add+Sigmoid"
 
-    def _update_graph_outputs(self, graph, old_tensor: str, new_tensor: str) -> None:
+    def _update_graph_outputs(self, graph: Graph, old_tensor: str, new_tensor: str) -> None:
         """Update graph outputs if old_tensor was an output."""
         if old_tensor in graph.outputs:
             # Replace old tensor with new tensor
