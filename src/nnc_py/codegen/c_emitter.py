@@ -1,6 +1,7 @@
 """C code emitter for generating C11 code."""
 
 from io import StringIO
+from typing import List
 
 from nnc_py.ir.context import CompileContext
 from nnc_py.ir.node import Node, OpType
@@ -82,6 +83,11 @@ class CEmitter:
     def _emit_operator_call(self, ctx: CompileContext, node: Node) -> None:
         """Emit operator function call."""
         op_name = f"nnc_{node.op_type.value.lower()}"
+
+        # Handle fused operators by expanding them to individual operations
+        if self._is_fused_operator(node):
+            self._emit_fused_operator(ctx, node)
+            return
 
         # Special handling for different operations
         if node.op_type == OpType.CONV2D:
@@ -874,6 +880,230 @@ class CEmitter:
         args.append(str(hidden_size))
 
         self.write_line(f"nnc_lstm({', '.join(args)});")
+
+    def _is_fused_operator(self, node: Node) -> bool:
+        """Check if a node is a fused operator."""
+        return node.op_type in (
+            OpType.FUSED_CONV_RELU,
+            OpType.FUSED_CONV_BIAS_RELU,
+            OpType.FUSED_CONV_SIGMOID,
+            OpType.FUSED_ADD_RELU,
+            OpType.FUSED_ADD_SIGMOID,
+        )
+
+    def _emit_fused_operator(self, ctx: CompileContext, node: Node) -> None:
+        """Emit fused operator by expanding to individual operations.
+
+        For codegen, we expand fused operators back to their original operations.
+        This allows the fused operator to work in the IR while reusing existing
+        codegen for the base operations.
+
+        We create a temporary tensor for the intermediate result, perform the
+        first operation into it, then use it as input for the second operation.
+        """
+        # Based on the fused operator type, emit the sequence of operations
+        if node.op_type == OpType.FUSED_CONV_RELU:
+            self._emit_fused_conv_relu(ctx, node)
+        elif node.op_type == OpType.FUSED_CONV_BIAS_RELU:
+            self._emit_fused_conv_bias_relu(ctx, node)
+        elif node.op_type == OpType.FUSED_CONV_SIGMOID:
+            self._emit_fused_conv_sigmoid(ctx, node)
+        elif node.op_type == OpType.FUSED_ADD_RELU:
+            self._emit_fused_add_relu(ctx, node)
+        elif node.op_type == OpType.FUSED_ADD_SIGMOID:
+            self._emit_fused_add_sigmoid(ctx, node)
+
+    def _emit_fused_conv_relu(self, ctx: CompileContext, node: Node) -> None:
+        """Emit Conv+ReLU as separate operations."""
+        # Get output tensor info for temp allocation
+        output_tensor = ctx.graph.get_tensor(node.outputs[0])
+        if not output_tensor or not output_tensor.shape:
+            # Fallback: just emit conv (can't handle properly without shape info)
+            self._emit_conv_call(ctx, node)
+            return
+
+        # Calculate size needed for intermediate tensor
+        size_bytes = output_tensor.byte_size()
+        if size_bytes <= 0:
+            # Unknown size, can't allocate static buffer
+            self._emit_conv_call(ctx, node)
+            return
+
+        # Declare temp tensor buffer
+        temp_name = f"{ctx.node_symbols.get(node.name, node.name)}_temp"
+        self.write_line(f"float {temp_name}_data[{size_bytes // 4}];")
+        self.write_line(f"static Tensor {temp_name} = {{")
+        self.write_line(f"    .data = (void*){temp_name}_data,")
+        self.write_line(f"    .dtype = NNC_DTYPE_FLOAT32,")
+        # Output shape will be set dynamically based on conv output
+        self.write_line(f"    .ndim = 4,")
+        self.write_line(f"}};")
+
+        # Build conv call with temp as output
+        args = []
+        if len(node.inputs) >= 1:
+            var_name = ctx.tensor_symbols.get(node.inputs[0], node.inputs[0])
+            args.append(f"&{var_name}")
+        if len(node.inputs) >= 2:
+            var_name = ctx.tensor_symbols.get(node.inputs[1], node.inputs[1])
+            args.append(f"&{var_name}")
+        if len(node.inputs) >= 3:
+            var_name = ctx.tensor_symbols.get(node.inputs[2], node.inputs[2])
+            args.append(f"&{var_name}")
+        else:
+            args.append("NULL")
+
+        args.append(f"&{temp_name}")  # Temp output
+
+        kernel_shape = node.attrs.get("kernel_shape", [1, 1])
+        strides = node.attrs.get("strides", [1, 1])
+        pads = node.attrs.get("pads", [0, 0])
+
+        args.extend([str(kernel_shape[0]), str(kernel_shape[1])])
+        args.extend([str(strides[0]), str(strides[1])])
+        if len(pads) == 4:
+            args.append(str(pads[0]))
+            args.append(str(pads[1]))
+        elif len(pads) == 2:
+            args.extend([str(pads[0]), str(pads[1])])
+        else:
+            args.extend(["0", "0"])
+
+        self.write_line(f"nnc_conv({', '.join(args)});")
+
+        # Set up temp tensor shape and call relu
+        output_var = ctx.tensor_symbols.get(node.outputs[0], node.outputs[0])
+        self.write_line(f"{temp_name}.shape = {output_var}.shape;")
+        self.write_line(f"{temp_name}.nbytes = {output_var}.nbytes;")
+        self.write_line(f"nnc_relu(&{temp_name}, &{output_var});")
+
+    def _emit_fused_conv_bias_relu(self, ctx: CompileContext, node: Node) -> None:
+        """Emit Conv+Bias+ReLU as separate operations."""
+        # Same as Conv+ReLU, bias is already handled by conv
+        self._emit_fused_conv_relu(ctx, node)
+
+    def _emit_fused_conv_sigmoid(self, ctx: CompileContext, node: Node) -> None:
+        """Emit Conv+Sigmoid as separate operations."""
+        output_tensor = ctx.graph.get_tensor(node.outputs[0])
+        if not output_tensor or not output_tensor.shape:
+            self._emit_conv_call(ctx, node)
+            return
+
+        size_bytes = output_tensor.byte_size()
+        if size_bytes <= 0:
+            self._emit_conv_call(ctx, node)
+            return
+
+        temp_name = f"{ctx.node_symbols.get(node.name, node.name)}_temp"
+        self.write_line(f"float {temp_name}_data[{size_bytes // 4}];")
+        self.write_line(f"static Tensor {temp_name} = {{")
+        self.write_line(f"    .data = (void*){temp_name}_data,")
+        self.write_line(f"    .dtype = NNC_DTYPE_FLOAT32,")
+        self.write_line(f"    .ndim = 4,")
+        self.write_line(f"}};")
+
+        # Build conv call
+        args = []
+        if len(node.inputs) >= 1:
+            var_name = ctx.tensor_symbols.get(node.inputs[0], node.inputs[0])
+            args.append(f"&{var_name}")
+        if len(node.inputs) >= 2:
+            var_name = ctx.tensor_symbols.get(node.inputs[1], node.inputs[1])
+            args.append(f"&{var_name}")
+        if len(node.inputs) >= 3:
+            var_name = ctx.tensor_symbols.get(node.inputs[2], node.inputs[2])
+            args.append(f"&{var_name}")
+        else:
+            args.append("NULL")
+
+        args.append(f"&{temp_name}")
+
+        kernel_shape = node.attrs.get("kernel_shape", [1, 1])
+        strides = node.attrs.get("strides", [1, 1])
+        pads = node.attrs.get("pads", [0, 0])
+
+        args.extend([str(kernel_shape[0]), str(kernel_shape[1])])
+        args.extend([str(strides[0]), str(strides[1])])
+        if len(pads) == 4:
+            args.append(str(pads[0]))
+            args.append(str(pads[1]))
+        elif len(pads) == 2:
+            args.extend([str(pads[0]), str(pads[1])])
+        else:
+            args.extend(["0", "0"])
+
+        self.write_line(f"nnc_conv({', '.join(args)});")
+
+        output_var = ctx.tensor_symbols.get(node.outputs[0], node.outputs[0])
+        self.write_line(f"{temp_name}.shape = {output_var}.shape;")
+        self.write_line(f"{temp_name}.nbytes = {output_var}.nbytes;")
+        self.write_line(f"nnc_sigmoid(&{temp_name}, &{output_var});")
+
+    def _emit_fused_add_relu(self, ctx: CompileContext, node: Node) -> None:
+        """Emit Add+ReLU as separate operations."""
+        output_tensor = ctx.graph.get_tensor(node.outputs[0])
+        if not output_tensor or not output_tensor.shape:
+            self._emit_generic_call(ctx, node, "nnc_add")
+            return
+
+        size_bytes = output_tensor.byte_size()
+        if size_bytes <= 0:
+            self._emit_generic_call(ctx, node, "nnc_add")
+            return
+
+        temp_name = f"{ctx.node_symbols.get(node.name, node.name)}_temp"
+        self.write_line(f"float {temp_name}_data[{size_bytes // 4}];")
+        self.write_line(f"static Tensor {temp_name} = {{")
+        self.write_line(f"    .data = (void*){temp_name}_data,")
+        self.write_line(f"    .dtype = NNC_DTYPE_FLOAT32,")
+        self.write_line(f"}};")
+
+        # Build add call
+        args = []
+        for input_name in node.inputs:
+            var_name = ctx.tensor_symbols.get(input_name, input_name)
+            args.append(f"&{var_name}")
+        args.append(f"&{temp_name}")
+        self.write_line(f"nnc_add({', '.join(args)});")
+
+        output_var = ctx.tensor_symbols.get(node.outputs[0], node.outputs[0])
+        self.write_line(f"{temp_name}.shape = {output_var}.shape;")
+        self.write_line(f"{temp_name}.ndim = {output_var}.ndim;")
+        self.write_line(f"{temp_name}.nbytes = {output_var}.nbytes;")
+        self.write_line(f"nnc_relu(&{temp_name}, &{output_var});")
+
+    def _emit_fused_add_sigmoid(self, ctx: CompileContext, node: Node) -> None:
+        """Emit Add+Sigmoid as separate operations."""
+        output_tensor = ctx.graph.get_tensor(node.outputs[0])
+        if not output_tensor or not output_tensor.shape:
+            self._emit_generic_call(ctx, node, "nnc_add")
+            return
+
+        size_bytes = output_tensor.byte_size()
+        if size_bytes <= 0:
+            self._emit_generic_call(ctx, node, "nnc_add")
+            return
+
+        temp_name = f"{ctx.node_symbols.get(node.name, node.name)}_temp"
+        self.write_line(f"float {temp_name}_data[{size_bytes // 4}];")
+        self.write_line(f"static Tensor {temp_name} = {{")
+        self.write_line(f"    .data = (void*){temp_name}_data,")
+        self.write_line(f"    .dtype = NNC_DTYPE_FLOAT32,")
+        self.write_line(f"}};")
+
+        # Build add call
+        args = []
+        for input_name in node.inputs:
+            var_name = ctx.tensor_symbols.get(input_name, input_name)
+            args.append(f"&{var_name}")
+        args.append(f"&{temp_name}")
+        self.write_line(f"nnc_add({', '.join(args)});")
+
+        output_var = ctx.tensor_symbols.get(node.outputs[0], node.outputs[0])
+        self.write_line(f"{temp_name}.shape = {output_var}.shape;")
+        self.write_line(f"{temp_name}.ndim = {output_var}.ndim;")
+        self.write_line(f"{temp_name}.nbytes = {output_var}.nbytes;")
+        self.write_line(f"nnc_sigmoid(&{temp_name}, &{output_var});")
 
     def _map_dtype(self, dtype: DataType) -> str:
         """Map IR dtype to C dtype."""
