@@ -22,6 +22,45 @@ static int64_t tensor_numel(Tensor* t) {
 }
 
 /* ============================================================================
+ * Numerical Stability Helpers
+ * ============================================================================ */
+
+/* Kahan summation for improved numerical accuracy
+ * Reduces floating-point error accumulation from O(n*eps) to O(eps)
+ * Returns the accurate sum of n float values starting at data
+ */
+static float kahan_sum(const float* data, int64_t n) {
+    float sum = 0.0f;
+    float c = 0.0f;  /* Running compensation for lost low-order bits */
+
+    for (int64_t i = 0; i < n; i++) {
+        float y = data[i] - c;   /* Subtract compensation first */
+        float t = sum + y;        /* Add to sum */
+        c = (t - sum) - y;        /* Update compensation: (sum + y) - sum - y = lost bits */
+        sum = t;
+    }
+    return sum;
+}
+
+/* Pairwise summation alternative for better parallelization potential
+ * Reduces error by recursively summing pairs (log depth instead of linear)
+ */
+static float pairwise_sum(const float* data, int64_t n) {
+    if (n <= 32) {
+        /* Base case: small arrays use direct summation */
+        float sum = 0.0f;
+        for (int64_t i = 0; i < n; i++) {
+            sum += data[i];
+        }
+        return sum;
+    }
+
+    /* Recursive case: split and sum halves */
+    int64_t half = n / 2;
+    return pairwise_sum(data, half) + pairwise_sum(data + half, n - half);
+}
+
+/* ============================================================================
  * Arithmetic Operations
  * ============================================================================ */
 
