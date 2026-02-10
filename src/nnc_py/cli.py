@@ -113,7 +113,7 @@ def compile(onnx_model, output, target, opt_level, entry_name, verbose, max_memo
 
 
 @main.command()
-@click.argument("onnx_model", type=click.Path(exists=True))
+@click.argument("onnx_model", type=click.Path())
 def info(onnx_model):
     """Display information about an ONNX model.
 
@@ -121,19 +121,23 @@ def info(onnx_model):
         nnc info model.onnx
     """
     import onnx
+    from pathlib import Path
 
     try:
         model = onnx.load(onnx_model)
         graph = model.graph
+        
+        # Get just the basename for cleaner output
+        model_name = Path(onnx_model).name
 
-        table = Table(title=f"Model Information: {onnx_model}")
+        table = Table(title=f"Model Information: {model_name}")
         table.add_column("Property", style="cyan")
         table.add_column("Value", style="green")
 
         table.add_row("Model Name", graph.name or "unnamed")
-        table.add_row("Nodes", str(len(graph.node)))
-        table.add_row("Inputs", str(len(graph.input)))
-        table.add_row("Outputs", str(len(graph.output)))
+        table.add_row("Nodes:", str(len(graph.node)))
+        table.add_row("Inputs:", str(len(graph.input)))
+        table.add_row("Outputs:", str(len(graph.output)))
         table.add_row("Initializers", str(len(graph.initializer)))
 
         console.print(table)

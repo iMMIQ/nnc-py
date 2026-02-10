@@ -56,3 +56,23 @@ def test_targets_command(runner):
     assert "x86" in result.output
     assert "npu" in result.output
     assert "Generate code for x86 simulation" in result.output
+
+
+def test_info_command(runner, simple_onnx_model):
+    """Test 'nnc info' command displays model information."""
+    result = runner.invoke(main, ["info", str(simple_onnx_model)])
+    assert result.exit_code == 0
+    assert "Model Information" in result.output
+    assert "simple_model.onnx" in result.output
+    assert "Nodes:" in result.output
+    assert "Inputs:" in result.output
+    assert "Outputs:" in result.output
+    assert "Operators:" in result.output
+    assert "Add: 1" in result.output
+
+
+def test_info_command_invalid_file(runner):
+    """Test 'nnc info' with non-existent file."""
+    result = runner.invoke(main, ["info", "nonexistent.onnx"])
+    assert result.exit_code != 0
+    assert "Error loading model" in result.output
