@@ -532,6 +532,7 @@ void nnc_conv(
                     int w_in = w_out * stride_w - pad_w;
 
                     float sum = 0.0f;
+                    float c = 0.0f;  /* Kahan compensation */
 
                     /* Convolve over kernel */
                     for (int c_in = 0; c_in < C_in; c_in++) {
@@ -553,7 +554,11 @@ void nnc_conv(
                                                       + kh * kernel_w
                                                       + kw;
 
-                                    sum += in_data[in_idx] * weight_data[weight_idx];
+                                    /* Kahan summation for improved numerical accuracy */
+                                    float y = in_data[in_idx] * weight_data[weight_idx] - c;
+                                    float t = sum + y;
+                                    c = (t - sum) - y;
+                                    sum = t;
                                 }
                             }
                         }
