@@ -134,3 +134,41 @@ def test_compile_command_invalid_target(runner, simple_onnx_model, tmp_path):
     ])
     assert result.exit_code != 0
     assert "Invalid value for '-t'" in result.output
+
+
+def test_compile_command_with_max_memory(runner, simple_onnx_model, tmp_path):
+    """Test 'nnc compile' with max memory limit."""
+    output_dir = tmp_path / "output_memory"
+    result = runner.invoke(main, [
+        "compile",
+        str(simple_onnx_model),
+        "-o", str(output_dir),
+        "--max-memory", "256K",
+    ])
+    assert result.exit_code == 0
+    assert "Max Memory: 256K" in result.output
+
+
+def test_compile_command_with_memory_strategy(runner, simple_onnx_model, tmp_path):
+    """Test 'nnc compile' with memory strategy."""
+    output_dir = tmp_path / "output_strategy"
+    result = runner.invoke(main, [
+        "compile",
+        str(simple_onnx_model),
+        "-o", str(output_dir),
+        "--memory-strategy", "basic",
+    ])
+    assert result.exit_code == 0
+    assert "Memory Strategy: basic" in result.output
+
+
+def test_compile_command_with_entry_name(runner, simple_onnx_model, tmp_path):
+    """Test 'nnc compile' with custom entry name."""
+    output_dir = tmp_path / "output_entry"
+    result = runner.invoke(main, [
+        "compile",
+        str(simple_onnx_model),
+        "-o", str(output_dir),
+        "--entry-name", "my_infer",
+    ])
+    assert result.exit_code == 0
