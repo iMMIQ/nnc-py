@@ -40,11 +40,17 @@ All O1 passes plus:
 
 ### Advanced Optimizations (O3)
 
-Currently equivalent to O2. Future additions will include:
+Applied at `opt_level=3` and above:
 
-- Operator fusion (Conv+BN+ReLU, etc.)
-- Layout optimizations
-- Loop fusion
+All O2 passes plus:
+
+- **OperatorFusionPass**: Fuses compatible operator patterns
+  - Conv + ReLU → FusedConvRelu (reduces memory traffic)
+  - Add + ReLU → FusedAddRelu (faster activation)
+  - Conv + Sigmoid → FusedConvSigmoid
+  - Add + Sigmoid → FusedAddSigmoid
+  - Only fuses when producer output has single consumer
+  - Preserves graph semantics exactly
 
 ## Implementation Details
 
@@ -73,10 +79,11 @@ class MyOptimizationPass(PassBase):
 
 ### Pass Execution Order
 
-Passes are executed in the order they are registered. For O1 and above:
+Passes are executed in the order they are registered. For O3:
 
-1. IdentityEliminationPass - removes no-op operations first
+1. IdentityEliminationPass - removes no-op operations
 2. DeadCodeEliminationPass - removes now-unused nodes
-3. LivenessAnalysisPass - analyzes lifetimes on optimized graph
-4. MemoryPlanningPassV2 - plans memory based on lifetimes
-5. (O2+) SpillAnalysisPass - handles overflow if needed
+3. OperatorFusionPass - fuses compatible operator patterns
+4. LivenessAnalysisPass - analyzes lifetimes on optimized graph
+5. MemoryPlanningPassV2 - plans memory based on lifetimes
+6. SpillAnalysisPass - handles overflow if needed
