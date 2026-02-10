@@ -1,8 +1,8 @@
 """Tests for CLI functionality."""
 
-import json
 from pathlib import Path
 
+import onnx
 import pytest
 from click.testing import CliRunner
 from onnx import helper
@@ -37,7 +37,6 @@ def simple_onnx_model(tmp_path):
     )
     model = helper.make_model(graph)
     model_path = tmp_path / "simple_model.onnx"
-    import onnx
     onnx.save(model, model_path)
     return model_path
 
