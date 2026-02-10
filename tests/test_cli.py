@@ -46,3 +46,13 @@ def test_cli_main_command_exists(runner):
     result = runner.invoke(main, ["--help"])
     assert result.exit_code == 0
     assert "NNC - Neural Network Compiler" in result.output
+
+
+def test_targets_command(runner):
+    """Test 'nnc targets' command lists available targets."""
+    result = runner.invoke(main, ["targets"])
+    assert result.exit_code == 0
+    assert "Available Targets" in result.output
+    assert "x86" in result.output
+    assert "npu" in result.output
+    assert "Generate code for x86 simulation" in result.output
