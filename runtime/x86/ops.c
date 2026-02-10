@@ -699,8 +699,12 @@ void nnc_matmul(Tensor* a, Tensor* b, Tensor* output) {
         for (int i = 0; i < M; i++) {
             for (int j = 0; j < N; j++) {
                 float sum = 0.0f;
+                float c = 0.0f;
                 for (int k = 0; k < K; k++) {
-                    sum += a_data[i * K + k] * b_data[k * N + j];
+                    float y = a_data[i * K + k] * b_data[k * N + j] - c;
+                    float t = sum + y;
+                    c = (t - sum) - y;
+                    sum = t;
                 }
                 out_data[i * N + j] = sum;
             }
@@ -712,8 +716,12 @@ void nnc_matmul(Tensor* a, Tensor* b, Tensor* output) {
 
         for (int j = 0; j < N; j++) {
             float sum = 0.0f;
+            float c = 0.0f;
             for (int k = 0; k < K; k++) {
-                sum += a_data[k] * b_data[k * N + j];
+                float y = a_data[k] * b_data[k * N + j] - c;
+                float t = sum + y;
+                c = (t - sum) - y;
+                sum = t;
             }
             out_data[j] = sum;
         }
@@ -724,8 +732,12 @@ void nnc_matmul(Tensor* a, Tensor* b, Tensor* output) {
 
         for (int i = 0; i < M; i++) {
             float sum = 0.0f;
+            float c = 0.0f;
             for (int k = 0; k < K; k++) {
-                sum += a_data[i * K + k] * b_data[k];
+                float y = a_data[i * K + k] * b_data[k] - c;
+                float t = sum + y;
+                c = (t - sum) - y;
+                sum = t;
             }
             out_data[i] = sum;
         }
@@ -776,8 +788,12 @@ void nnc_matmul(Tensor* a, Tensor* b, Tensor* output) {
             for (int i = 0; i < M; i++) {
                 for (int j = 0; j < N; j++) {
                     float sum = 0.0f;
+                    float c = 0.0f;
                     for (int k = 0; k < K; k++) {
-                        sum += a_batch[i * K + k] * b_batch[k * N + j];
+                        float y = a_batch[i * K + k] * b_batch[k * N + j] - c;
+                        float t = sum + y;
+                        c = (t - sum) - y;
+                        sum = t;
                     }
                     out_batch[i * N + j] = sum;
                 }
