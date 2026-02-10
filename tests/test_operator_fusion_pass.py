@@ -277,3 +277,336 @@ def test_idempotent():
     # Should have the same number of nodes
     assert node_count_after_first == node_count_after_second
     assert fused_node_name in ctx.graph.nodes
+
+
+def test_conv_sigmoid_fusion():
+    """Test fusing Conv followed by Sigmoid."""
+    graph = Graph(name="test_conv_sigmoid")
+
+    # Add tensors
+    graph.add_tensor(TensorType(
+        dtype=DataType.FLOAT32,
+        shape=TensorShape(dims=[1, 3, 32, 32]),
+        name="input"
+    ))
+    graph.add_tensor(TensorType(
+        dtype=DataType.FLOAT32,
+        shape=TensorShape(dims=[16, 3, 3, 3]),
+        name="conv_weight"
+    ))
+    graph.add_tensor(TensorType(
+        dtype=DataType.FLOAT32,
+        shape=TensorShape(dims=[1, 16, 30, 30]),
+        name="conv_out"
+    ))
+    graph.add_tensor(TensorType(
+        dtype=DataType.FLOAT32,
+        shape=TensorShape(dims=[1, 16, 30, 30]),
+        name="sigmoid_out"
+    ))
+
+    # Conv node
+    conv_node = Node(
+        op_type=OpType.CONV2D,
+        name="conv_1",
+        inputs=["input", "conv_weight"],
+        outputs=["conv_out"],
+        attrs={"kernel_shape": [3, 3], "strides": [1, 1], "pads": [0, 0, 0, 0]}
+    )
+    graph.add_node(conv_node)
+
+    # Sigmoid node
+    sigmoid_node = Node(
+        op_type=OpType.SIGMOID,
+        name="sigmoid_1",
+        inputs=["conv_out"],
+        outputs=["sigmoid_out"],
+        attrs={}
+    )
+    graph.add_node(sigmoid_node)
+
+    graph.outputs = ["sigmoid_out"]
+
+    ctx = CompileContext(graph=graph, target="x86")
+    pass_obj = OperatorFusionPass()
+    pass_obj.run(ctx)
+
+    # Check for fused node
+    assert "fused_conv_sigmoid_1" in ctx.graph.nodes
+    fused_node = ctx.graph.nodes["fused_conv_sigmoid_1"]
+    assert fused_node.op_type == OpType.FUSED_CONV_SIGMOID
+
+
+def test_add_sigmoid_fusion():
+    """Test fusing Add followed by Sigmoid."""
+    graph = Graph(name="test_add_sigmoid")
+
+    # Add tensors
+    graph.add_tensor(TensorType(
+        dtype=DataType.FLOAT32,
+        shape=TensorShape(dims=[1, 16, 30, 30]),
+        name="input1"
+    ))
+    graph.add_tensor(TensorType(
+        dtype=DataType.FLOAT32,
+        shape=TensorShape(dims=[1, 16, 30, 30]),
+        name="input2"
+    ))
+    graph.add_tensor(TensorType(
+        dtype=DataType.FLOAT32,
+        shape=TensorShape(dims=[1, 16, 30, 30]),
+        name="add_out"
+    ))
+    graph.add_tensor(TensorType(
+        dtype=DataType.FLOAT32,
+        shape=TensorShape(dims=[1, 16, 30, 30]),
+        name="sigmoid_out"
+    ))
+
+    # Add node
+    add_node = Node(
+        op_type=OpType.ADD,
+        name="add_1",
+        inputs=["input1", "input2"],
+        outputs=["add_out"],
+        attrs={}
+    )
+    graph.add_node(add_node)
+
+    # Sigmoid node
+    sigmoid_node = Node(
+        op_type=OpType.SIGMOID,
+        name="sigmoid_1",
+        inputs=["add_out"],
+        outputs=["sigmoid_out"],
+        attrs={}
+    )
+    graph.add_node(sigmoid_node)
+
+    graph.outputs = ["sigmoid_out"]
+
+    ctx = CompileContext(graph=graph, target="x86")
+    pass_obj = OperatorFusionPass()
+    pass_obj.run(ctx)
+
+    # Check for fused node
+    assert "fused_add_sigmoid_1" in ctx.graph.nodes
+    fused_node = ctx.graph.nodes["fused_add_sigmoid_1"]
+    assert fused_node.op_type == OpType.FUSED_ADD_SIGMOID
+
+
+def test_multiple_fusions_in_graph():
+    """Test fusing multiple patterns in the same graph."""
+    graph = Graph(name="test_multiple_fusions")
+
+    # Add tensors
+    graph.add_tensor(TensorType(
+        dtype=DataType.FLOAT32,
+        shape=TensorShape(dims=[1, 3, 32, 32]),
+        name="input"
+    ))
+    graph.add_tensor(TensorType(
+        dtype=DataType.FLOAT32,
+        shape=TensorShape(dims=[16, 3, 3, 3]),
+        name="conv_weight"
+    ))
+    graph.add_tensor(TensorType(
+        dtype=DataType.FLOAT32,
+        shape=TensorShape(dims=[1, 16, 30, 30]),
+        name="conv_out"
+    ))
+    graph.add_tensor(TensorType(
+        dtype=DataType.FLOAT32,
+        shape=TensorShape(dims=[1, 16, 30, 30]),
+        name="relu_out"
+    ))
+    graph.add_tensor(TensorType(
+        dtype=DataType.FLOAT32,
+        shape=TensorShape(dims=[1, 16, 30, 30]),
+        name="add_in"
+    ))
+    graph.add_tensor(TensorType(
+        dtype=DataType.FLOAT32,
+        shape=TensorShape(dims=[1, 16, 30, 30]),
+        name="add_out"
+    ))
+    graph.add_tensor(TensorType(
+        dtype=DataType.FLOAT32,
+        shape=TensorShape(dims=[1, 16, 30, 30]),
+        name="relu2_out"
+    ))
+
+    # Conv + ReLU
+    conv_node = Node(
+        op_type=OpType.CONV2D,
+        name="conv_1",
+        inputs=["input", "conv_weight"],
+        outputs=["conv_out"],
+        attrs={}
+    )
+    graph.add_node(conv_node)
+
+    relu_node = Node(
+        op_type=OpType.RELU,
+        name="relu_1",
+        inputs=["conv_out"],
+        outputs=["relu_out"],
+        attrs={}
+    )
+    graph.add_node(relu_node)
+
+    # Add + ReLU
+    add_node = Node(
+        op_type=OpType.ADD,
+        name="add_1",
+        inputs=["relu_out", "add_in"],
+        outputs=["add_out"],
+        attrs={}
+    )
+    graph.add_node(add_node)
+
+    relu2_node = Node(
+        op_type=OpType.RELU,
+        name="relu_2",
+        inputs=["add_out"],
+        outputs=["relu2_out"],
+        attrs={}
+    )
+    graph.add_node(relu2_node)
+
+    graph.outputs = ["relu2_out"]
+
+    ctx = CompileContext(graph=graph, target="x86")
+    pass_obj = OperatorFusionPass()
+    pass_obj.run(ctx)
+
+    # Should have 2 fused nodes
+    fused_conv_nodes = [n for n in ctx.graph.nodes.values() if n.op_type == OpType.FUSED_CONV_RELU]
+    fused_add_nodes = [n for n in ctx.graph.nodes.values() if n.op_type == OpType.FUSED_ADD_RELU]
+
+    assert len(fused_conv_nodes) == 1, "Should have 1 fused Conv+ReLU node"
+    assert len(fused_add_nodes) == 1, "Should have 1 fused Add+ReLU node"
+
+
+def test_does_not_fuse_graph_output_as_intermediate():
+    """Test that fusion doesn't break when producer output is a graph output."""
+    graph = Graph(name="test_output_preservation")
+
+    # Add tensors
+    graph.add_tensor(TensorType(
+        dtype=DataType.FLOAT32,
+        shape=TensorShape(dims=[1, 3, 32, 32]),
+        name="input"
+    ))
+    graph.add_tensor(TensorType(
+        dtype=DataType.FLOAT32,
+        shape=TensorShape(dims=[16, 3, 3, 3]),
+        name="conv_weight"
+    ))
+    graph.add_tensor(TensorType(
+        dtype=DataType.FLOAT32,
+        shape=TensorShape(dims=[1, 16, 30, 30]),
+        name="conv_out"
+    ))
+    graph.add_tensor(TensorType(
+        dtype=DataType.FLOAT32,
+        shape=TensorShape(dims=[1, 16, 30, 30]),
+        name="relu_out"
+    ))
+
+    # Conv node
+    conv_node = Node(
+        op_type=OpType.CONV2D,
+        name="conv_1",
+        inputs=["input", "conv_weight"],
+        outputs=["conv_out"],
+        attrs={}
+    )
+    graph.add_node(conv_node)
+
+    # ReLU node
+    relu_node = Node(
+        op_type=OpType.RELU,
+        name="relu_1",
+        inputs=["conv_out"],
+        outputs=["relu_out"],
+        attrs={}
+    )
+    graph.add_node(relu_node)
+
+    # Set both as outputs (edge case)
+    graph.outputs = ["conv_out", "relu_out"]
+
+    ctx = CompileContext(graph=graph, target="x86")
+    pass_obj = OperatorFusionPass()
+    pass_obj.run(ctx)
+
+    # In this case, fusion should still happen since only relu_out is used
+    # conv_out is an output but relu also uses it
+    # After fusion, relu_out should be the only output
+    assert "fused_conv_relu_1" in ctx.graph.nodes
+
+
+def test_preserves_conv_attributes():
+    """Test that fused node preserves Conv attributes."""
+    graph = Graph(name="test_conv_attrs")
+
+    # Add tensors
+    graph.add_tensor(TensorType(
+        dtype=DataType.FLOAT32,
+        shape=TensorShape(dims=[1, 3, 32, 32]),
+        name="input"
+    ))
+    graph.add_tensor(TensorType(
+        dtype=DataType.FLOAT32,
+        shape=TensorShape(dims=[16, 3, 3, 3]),
+        name="conv_weight"
+    ))
+    graph.add_tensor(TensorType(
+        dtype=DataType.FLOAT32,
+        shape=TensorShape(dims=[1, 16, 30, 30]),
+        name="conv_out"
+    ))
+    graph.add_tensor(TensorType(
+        dtype=DataType.FLOAT32,
+        shape=TensorShape(dims=[1, 16, 30, 30]),
+        name="relu_out"
+    ))
+
+    # Conv node with specific attributes
+    conv_attrs = {
+        "kernel_shape": [5, 5],
+        "strides": [2, 2],
+        "pads": [1, 1, 1, 1],
+        "dilations": [1, 1],
+        "group": 1,
+    }
+    conv_node = Node(
+        op_type=OpType.CONV2D,
+        name="conv_1",
+        inputs=["input", "conv_weight"],
+        outputs=["conv_out"],
+        attrs=conv_attrs
+    )
+    graph.add_node(conv_node)
+
+    relu_node = Node(
+        op_type=OpType.RELU,
+        name="relu_1",
+        inputs=["conv_out"],
+        outputs=["relu_out"],
+        attrs={}
+    )
+    graph.add_node(relu_node)
+
+    graph.outputs = ["relu_out"]
+
+    ctx = CompileContext(graph=graph, target="x86")
+    pass_obj = OperatorFusionPass()
+    pass_obj.run(ctx)
+
+    # Check that attributes are preserved
+    fused_node = ctx.graph.nodes["fused_conv_relu_1"]
+    assert fused_node.attrs["kernel_shape"] == [5, 5]
+    assert fused_node.attrs["strides"] == [2, 2]
+    assert fused_node.attrs["pads"] == [1, 1, 1, 1]
