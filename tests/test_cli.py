@@ -108,3 +108,29 @@ def test_compile_command_with_opt_level(runner, simple_onnx_model, tmp_path):
     ])
     assert result.exit_code == 0
     assert "Optimization: O2" in result.output
+
+
+def test_compile_command_npu_target(runner, simple_onnx_model, tmp_path):
+    """Test 'nnc compile' with NPU target."""
+    output_dir = tmp_path / "output_npu"
+    result = runner.invoke(main, [
+        "compile",
+        str(simple_onnx_model),
+        "-o", str(output_dir),
+        "-t", "npu",
+    ])
+    assert result.exit_code == 0
+    assert "Target: npu" in result.output
+
+
+def test_compile_command_invalid_target(runner, simple_onnx_model, tmp_path):
+    """Test 'nnc compile' with invalid target (should be caught by Click)."""
+    output_dir = tmp_path / "output_invalid"
+    result = runner.invoke(main, [
+        "compile",
+        str(simple_onnx_model),
+        "-o", str(output_dir),
+        "-t", "invalid",
+    ])
+    assert result.exit_code != 0
+    assert "Invalid value for '-t'" in result.output
