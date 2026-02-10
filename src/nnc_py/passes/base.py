@@ -74,6 +74,8 @@ class PassManager:
         Returns:
             List of passes to run.
         """
+        from nnc_py.passes.dead_code_elimination import DeadCodeEliminationPass
+        from nnc_py.passes.identity_elimination import IdentityEliminationPass
         from nnc_py.passes.liveness import LivenessAnalysisPass
         from nnc_py.passes.memory_planning import MemoryPlanningPassV2
         from nnc_py.passes.spill import SpillAnalysisPass
@@ -85,9 +87,10 @@ class PassManager:
             return [LivenessAnalysisPass(), MemoryPlanningPassV2()]
 
         # O1: Basic optimizations
-        # Note: constant folding is now handled by onnxsim in the frontend
         if opt_level == 1:
             return [
+                IdentityEliminationPass(),  # Remove Identity ops first
+                DeadCodeEliminationPass(),   # Then remove dead code
                 LivenessAnalysisPass(),
                 MemoryPlanningPassV2(),
             ]
@@ -95,6 +98,8 @@ class PassManager:
         # O2: Intermediate optimizations
         if opt_level == 2:
             return [
+                IdentityEliminationPass(),
+                DeadCodeEliminationPass(),
                 LivenessAnalysisPass(),
                 MemoryPlanningPassV2(),
                 SpillAnalysisPass(),  # Handles overflow if max_memory set
@@ -104,6 +109,8 @@ class PassManager:
         if opt_level >= 3:
             # TODO: Add advanced passes (operator fusion, etc.)
             return [
+                IdentityEliminationPass(),
+                DeadCodeEliminationPass(),
                 LivenessAnalysisPass(),
                 MemoryPlanningPassV2(),
                 SpillAnalysisPass(),
