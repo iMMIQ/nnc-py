@@ -81,6 +81,13 @@ class OpType(Enum):
     # Indexing ops
     GATHER = "Gather"
 
+    # Fused operators (for operator fusion pass)
+    FUSED_CONV_RELU = "FusedConvRelu"
+    FUSED_CONV_BIAS_RELU = "FusedConvBiasRelu"
+    FUSED_CONV_SIGMOID = "FusedConvSigmoid"
+    FUSED_ADD_RELU = "FusedAddRelu"
+    FUSED_ADD_SIGMOID = "FusedAddSigmoid"
+
 
 @dataclass
 class Node:
