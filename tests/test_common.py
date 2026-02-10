@@ -514,14 +514,13 @@ class BaseSnapshotTest:
             print(f"[{model_name}] Comparing NNC outputs with ONNX Runtime...")
 
             # Compare NNC debug output with ONNX Runtime
-            # Use relaxed tolerances for floating point differences across implementations
-            # ResNet and deeper models may have accumulated floating point differences
-            # Use higher tolerance for deep networks (ResNet18, VGG19, etc.)
+            # With Kahan summation, we can use much tighter tolerances than before
+            # ResNet/VGG now need ~1.5e-2 rtol and higher atol for small values
+            # This is still ~13x improvement over the previous 2e-1 rtol
             if "resnet" in model_name.lower() or "vgg" in model_name.lower():
-                # Deep networks accumulate more floating point error
-                rtol, atol = 2e-1, 1.5e-2
+                rtol, atol = 1.5e-2, 3e-3
             else:
-                rtol, atol = 1e-1, 1e-3
+                rtol, atol = 1e-3, 1e-5
             comparator = DebugComparator(str(debug_file), str(model_path), rtol=rtol, atol=atol)
             results = comparator.compare()
 
