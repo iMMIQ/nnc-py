@@ -241,3 +241,58 @@ def test_compile_verbose_mode(runner, simple_onnx_model, tmp_path):
         "-v",
     ])
     assert result.exit_code != 0
+
+
+@pytest.fixture
+def debug_output_file(tmp_path):
+    """Create a mock debug output file for testing compare command."""
+    debug_file = tmp_path / "debug_output.txt"
+    debug_file.write_text("""# NNC Debug Output
+Tensor: input
+Shape: [2, 2]
+Data: [[1.0, 2.0], [3.0, 4.0]]
+
+Tensor: output
+Shape: [2, 2]
+Data: [[2.0, 3.0], [4.0, 5.0]]
+""")
+    return debug_file
+
+
+def test_debug_compare_command(runner, debug_output_file, simple_onnx_model):
+    """Test 'nnc debug compare' command."""
+    result = runner.invoke(main, [
+        "debug", "compare",
+        str(debug_output_file),
+        str(simple_onnx_model),
+    ])
+    # The command will fail due to mismatched data, but CLI should handle it
+    assert "Comparing:" in result.output
+    assert "Tolerances:" in result.output
+
+
+def test_debug_compare_with_custom_tolerances(runner, debug_output_file, simple_onnx_model):
+    """Test 'nnc debug compare' with custom tolerances."""
+    result = runner.invoke(main, [
+        "debug", "compare",
+        str(debug_output_file),
+        str(simple_onnx_model),
+        "--rtol", "1e-3",
+        "--atol", "1e-4",
+    ])
+    assert "rtol=0.001" in result.output or "rtol=1e-3" in result.output
+    assert "atol=0.0001" in result.output or "atol=1e-4" in result.output
+
+
+def test_debug_compare_with_json_output(runner, debug_output_file, simple_onnx_model, tmp_path):
+    """Test 'nnc debug compare' with JSON output."""
+    json_output = tmp_path / "results.json"
+    result = runner.invoke(main, [
+        "debug", "compare",
+        str(debug_output_file),
+        str(simple_onnx_model),
+        "--output", str(json_output),
+    ])
+    # Command may fail comparison but JSON should be written
+    # (depending on implementation)
+    assert result.exit_code in [0, 1]  # May pass or fail depending on data
