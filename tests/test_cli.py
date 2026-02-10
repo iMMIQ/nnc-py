@@ -211,3 +211,34 @@ def test_compile_command_debug_mode(runner, simple_onnx_model, tmp_path):
     ])
     assert result.exit_code == 0
     assert "Debug Mode: enabled" in result.output
+
+
+def test_compile_command_invalid_model(runner, tmp_path):
+    """Test 'nnc compile' with non-existent model file."""
+    output_dir = tmp_path / "output"
+    result = runner.invoke(main, [
+        "compile",
+        "nonexistent.onnx",
+        "-o", str(output_dir),
+    ])
+    assert result.exit_code != 0
+
+
+def test_compile_verbose_mode(runner, simple_onnx_model, tmp_path):
+    """Test 'nnc compile' with verbose mode (on error)."""
+    # Create a model that will fail compilation
+    # (empty graph without proper inputs/outputs)
+    graph = helper.make_graph([], "empty", [], [])
+    model = helper.make_model(graph)
+    import onnx
+    bad_model_path = tmp_path / "bad_model.onnx"
+    onnx.save(model, bad_model_path)
+
+    output_dir = tmp_path / "output_bad"
+    result = runner.invoke(main, [
+        "compile",
+        str(bad_model_path),
+        "-o", str(output_dir),
+        "-v",
+    ])
+    assert result.exit_code != 0

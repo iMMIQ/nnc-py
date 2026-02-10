@@ -91,6 +91,15 @@ def compile(onnx_model, output, target, opt_level, entry_name, verbose, max_memo
     console.print()
 
     try:
+        # Validate the model before compilation
+        import onnx
+        model = onnx.load(onnx_model)
+        graph = model.graph
+        
+        # Reject empty graphs (no inputs and no outputs)
+        if len(graph.input) == 0 and len(graph.output) == 0:
+            raise ValueError("Model has no inputs or outputs. Empty graphs cannot be compiled.")
+        
         compiler = Compiler(
             target=target,
             opt_level=opt_level,
