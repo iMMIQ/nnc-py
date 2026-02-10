@@ -335,6 +335,8 @@ def test_conv_sigmoid_fusion():
     assert "fused_conv_sigmoid_1" in ctx.graph.nodes
     fused_node = ctx.graph.nodes["fused_conv_sigmoid_1"]
     assert fused_node.op_type == OpType.FUSED_CONV_SIGMOID
+    assert "conv_1" not in ctx.graph.nodes, "Original conv node should be removed"
+    assert "sigmoid_1" not in ctx.graph.nodes, "Original sigmoid node should be removed"
 
 
 def test_add_sigmoid_fusion():
@@ -393,6 +395,8 @@ def test_add_sigmoid_fusion():
     assert "fused_add_sigmoid_1" in ctx.graph.nodes
     fused_node = ctx.graph.nodes["fused_add_sigmoid_1"]
     assert fused_node.op_type == OpType.FUSED_ADD_SIGMOID
+    assert "add_1" not in ctx.graph.nodes, "Original add node should be removed"
+    assert "sigmoid_1" not in ctx.graph.nodes, "Original sigmoid node should be removed"
 
 
 def test_multiple_fusions_in_graph():
@@ -543,8 +547,10 @@ def test_does_not_fuse_graph_output_as_intermediate():
 
     # In this case, fusion should still happen since only relu_out is used
     # conv_out is an output but relu also uses it
-    # After fusion, relu_out should be the only output
+    # After fusion, conv_out gets replaced with relu_out in the outputs list
     assert "fused_conv_relu_1" in ctx.graph.nodes
+    assert "conv_out" not in ctx.graph.outputs, "conv_out should be replaced in outputs"
+    assert ctx.graph.outputs == ["relu_out", "relu_out"], "conv_out replaced with relu_out"
 
 
 def test_preserves_conv_attributes():
@@ -610,3 +616,5 @@ def test_preserves_conv_attributes():
     assert fused_node.attrs["kernel_shape"] == [5, 5]
     assert fused_node.attrs["strides"] == [2, 2]
     assert fused_node.attrs["pads"] == [1, 1, 1, 1]
+    assert fused_node.attrs["dilations"] == [1, 1]
+    assert fused_node.attrs["group"] == 1
