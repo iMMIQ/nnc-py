@@ -76,3 +76,35 @@ def test_info_command_invalid_file(runner):
     result = runner.invoke(main, ["info", "nonexistent.onnx"])
     assert result.exit_code != 0
     assert "Error loading model" in result.output
+
+
+def test_compile_command_basic(runner, simple_onnx_model, tmp_path):
+    """Test 'nnc compile' command with basic options."""
+    output_dir = tmp_path / "output"
+    result = runner.invoke(main, [
+        "compile",
+        str(simple_onnx_model),
+        "-o", str(output_dir),
+        "-t", "x86",
+    ])
+    assert result.exit_code == 0
+    assert "Compiling" in result.output
+    assert "Target: x86" in result.output
+    # Verify output directory was created
+    assert output_dir.exists()
+    # Check for generated C files
+    c_files = list(output_dir.glob("*.c"))
+    assert len(c_files) > 0, "Expected at least one .c file to be generated"
+
+
+def test_compile_command_with_opt_level(runner, simple_onnx_model, tmp_path):
+    """Test 'nnc compile' with optimization level."""
+    output_dir = tmp_path / "output_opt"
+    result = runner.invoke(main, [
+        "compile",
+        str(simple_onnx_model),
+        "-o", str(output_dir),
+        "-O", "2",
+    ])
+    assert result.exit_code == 0
+    assert "Optimization: O2" in result.output
