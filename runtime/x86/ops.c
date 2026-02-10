@@ -869,12 +869,14 @@ void nnc_gemm(
 
     /* Compute matrix multiplication
      * output[i][j] = alpha * sum(A[i][k] * B[k][j]) + beta * C[i][j]
+     * Uses Kahan summation for improved numerical accuracy
      */
     for (int i = 0; i < M; i++) {
         for (int j = 0; j < N; j++) {
             float sum = 0.0f;
+            float c_comp = 0.0f;  /* Running compensation for lost low-order bits */
 
-            /* Compute dot product: A[i,:] @ B[:,j] */
+            /* Compute dot product: A[i,:] @ B[:,j] using Kahan summation */
             for (int k = 0; k < K; k++) {
                 float a_val, b_val;
 
@@ -892,13 +894,17 @@ void nnc_gemm(
                     b_val = b_data[k * N + j];  /* [K][N] */
                 }
 
-                sum += a_val * b_val;
+                /* Kahan summation: accumulate with compensation */
+                float y = a_val * b_val - c_comp;
+                float t = sum + y;
+                c_comp = (t - sum) - y;
+                sum = t;
             }
 
             /* Apply alpha scaling */
             sum *= alpha;
 
-            /* Add bias (if present) with beta scaling */
+            /* Add bias (if present) with beta scaling using Kahan summation */
             if (c_data != NULL) {
                 float c_val;
                 if (c->ndim == 1) {
@@ -908,7 +914,11 @@ void nnc_gemm(
                     /* 2D bias: [M, N] */
                     c_val = c_data[i * N + j];
                 }
-                sum += beta * c_val;
+                /* Add bias with proper precision using Kahan summation */
+                float y = beta * c_val - c_comp;
+                float t = sum + y;
+                c_comp = (t - sum) - y;
+                sum = t;
             }
 
             out_data[i * N + j] = sum;
