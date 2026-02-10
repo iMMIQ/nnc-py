@@ -1,7 +1,6 @@
 """C code emitter for generating C11 code."""
 
 from io import StringIO
-from typing import List
 
 from nnc_py.ir.context import CompileContext
 from nnc_py.ir.node import Node, OpType
@@ -931,7 +930,7 @@ class CEmitter:
 
         # Declare temp tensor buffer
         temp_name = f"{ctx.node_symbols.get(node.name, node.name)}_temp"
-        self.write_line(f"float {temp_name}_data[{size_bytes // 4}];")
+        self.write_line(f"float {temp_name}_data[{size_bytes // 4}];  // 4 bytes per float32")
         self.write_line(f"static Tensor {temp_name} = {{")
         self.write_line(f"    .data = (void*){temp_name}_data,")
         self.write_line(f"    .dtype = NNC_DTYPE_FLOAT32,")
@@ -995,7 +994,7 @@ class CEmitter:
             return
 
         temp_name = f"{ctx.node_symbols.get(node.name, node.name)}_temp"
-        self.write_line(f"float {temp_name}_data[{size_bytes // 4}];")
+        self.write_line(f"float {temp_name}_data[{size_bytes // 4}];  // 4 bytes per float32")
         self.write_line(f"static Tensor {temp_name} = {{")
         self.write_line(f"    .data = (void*){temp_name}_data,")
         self.write_line(f"    .dtype = NNC_DTYPE_FLOAT32,")
@@ -1052,7 +1051,7 @@ class CEmitter:
             return
 
         temp_name = f"{ctx.node_symbols.get(node.name, node.name)}_temp"
-        self.write_line(f"float {temp_name}_data[{size_bytes // 4}];")
+        self.write_line(f"float {temp_name}_data[{size_bytes // 4}];  // 4 bytes per float32")
         self.write_line(f"static Tensor {temp_name} = {{")
         self.write_line(f"    .data = (void*){temp_name}_data,")
         self.write_line(f"    .dtype = NNC_DTYPE_FLOAT32,")
@@ -1085,7 +1084,7 @@ class CEmitter:
             return
 
         temp_name = f"{ctx.node_symbols.get(node.name, node.name)}_temp"
-        self.write_line(f"float {temp_name}_data[{size_bytes // 4}];")
+        self.write_line(f"float {temp_name}_data[{size_bytes // 4}];  // 4 bytes per float32")
         self.write_line(f"static Tensor {temp_name} = {{")
         self.write_line(f"    .data = (void*){temp_name}_data,")
         self.write_line(f"    .dtype = NNC_DTYPE_FLOAT32,")
