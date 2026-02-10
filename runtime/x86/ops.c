@@ -978,9 +978,13 @@ void nnc_reducesum(Tensor* input, Tensor* output, int axis, int keepdims) {
     for (int64_t outer = 0; outer < outer_size; outer++) {
         for (int64_t inner = 0; inner < inner_size; inner++) {
             float sum = 0.0f;
+            float c = 0.0f;  /* Running compensation for lost low-order bits */
             for (int64_t r = 0; r < reduce_dim; r++) {
                 int64_t idx = outer * reduce_dim * inner_size + r * inner_size + inner;
-                sum += in_data[idx];
+                float y = in_data[idx] - c;   /* Subtract compensation first */
+                float t = sum + y;
+                c = (t - sum) - y;            /* Track lost precision */
+                sum = t;
             }
 
             /* Calculate output index */
