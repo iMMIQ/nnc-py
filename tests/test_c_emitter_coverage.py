@@ -295,3 +295,246 @@ def test_emit_not_call():
     output = emitter.output.getvalue()
 
     assert "nnc_not" in output
+
+
+def test_emit_split_call():
+    """Test _emit_split_call generates correct C code."""
+    graph = create_basic_graph("split_test")
+
+    # Add input and output tensors
+    add_tensor_to_graph(graph, "input", [1, 4, 224, 224])
+    add_tensor_to_graph(graph, "output1", [1, 2, 224, 224])
+    add_tensor_to_graph(graph, "output2", [1, 2, 224, 224])
+
+    # Create split node
+    node = Node(
+        op_type=OpType.SPLIT,
+        name="split1",
+        inputs=["input"],
+        outputs=["output1", "output2"],
+        attrs={"axis": 1},
+    )
+    graph.add_node(node)
+
+    ctx = create_compile_context(graph)
+
+    emitter = CEmitter()
+    emitter._emit_split_call(ctx, node)
+    output = emitter.output.getvalue()
+
+    # Verify generated code contains expected patterns
+    assert "nnc_split" in output
+    assert "split1_outputs" in output
+    assert ("&input" in output or "&tensor_input" in output)
+    assert "2" in output  # num_outputs
+
+
+def test_emit_transpose_call_with_perm():
+    """Test _emit_transpose_call with explicit permutation."""
+    graph = create_basic_graph("transpose_test")
+
+    add_tensor_to_graph(graph, "input", [1, 224, 224, 3])
+    add_tensor_to_graph(graph, "output", [1, 3, 224, 224])
+
+    node = Node(
+        op_type=OpType.TRANSPOSE,
+        name="transpose1",
+        inputs=["input"],
+        outputs=["output"],
+        attrs={"perm": [0, 3, 1, 2]},
+    )
+    graph.add_node(node)
+
+    ctx = create_compile_context(graph)
+
+    emitter = CEmitter()
+    emitter._emit_transpose_call(ctx, node)
+    output = emitter.output.getvalue()
+
+    assert "nnc_transpose" in output
+    assert "transpose1_perm" in output
+    assert ("0, 3, 1, 2" in output or "[0, 3, 1, 2]" in output)
+
+
+def test_emit_transpose_call_without_perm():
+    """Test _emit_transpose_call without permutation (reverse)."""
+    graph = create_basic_graph("transpose_test")
+
+    add_tensor_to_graph(graph, "input", [1, 224, 224, 3])
+    add_tensor_to_graph(graph, "output", [1, 3, 224, 224])
+
+    node = Node(
+        op_type=OpType.TRANSPOSE,
+        name="transpose2",
+        inputs=["input"],
+        outputs=["output"],
+        attrs={},
+    )
+    graph.add_node(node)
+
+    ctx = create_compile_context(graph)
+
+    emitter = CEmitter()
+    emitter._emit_transpose_call(ctx, node)
+    output = emitter.output.getvalue()
+
+    assert "nnc_transpose" in output
+    assert "NULL" in output  # No permutation array
+
+
+def test_emit_flatten_call():
+    """Test _emit_flatten_call generates correct C code."""
+    graph = create_basic_graph("flatten_test")
+
+    add_tensor_to_graph(graph, "input", [1, 3, 224, 224])
+    add_tensor_to_graph(graph, "output", [1, 150528])
+
+    node = Node(
+        op_type=OpType.FLATTEN,
+        name="flatten1",
+        inputs=["input"],
+        outputs=["output"],
+        attrs={"axis": 1},
+    )
+    graph.add_node(node)
+
+    ctx = create_compile_context(graph)
+
+    emitter = CEmitter()
+    emitter._emit_flatten_call(ctx, node)
+    output = emitter.output.getvalue()
+
+    assert "nnc_flatten" in output
+    assert ("axis" in output or "1" in output)
+
+
+def test_emit_softmax_call():
+    """Test _emit_softmax_call generates correct C code."""
+    graph = create_basic_graph("softmax_test")
+
+    add_tensor_to_graph(graph, "input", [1, 1000])
+    add_tensor_to_graph(graph, "output", [1, 1000])
+
+    node = Node(
+        op_type=OpType.SOFTMAX,
+        name="softmax1",
+        inputs=["input"],
+        outputs=["output"],
+        attrs={"axis": -1},
+    )
+    graph.add_node(node)
+
+    ctx = create_compile_context(graph)
+
+    emitter = CEmitter()
+    emitter._emit_softmax_call(ctx, node)
+    output = emitter.output.getvalue()
+
+    assert "nnc_softmax" in output
+    assert ("-1" in output or "axis" in output)
+
+
+def test_emit_tile_call():
+    """Test _emit_tile_call generates correct C code."""
+    graph = create_basic_graph("tile_test")
+
+    add_tensor_to_graph(graph, "input", [1, 3])
+    add_tensor_to_graph(graph, "repeats", [2])  # Tile 2 times
+    add_tensor_to_graph(graph, "output", [1, 6])
+
+    # Add repeats as constant
+    graph.constants["repeats"] = [2, 2]
+
+    node = Node(
+        op_type=OpType.TILE,
+        name="tile1",
+        inputs=["input", "repeats"],
+        outputs=["output"],
+        attrs={},
+    )
+    graph.add_node(node)
+
+    ctx = create_compile_context(graph)
+
+    emitter = CEmitter()
+    emitter._emit_tile_call(ctx, node)
+    output = emitter.output.getvalue()
+
+    assert "nnc_tile" in output
+
+
+def test_emit_reducemean_call():
+    """Test _emit_reducemean_call generates correct C code."""
+    graph = create_basic_graph("reducemean_test")
+
+    add_tensor_to_graph(graph, "input", [1, 3, 224, 224])
+    add_tensor_to_graph(graph, "output", [1, 224, 224])
+
+    node = Node(
+        op_type=OpType.REDUCE_MEAN,
+        name="reducemean1",
+        inputs=["input"],
+        outputs=["output"],
+        attrs={"axes": [1], "keepdims": 1},
+    )
+    graph.add_node(node)
+
+    ctx = create_compile_context(graph)
+
+    emitter = CEmitter()
+    emitter._emit_reducemean_call(ctx, node)
+    output = emitter.output.getvalue()
+
+    assert "nnc_reducemean" in output
+    assert "1" in output  # axis value
+
+
+def test_emit_reducesum_call():
+    """Test _emit_reducesum_call generates correct C code."""
+    graph = create_basic_graph("reducesum_test")
+
+    add_tensor_to_graph(graph, "input", [1, 3, 224, 224])
+    add_tensor_to_graph(graph, "output", [1, 224, 224])
+
+    node = Node(
+        op_type=OpType.REDUCE_SUM,
+        name="reducesum1",
+        inputs=["input"],
+        outputs=["output"],
+        attrs={"axes": [1], "keepdims": 1},
+    )
+    graph.add_node(node)
+
+    ctx = create_compile_context(graph)
+
+    emitter = CEmitter()
+    emitter._emit_reducesum_call(ctx, node)
+    output = emitter.output.getvalue()
+
+    assert "nnc_reducesum" in output
+
+
+def test_emit_unsqueeze_call():
+    """Test _emit_unsqueeze_call generates correct C code."""
+    graph = create_basic_graph("unsqueeze_test")
+
+    add_tensor_to_graph(graph, "input", [1, 3])
+    add_tensor_to_graph(graph, "output", [1, 1, 3])
+
+    node = Node(
+        op_type=OpType.UNSQUEEZE,
+        name="unsqueeze1",
+        inputs=["input"],
+        outputs=["output"],
+        attrs={"axis": 1},
+    )
+    graph.add_node(node)
+
+    ctx = create_compile_context(graph)
+
+    emitter = CEmitter()
+    emitter._emit_unsqueeze_call(ctx, node)
+    output = emitter.output.getvalue()
+
+    assert "nnc_unsqueeze" in output
+    assert "1" in output  # axis value
