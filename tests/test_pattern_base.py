@@ -18,11 +18,11 @@ def test_pattern_match_dataclass():
     match = PatternMatch(
         bindings={"x": node1},
         anchor=node1,
-        nodes={node1}
+        node_names={node1.name}
     )
     assert match.bindings["x"] == node1
     assert match.anchor == node1
-    assert node1 in match.nodes
+    assert node1.name in match.node_names
 
 
 def test_match_context_with_bindings():
