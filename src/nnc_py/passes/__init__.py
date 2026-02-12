@@ -24,6 +24,7 @@ from nnc_py.passes.dead_code_elimination import DeadCodeEliminationPass
 from nnc_py.passes.identity_elimination import IdentityEliminationPass
 from nnc_py.passes.pattern_fusion import PatternFusionPass
 from nnc_py.passes.fusion_groups import FusionGroup, GroupArena
+from nnc_py.passes.path_validator import PathValidator
 
 __all__ = [
     # Indexed forward graph
@@ -61,4 +62,7 @@ __all__ = [
     # Union-Find fusion groups
     "FusionGroup",
     "GroupArena",
+
+    # Path validation
+    "PathValidator",
 ]
