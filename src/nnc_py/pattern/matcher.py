@@ -46,8 +46,9 @@ class PatternMatcher:
             return []
 
         # Sort by anchor position in topological order
-        topo_order = {n: i for i, n in enumerate(self.graph.topological_sort())}
-        matches.sort(key=lambda m: topo_order.get(m.anchor, float('inf')))
+        topo_nodes = self.graph.topological_sort()
+        topo_order = {n.name: i for i, n in enumerate(topo_nodes)}
+        matches.sort(key=lambda m: topo_order.get(m.anchor.name, float('inf')))
 
         selected: List[PatternMatch] = []
         used_names: Set[str] = set()
