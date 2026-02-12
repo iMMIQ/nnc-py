@@ -20,6 +20,7 @@ from nnc_py.passes.memory_planning import MemoryPlanningPassV2, get_memory_alloc
 # Optimization passes
 from nnc_py.passes.dead_code_elimination import DeadCodeEliminationPass
 from nnc_py.passes.identity_elimination import IdentityEliminationPass
+from nnc_py.passes.pattern_fusion import PatternFusionPass
 
 __all__ = [
     # Core pass infrastructure
@@ -44,4 +45,5 @@ __all__ = [
     # Optimization passes
     "DeadCodeEliminationPass",
     "IdentityEliminationPass",
+    "PatternFusionPass",
 ]
