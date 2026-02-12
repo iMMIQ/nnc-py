@@ -42,3 +42,37 @@ def test_helper_functions_exist():
 
     add_tensor_to_graph(graph, "input", [1, 3, 224, 224])
     assert "input" in graph.tensors
+
+
+def test_emit_concat_call():
+    """Test _emit_concat_call generates correct C code."""
+    graph = create_basic_graph("concat_test")
+
+    # Add input tensors
+    add_tensor_to_graph(graph, "input1", [1, 3, 224, 224])
+    add_tensor_to_graph(graph, "input2", [1, 3, 224, 224])
+    add_tensor_to_graph(graph, "output", [1, 6, 224, 224])
+
+    # Create concat node
+    node = Node(
+        op_type=OpType.CONCAT,
+        name="concat1",
+        inputs=["input1", "input2"],
+        outputs=["output"],
+        attrs={"axis": 1},
+    )
+    graph.add_node(node)
+
+    ctx = create_compile_context(graph)
+
+    emitter = CEmitter()
+    emitter._emit_concat_call(ctx, node)
+    output = emitter.output.getvalue()
+
+    # Verify generated code contains expected patterns
+    assert "nnc_concat" in output
+    assert "concat1_inputs" in output
+    assert ("&input1" in output or "&tensor_input1" in output)
+    assert ("&input2" in output or "&tensor_input2" in output)
+    assert ("&output" in output or "&tensor_output" in output)
+    assert "axis" in output or "1" in output
