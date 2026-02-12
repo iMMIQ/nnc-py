@@ -1,6 +1,7 @@
 """Optimization passes module."""
 
 from nnc_py.passes.indexed_forward_graph import Edge, IndexedForwardGraph, NodeEntry
+from nnc_py.passes.dominator_tree import DominatorTree
 from nnc_py.passes.base import PassBase, PassManager
 # New memory strategy interface
 from nnc_py.passes.memory_strategy import (
@@ -28,6 +29,9 @@ __all__ = [
     "Edge",
     "IndexedForwardGraph",
     "NodeEntry",
+
+    # Post-dominator tree
+    "DominatorTree",
 
     # Core pass infrastructure
     "PassBase",
