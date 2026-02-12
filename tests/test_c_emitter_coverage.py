@@ -538,3 +538,139 @@ def test_emit_unsqueeze_call():
 
     assert "nnc_unsqueeze" in output
     assert "1" in output  # axis value
+
+
+def test_emit_cast_call():
+    """Test _emit_cast_call generates correct C code."""
+    graph = create_basic_graph("cast_test")
+
+    add_tensor_to_graph(graph, "input", [1, 3], dtype=DataType.FLOAT32)
+    add_tensor_to_graph(graph, "output", [1, 3], dtype=DataType.INT32)
+
+    node = Node(
+        op_type=OpType.CAST,
+        name="cast1",
+        inputs=["input"],
+        outputs=["output"],
+        attrs={"to": DataType.INT32},
+    )
+    graph.add_node(node)
+
+    ctx = create_compile_context(graph)
+
+    emitter = CEmitter()
+    emitter._emit_cast_call(ctx, node)
+    output = emitter.output.getvalue()
+
+    assert "nnc_cast" in output
+    assert "NNC_DTYPE_INT32" in output
+
+
+def test_emit_gather_call():
+    """Test _emit_gather_call generates correct C code."""
+    graph = create_basic_graph("gather_test")
+
+    add_tensor_to_graph(graph, "data", [2, 3], dtype=DataType.FLOAT32)
+    add_tensor_to_graph(graph, "indices", [1], dtype=DataType.INT64)
+    add_tensor_to_graph(graph, "output", [1, 3], dtype=DataType.FLOAT32)
+
+    node = Node(
+        op_type=OpType.GATHER,
+        name="gather1",
+        inputs=["data", "indices"],
+        outputs=["output"],
+        attrs={"axis": 0},
+    )
+    graph.add_node(node)
+
+    ctx = create_compile_context(graph)
+
+    emitter = CEmitter()
+    emitter._emit_gather_call(ctx, node)
+    output = emitter.output.getvalue()
+
+    assert "nnc_gather" in output
+    assert ("axis" in output or "0" in output)
+
+
+def test_emit_lstm_call():
+    """Test _emit_lstm_call generates correct C code."""
+    graph = create_basic_graph("lstm_test")
+
+    add_tensor_to_graph(graph, "X", [1, 10, 64])
+    add_tensor_to_graph(graph, "W", [256, 64])
+    add_tensor_to_graph(graph, "R", [256, 64])
+    add_tensor_to_graph(graph, "B", [512])
+    add_tensor_to_graph(graph, "Y", [1, 10, 128])
+    add_tensor_to_graph(graph, "Y_h", [1, 1, 128])
+    add_tensor_to_graph(graph, "Y_c", [1, 1, 128])
+
+    node = Node(
+        op_type=OpType.LSTM,
+        name="lstm1",
+        inputs=["X", "W", "R", "B"],
+        outputs=["Y", "Y_h", "Y_c"],
+        attrs={"direction": "forward", "hidden_size": 128},
+    )
+    graph.add_node(node)
+
+    ctx = create_compile_context(graph)
+
+    emitter = CEmitter()
+    emitter._emit_lstm_call(ctx, node)
+    output = emitter.output.getvalue()
+
+    assert "nnc_lstm" in output
+
+
+def test_emit_fused_conv_relu_call():
+    """Test _emit_fused_conv_relu_call generates correct C code."""
+    graph = create_basic_graph("fused_conv_relu_test")
+
+    add_tensor_to_graph(graph, "input", [1, 3, 224, 224])
+    add_tensor_to_graph(graph, "weight", [64, 3, 7, 7])
+    add_tensor_to_graph(graph, "output", [1, 64, 112, 112])
+
+    node = Node(
+        op_type=OpType.FUSED_CONV_RELU,
+        name="conv_relu1",
+        inputs=["input", "weight"],
+        outputs=["output"],
+        attrs={"kernel_shape": [7, 7], "strides": [2, 2], "pads": [3, 3]},
+    )
+    graph.add_node(node)
+
+    ctx = create_compile_context(graph)
+
+    emitter = CEmitter()
+    emitter._emit_fused_conv_relu_call(ctx, node)
+    output = emitter.output.getvalue()
+
+    assert "nnc_conv_relu" in output
+    assert "NULL" in output  # No bias
+
+
+def test_emit_fused_add_relu_call():
+    """Test _emit_fused_add_relu_call generates correct C code."""
+    graph = create_basic_graph("fused_add_relu_test")
+
+    add_tensor_to_graph(graph, "input1", [1, 64, 112, 112])
+    add_tensor_to_graph(graph, "input2", [1, 64, 112, 112])
+    add_tensor_to_graph(graph, "output", [1, 64, 112, 112])
+
+    node = Node(
+        op_type=OpType.FUSED_ADD_RELU,
+        name="add_relu1",
+        inputs=["input1", "input2"],
+        outputs=["output"],
+        attrs={},
+    )
+    graph.add_node(node)
+
+    ctx = create_compile_context(graph)
+
+    emitter = CEmitter()
+    emitter._emit_fused_add_relu_call(ctx, node)
+    output = emitter.output.getvalue()
+
+    assert "nnc_add_relu" in output
