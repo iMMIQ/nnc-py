@@ -44,13 +44,19 @@ Applied at `opt_level=3` and above:
 
 All O2 passes plus:
 
-- **OperatorFusionPass**: Fuses compatible operator patterns
-  - Conv + ReLU → FusedConvRelu (reduces memory traffic)
-  - Add + ReLU → FusedAddRelu (faster activation)
-  - Conv + Sigmoid → FusedConvSigmoid
-  - Add + Sigmoid → FusedAddSigmoid
+- **PatternFusionPass**: Declarative pattern-based operator fusion
+  - Uses TVM-style Dataflow Pattern Language (DFPL)
+  - Built-in fusion patterns:
+    - Conv + ReLU → FusedConvRelu (reduces memory traffic)
+    - Add + ReLU → FusedAddRelu (faster activation)
+    - Conv + Sigmoid → FusedConvSigmoid
+    - Add + Sigmoid → FusedAddSigmoid
+    - MatMul + ReLU → FusedMatMulRelu
   - Only fuses when producer output has single consumer
   - Preserves graph semantics exactly
+  - Supports custom pattern registration via `register_pattern()`
+
+See `docs/pattern_matching_guide.md` for details on defining custom fusion patterns.
 
 ## Implementation Details
 
