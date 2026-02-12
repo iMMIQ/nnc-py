@@ -674,3 +674,30 @@ def test_emit_fused_add_relu_call():
     output = emitter.output.getvalue()
 
     assert "nnc_add_relu" in output
+
+
+def test_emit_fused_matmul_relu_call():
+    """Test _emit_fused_matmul_relu_call generates correct C code."""
+    graph = create_basic_graph("fused_matmul_relu_test")
+
+    add_tensor_to_graph(graph, "input", [1, 64, 112, 112])
+    add_tensor_to_graph(graph, "weight", [64, 64, 1, 1])
+    add_tensor_to_graph(graph, "output", [1, 64, 112, 112])
+
+    node = Node(
+        op_type=OpType.FUSED_MATMUL_RELU,
+        name="matmul_relu1",
+        inputs=["input", "weight"],
+        outputs=["output"],
+        attrs={},
+    )
+    graph.add_node(node)
+
+    ctx = create_compile_context(graph)
+
+    emitter = CEmitter()
+    emitter._emit_fused_matmul_relu_call(ctx, node)
+    output = emitter.output.getvalue()
+
+    assert "nnc_matmul_relu" in output
+    assert "NULL" in output  # No bias

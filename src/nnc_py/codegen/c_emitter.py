@@ -888,6 +888,7 @@ class CEmitter:
             OpType.FUSED_CONV_SIGMOID,
             OpType.FUSED_ADD_RELU,
             OpType.FUSED_ADD_SIGMOID,
+            OpType.FUSED_MATMUL_RELU,
         )
 
     def _emit_fused_operator(self, ctx: CompileContext, node: Node) -> None:
@@ -907,6 +908,8 @@ class CEmitter:
             self._emit_fused_add_relu_call(ctx, node)
         elif node.op_type == OpType.FUSED_ADD_SIGMOID:
             self._emit_fused_add_sigmoid_call(ctx, node)
+        elif node.op_type == OpType.FUSED_MATMUL_RELU:
+            self._emit_fused_matmul_relu_call(ctx, node)
 
     def _emit_fused_conv_relu_call(self, ctx: CompileContext, node: Node) -> None:
         """Emit direct nnc_conv_relu() function call.
@@ -1036,6 +1039,35 @@ class CEmitter:
 
         self.write_line(f"nnc_add_sigmoid({', '.join(args)});")
 
+    def _emit_fused_matmul_relu_call(self, ctx: CompileContext, node: Node) -> None:
+        """Emit direct nnc_matmul_relu() function call.
+
+        Arguments: input, weight, bias (or NULL), output
+        """
+        args = []
+
+        # Input tensor
+        if len(node.inputs) >= 1:
+            var_name = ctx.tensor_symbols.get(node.inputs[0], node.inputs[0])
+            args.append(f"&{var_name}")  # input
+        # Weight tensor
+        if len(node.inputs) >= 2:
+            var_name = ctx.tensor_symbols.get(node.inputs[1], node.inputs[1])
+            args.append(f"&{var_name}")  # weight
+
+        # Bias tensor (optional)
+        if len(node.inputs) >= 3:
+            var_name = ctx.tensor_symbols.get(node.inputs[2], node.inputs[2])
+            args.append(f"&{var_name}")  # bias
+        else:
+            args.append("NULL")
+
+        # Output tensor
+        if len(node.outputs) >= 1:
+            var_name = ctx.tensor_symbols.get(node.outputs[0], node.outputs[0])
+            args.append(f"&{var_name}")  # output
+
+        self.write_line(f"nnc_matmul_relu({', '.join(args)});")
     # ----------------------------------------------------------------------
     # Old expansion methods (kept for reference but no longer used)
     # ----------------------------------------------------------------------
