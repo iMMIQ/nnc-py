@@ -75,6 +75,7 @@ class PassManager:
             List of passes to run.
         """
         from nnc_py.passes.dead_code_elimination import DeadCodeEliminationPass
+        from nnc_py.passes.dominator_fusion import DominatorFusionPass
         from nnc_py.passes.identity_elimination import IdentityEliminationPass
         from nnc_py.passes.liveness import LivenessAnalysisPass
         from nnc_py.passes.memory_planning import MemoryPlanningPassV2
@@ -112,6 +113,7 @@ class PassManager:
                 IdentityEliminationPass(),
                 DeadCodeEliminationPass(),
                 PatternFusionPass(),      # NEW: Pattern-based fusion
+                DominatorFusionPass(),     # NEW: Dominator-based fusion
                 LivenessAnalysisPass(),
                 MemoryPlanningPassV2(),
                 SpillAnalysisPass(),
