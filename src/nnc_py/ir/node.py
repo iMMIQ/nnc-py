@@ -88,6 +88,9 @@ class OpType(Enum):
     FUSED_ADD_RELU = "FusedAddRelu"
     FUSED_ADD_SIGMOID = "FusedAddSigmoid"
 
+    # NEW: Extended fused operators
+    FUSED_MATMUL_RELU = "FusedMatMulRelu"
+
 
 @dataclass
 class Node:

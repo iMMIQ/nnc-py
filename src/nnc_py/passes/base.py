@@ -79,7 +79,7 @@ class PassManager:
         from nnc_py.passes.liveness import LivenessAnalysisPass
         from nnc_py.passes.memory_planning import MemoryPlanningPassV2
         from nnc_py.passes.spill import SpillAnalysisPass
-        from nnc_py.passes.operator_fusion import OperatorFusionPass
+        from nnc_py.passes.pattern_fusion import PatternFusionPass
 
         # O0: Essential passes only (liveness + memory planning)
         # These are needed for code generation even without optimization
@@ -111,7 +111,7 @@ class PassManager:
             return [
                 IdentityEliminationPass(),
                 DeadCodeEliminationPass(),
-                OperatorFusionPass(),  # NEW: Fuse operators before liveness analysis
+                PatternFusionPass(),      # NEW: Pattern-based fusion
                 LivenessAnalysisPass(),
                 MemoryPlanningPassV2(),
                 SpillAnalysisPass(),

@@ -22,6 +22,9 @@ from nnc_py.pattern.patterns import (
 from nnc_py.pattern.matcher import PatternMatcher
 from nnc_py.pattern.registry import PatternRegistry, register_pattern, FusionPattern
 
+# Import fusion_patterns to trigger pattern registration
+from nnc_py.pattern import fusion_patterns  # noqa: F401
+
 __all__ = [
     "DFPattern",
     "PatternMatch",
