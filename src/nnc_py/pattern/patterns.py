@@ -14,7 +14,7 @@ class WildcardPattern(DFPattern):
         return PatternMatch(
             bindings={self.name: node},
             anchor=node,
-            nodes={node}
+            node_names={node.name}
         )
 
 
@@ -38,7 +38,7 @@ class OpPattern(DFPattern):
             result = PatternMatch(
                 bindings={self.name: node},
                 anchor=node,
-                nodes={node}
+                node_names={node.name}
             )
 
         context.set_cached(node, self, result)
@@ -83,16 +83,16 @@ class AndPattern(DFPattern):
         if right_match is None:
             return None
 
-        # Merge bindings and nodes
+        # Merge bindings and node_names
         merged = left_match.bindings.copy()
         merged.update(right_match.bindings)
-        merged_nodes = left_match.nodes | right_match.nodes
+        merged_nodes = left_match.node_names | right_match.node_names
 
         # Anchor is the last matched node
         return PatternMatch(
             bindings=merged,
             anchor=right_match.anchor or left_match.anchor,
-            nodes=merged_nodes
+            node_names=merged_nodes
         )
 
 
@@ -126,11 +126,11 @@ class UsePattern(DFPattern):
                     # Merge bindings
                     merged = prod_match.bindings.copy()
                     merged.update(cons_match.bindings)
-                    merged_nodes = prod_match.nodes | cons_match.nodes
+                    merged_nodes = prod_match.node_names | cons_match.node_names
                     return PatternMatch(
                         bindings=merged,
                         anchor=cons_match.anchor,
-                        nodes=merged_nodes
+                        node_names=merged_nodes
                     )
         return None
 
@@ -171,11 +171,11 @@ class ExclusiveUsePattern(DFPattern):
             if cons_match:
                 merged = prod_match.bindings.copy()
                 merged.update(cons_match.bindings)
-                merged_nodes = prod_match.nodes | cons_match.nodes
+                merged_nodes = prod_match.node_names | cons_match.node_names
                 return PatternMatch(
                     bindings=merged,
                     anchor=cons_match.anchor,
-                    nodes=merged_nodes
+                    node_names=merged_nodes
                 )
         return None
 

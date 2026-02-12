@@ -50,13 +50,13 @@ class PatternMatcher:
         matches.sort(key=lambda m: topo_order.get(m.anchor, float('inf')))
 
         selected: List[PatternMatch] = []
-        used_nodes: Set[Node] = set()
+        used_names: Set[str] = set()
 
         for match in matches:
             # Check if any node in this match is already used
-            if match.nodes.isdisjoint(used_nodes):
+            if match.node_names.isdisjoint(used_names):
                 selected.append(match)
-                used_nodes.update(match.nodes)
+                used_names.update(match.node_names)
 
         return selected
 
@@ -95,11 +95,11 @@ class PatternMatcher:
         results.sort(key=lambda x: x[1].priority, reverse=True)
 
         selected: List[Tuple[PatternMatch, 'FusionPattern']] = []
-        used_nodes: Set[Node] = set()
+        used_names: Set[str] = set()
 
         for match, fusion_pattern in results:
-            if match.nodes.isdisjoint(used_nodes):
+            if match.node_names.isdisjoint(used_names):
                 selected.append((match, fusion_pattern))
-                used_nodes.update(match.nodes)
+                used_names.update(match.node_names)
 
         return selected

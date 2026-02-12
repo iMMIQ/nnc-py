@@ -12,11 +12,15 @@ class PatternMatch:
     Attributes:
         bindings: Maps pattern variable names to matched nodes/tensors
         anchor: The root node of the matched pattern
-        nodes: All nodes in the matched subgraph
+        node_names: Names of all nodes in the matched subgraph
     """
     bindings: Dict[str, Any]
     anchor: 'Node'
-    nodes: Set['Node']
+    node_names: Set[str] = field(default_factory=set)
+
+    def get_nodes(self, graph: 'Graph') -> Set['Node']:
+        """Get actual node objects from their names."""
+        return {graph.get_node(name) for name in self.node_names if name in graph.nodes}
 
 
 @dataclass
