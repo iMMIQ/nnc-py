@@ -524,10 +524,7 @@ clean:
         tensor_out1, data_out1 = self._make_tensor(out1)
         tensor_out2, data_out2 = self._make_tensor(out2)
 
-        # Create array of output pointers - need to keep tensors alive
-        output_tensors = [tensor_out1, tensor_out2]
-        self._tensor_refs.append(output_tensors)
-
+        # Create array of output pointers
         output_ptrs = (ctypes.POINTER(self.Tensor) * 2)()
         output_ptrs[0] = ctypes.pointer(tensor_out1)
         output_ptrs[1] = ctypes.pointer(tensor_out2)

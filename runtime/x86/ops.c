@@ -22,6 +22,15 @@ static int64_t tensor_numel(Tensor* t) {
 }
 
 /* ============================================================================
+ * Slow Memory Buffer for Concat Simulation
+ * Simulates NPU slow memory for concat operations
+ * ============================================================================ */
+
+/* Maximum slow memory buffer size: 64MB should be enough for most models */
+#define SLOW_MEM_BUFFER_SIZE (64 * 1024 * 1024)
+static char slow_mem_buffer[SLOW_MEM_BUFFER_SIZE];
+
+/* ============================================================================
  * Numerical Stability Helpers
  * ============================================================================ */
 
@@ -1039,9 +1048,14 @@ void nnc_reducesum(Tensor* input, Tensor* output, int axis, int keepdims) {
  * ============================================================================ */
 
 void nnc_concat(Tensor** inputs, Tensor* output, int num_inputs, int axis) {
-    /* Concatenation along specified axis
-     * Combines multiple tensors along a given dimension
-     * Handles both float32 and int64 data types
+    /* Concatenation along specified axis - simulates NPU memory transfer behavior
+     *
+     * This implementation simulates how an NPU would handle concat:
+     * 1. Copy scattered fast memory data to contiguous slow memory buffer
+     * 2. Copy entire slow memory buffer back to fast memory output
+     *
+     * This matches the actual hardware behavior where concat requires
+     * gathering data from multiple locations into a single contiguous buffer.
      */
 
     /* Handle negative axis */
@@ -1051,6 +1065,18 @@ void nnc_concat(Tensor** inputs, Tensor* output, int num_inputs, int axis) {
 
     /* Check if output is INT64 dtype */
     int is_int64 = (output->dtype == 6);  /* NNC_DTYPE_INT64 */
+    size_t elem_size = is_int64 ? sizeof(int64_t) : sizeof(float);
+
+    /* Calculate total output size in bytes */
+    int64_t total_elems = tensor_numel(output);
+    size_t total_bytes = total_elems * elem_size;
+
+    /* Verify buffer is large enough */
+    if (total_bytes > SLOW_MEM_BUFFER_SIZE) {
+        fprintf(stderr, "nnc_concat: output size %zu exceeds slow memory buffer %d\n",
+                total_bytes, SLOW_MEM_BUFFER_SIZE);
+        return;
+    }
 
     /* Calculate dimensions before and after concat axis */
     int64_t outer_size = 1;
@@ -1063,44 +1089,55 @@ void nnc_concat(Tensor** inputs, Tensor* output, int num_inputs, int axis) {
         inner_size *= output->shape[i];
     }
 
-    /* Copy data from each input tensor */
-    int64_t output_offset = 0;
+    /* Phase 1: Copy data from fast memory inputs to slow memory buffer */
+    /* Calculate the starting offset for each input in the final output layout */
+    int64_t input_start_offset = 0;
+    for (int input_idx = 0; input_idx < num_inputs; input_idx++) {
+        input_start_offset += inputs[input_idx]->shape[axis] * inner_size;
+    }
+
+    /* Process each input, placing data at correct position in slow memory */
+    int64_t current_offset = 0;
     for (int input_idx = 0; input_idx < num_inputs; input_idx++) {
         Tensor* input = inputs[input_idx];
-
         int64_t concat_dim = input->shape[axis];
-        int64_t copy_size = concat_dim * inner_size;
+        int64_t slice_size = concat_dim * inner_size;
 
         if (is_int64) {
-            /* INT64 data path */
-            int64_t* out_data = (int64_t*)output->data;
             int64_t* in_data = (int64_t*)input->data;
+            int64_t* slow_data = (int64_t*)slow_mem_buffer;
 
             for (int64_t outer = 0; outer < outer_size; outer++) {
-                int64_t dest_base = outer * output->shape[axis] * inner_size + output_offset;
+                /* Source: input data at this slice */
                 int64_t src_base = outer * concat_dim * inner_size;
+                /* Destination: position in the final output layout for this input */
+                int64_t dest_base = outer * output->shape[axis] * inner_size + current_offset;
 
-                for (int64_t i = 0; i < copy_size; i++) {
-                    out_data[dest_base + i] = in_data[src_base + i];
+                for (int64_t i = 0; i < slice_size; i++) {
+                    slow_data[dest_base + i] = in_data[src_base + i];
                 }
             }
         } else {
-            /* FLOAT32 data path (default) */
-            float* out_data = (float*)output->data;
             float* in_data = (float*)input->data;
+            float* slow_data = (float*)slow_mem_buffer;
 
             for (int64_t outer = 0; outer < outer_size; outer++) {
-                int64_t dest_base = outer * output->shape[axis] * inner_size + output_offset;
+                /* Source: input data at this slice */
                 int64_t src_base = outer * concat_dim * inner_size;
+                /* Destination: position in the final output layout for this input */
+                int64_t dest_base = outer * output->shape[axis] * inner_size + current_offset;
 
-                for (int64_t i = 0; i < copy_size; i++) {
-                    out_data[dest_base + i] = in_data[src_base + i];
+                for (int64_t i = 0; i < slice_size; i++) {
+                    slow_data[dest_base + i] = in_data[src_base + i];
                 }
             }
         }
 
-        output_offset += concat_dim * inner_size;
+        current_offset += concat_dim * inner_size;
     }
+
+    /* Phase 2: Copy entire slow memory buffer back to fast memory output */
+    memcpy(output->data, slow_mem_buffer, total_bytes);
 }
 
 void nnc_batchnorm(
@@ -1204,8 +1241,6 @@ void nnc_split(Tensor* input, Tensor** outputs, int num_outputs, int axis) {
      * A full implementation would handle variable split sizes
      */
 
-    float* in_data = (float*)input->data;
-
     /* Handle negative axis */
     if (axis < 0) {
         axis = input->ndim + axis;
@@ -1225,21 +1260,46 @@ void nnc_split(Tensor* input, Tensor** outputs, int num_outputs, int axis) {
         inner_size *= input->shape[i];
     }
 
+    /* Check if input is INT64 dtype */
+    int is_int64 = (input->dtype == 6);  /* NNC_DTYPE_INT64 */
+
     /* Copy data to each output */
     for (int out_idx = 0; out_idx < num_outputs; out_idx++) {
         Tensor* out = outputs[out_idx];
-        float* out_data = (float*)out->data;
 
-        for (int outer = 0; outer < outer_size; outer++) {
-            /* Calculate source offset for this output */
-            int64_t base_src = outer * split_dim * inner_size + out_idx * split_size * inner_size;
+        if (is_int64) {
+            /* INT64 data path */
+            int64_t* in_data = (int64_t*)input->data;
+            int64_t* out_data = (int64_t*)out->data;
 
-            /* Copy this slice */
-            int64_t copy_size = split_size * inner_size;
-            int64_t dest_offset = outer * split_size * inner_size;
+            for (int64_t outer = 0; outer < outer_size; outer++) {
+                /* Calculate source offset for this output */
+                int64_t base_src = outer * split_dim * inner_size + out_idx * split_size * inner_size;
 
-            for (int64_t i = 0; i < copy_size; i++) {
-                out_data[dest_offset + i] = in_data[base_src + i];
+                /* Copy this slice */
+                int64_t copy_size = split_size * inner_size;
+                int64_t dest_offset = outer * split_size * inner_size;
+
+                for (int64_t i = 0; i < copy_size; i++) {
+                    out_data[dest_offset + i] = in_data[base_src + i];
+                }
+            }
+        } else {
+            /* FLOAT32 data path (default) */
+            float* in_data = (float*)input->data;
+            float* out_data = (float*)out->data;
+
+            for (int64_t outer = 0; outer < outer_size; outer++) {
+                /* Calculate source offset for this output */
+                int64_t base_src = outer * split_dim * inner_size + out_idx * split_size * inner_size;
+
+                /* Copy this slice */
+                int64_t copy_size = split_size * inner_size;
+                int64_t dest_offset = outer * split_size * inner_size;
+
+                for (int64_t i = 0; i < copy_size; i++) {
+                    out_data[dest_offset + i] = in_data[base_src + i];
+                }
             }
         }
     }

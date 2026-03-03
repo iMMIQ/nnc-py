@@ -1119,6 +1119,10 @@ class ONNXFrontend:
                 output_shape = list(input_shape)
                 # Sort axes in descending order to insert from back to front
                 for axis in sorted(axes, reverse=True):
+                    # Convert numpy array/scalar to Python int if needed
+                    if hasattr(axis, "item"):
+                        axis = axis.item()
+                    axis = int(axis)
                     # Handle negative axis
                     if axis < 0:
                         axis = len(output_shape) + 1 + axis
