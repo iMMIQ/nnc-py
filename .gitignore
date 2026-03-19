@@ -156,3 +156,6 @@ model
 # uv
 uv.lock
 nnc-py.tar.gz
+
+# Claude Code
+.claude/
