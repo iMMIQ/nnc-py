@@ -56,6 +56,11 @@ All O2 passes plus:
   - Preserves graph semantics exactly
   - Supports custom pattern registration via `register_pattern()`
 
+- **DominatorFusionPass**: Graph-structure-aware fusion for non-linear patterns
+  - Runs after `PatternFusionPass`
+  - Handles safe fusion opportunities across diamond-like subgraphs
+  - Preserves execution-order constraints before memory planning
+
 See `docs/pattern_matching_guide.md` for details on defining custom fusion patterns.
 
 ## Implementation Details
@@ -89,7 +94,8 @@ Passes are executed in the order they are registered. For O3:
 
 1. IdentityEliminationPass - removes no-op operations
 2. DeadCodeEliminationPass - removes now-unused nodes
-3. OperatorFusionPass - fuses compatible operator patterns
-4. LivenessAnalysisPass - analyzes lifetimes on optimized graph
-5. MemoryPlanningPassV2 - plans memory based on lifetimes
-6. SpillAnalysisPass - handles overflow if needed
+3. PatternFusionPass - fuses declaratively registered operator patterns
+4. DominatorFusionPass - fuses graph-structure-aware patterns after basic pattern fusion
+5. LivenessAnalysisPass - analyzes lifetimes on optimized graph
+6. MemoryPlanningPassV2 - plans memory based on lifetimes
+7. SpillAnalysisPass - handles overflow if needed

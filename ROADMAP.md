@@ -1,6 +1,6 @@
 # NNC-Py Development Roadmap
 
-> Neural Network Compiler for Python - ONNX to C with x86 and NPU support
+> Neural Network Compiler for Python - ONNX to C with an implemented x86 backend and a planned NPU backend
 
 ---
 
@@ -40,8 +40,8 @@
 | # | Pass | File | Status | Description |
 |---|------|------|--------|-------------|
 | 1 | ConstantFoldingPass | `passes/constant_folding.py` | ✅ | Fold constant expressions (e.g., `Add(const1, const2)` → const) |
-| 2 | DeadCodeEliminationPass | `passes/dce.py` | 🔜 | Remove unused nodes and tensors |
-| 3 | IdentityEliminationPass | `passes/identity_elim.py` | 🔜 | Remove identity operations (`Identity(x)` → `x`) |
+| 2 | DeadCodeEliminationPass | `passes/dead_code_elimination.py` | ✅ | Remove unused nodes and tensors |
+| 3 | IdentityEliminationPass | `passes/identity_elimination.py` | ✅ | Remove identity operations (`Identity(x)` → `x`) |
 
 #### Batch 2: Structure Optimization (O2)
 | # | Pass | File | Status | Description |
@@ -67,13 +67,13 @@
 
 ### Optimization Level Configuration
 ```
-O0: [] (no optimization)
-O1: [ConstantFolding]
-O2: [O1 + LivenessAnalysis, MemoryPlanning]
-O3: [O2 + InplaceOp, (more passes planned)]
+O0: [LivenessAnalysis, MemoryPlanningV2]
+O1: [IdentityElimination, DeadCodeElimination, O0]
+O2: [O1 + SpillAnalysis]
+O3: [O2 + PatternFusion + DominatorFusion]
 ```
 
-**Goal**: ⚠️ Optimize IR for better performance (ConstantFolding, LivenessAnalysis, MemoryPlanning implemented)
+**Goal**: ⚠️ Optimize IR for better performance (identity elimination, dead code elimination, liveness, memory planning, spill analysis, and O3 fusion are implemented)
 
 ---
 
@@ -115,7 +115,7 @@ O3: [O2 + InplaceOp, (more passes planned)]
 - [x] Basic unit tests
 - [x] Integration tests with real models
 - [x] Runtime operator tests (vs numpy)
-- [ ] Reference implementation comparison (vs ONNX Runtime)
+- [x] Reference implementation comparison tooling (debug compare vs ONNX Runtime)
 - [ ] Performance benchmarks
 - [ ] Correctness validation suite
 - [ ] CI/CD pipeline
@@ -191,8 +191,8 @@ O3: [O2 + InplaceOp, (more passes planned)]
 
 ### v0.2.0 - Optimization ✅
 - [x] Graph optimization framework
-- [x] Constant folding pass
-- [ ] Operator fusion
+- [x] Frontend simplification / constant folding via onnxsim
+- [x] Operator fusion
 - [x] Memory planning (liveness + buffer sharing)
 - [ ] Transpose elimination
 
