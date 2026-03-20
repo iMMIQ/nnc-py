@@ -15,12 +15,99 @@ import onnx
 from onnx import helper, numpy_helper
 
 from nnc_py import Compiler
+from nnc_py.codegen.x86_backend import X86Backend
+from nnc_py.ir.context import CompileContext
+from nnc_py.ir.graph import Graph
+from nnc_py.ir.node import Node, OpType
+from nnc_py.ir.tensor import TensorShape, TensorType
+from nnc_py.ir.types import DataType
+from nnc_py.passes.base import PassManager
+from nnc_py.passes.memory_planning import get_memory_allocation_plan
 
 # Get the runtime directory path
 _NNC_RUNTIME_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
     'runtime'
 )
+
+
+def _tensor(name: str, elements: int) -> TensorType:
+    return TensorType(
+        name=name,
+        dtype=DataType.FLOAT32,
+        shape=TensorShape([1, elements]),
+    )
+
+
+def _build_cost_aware_spill_context() -> CompileContext:
+    graph = Graph("cost-aware-spill")
+    graph.inputs.extend(["x_big", "y_small", "z_small"])
+    graph.outputs.extend(["near_done", "out"])
+
+    for tensor_name, elements in {
+        "x_big": 16,
+        "y_small": 16,
+        "z_small": 16,
+        "near_big": 64,
+        "far_small": 16,
+        "newcomer": 16,
+        "near_done": 16,
+        "far_done": 16,
+        "out": 16,
+    }.items():
+        graph.add_tensor(_tensor(tensor_name, elements))
+
+    for node in [
+        Node(OpType.RELU, "n0", ["x_big"], ["near_big"]),
+        Node(OpType.RELU, "n1", ["y_small"], ["far_small"]),
+        Node(OpType.RELU, "n2", ["z_small"], ["newcomer"]),
+        Node(OpType.RELU, "n3", ["near_big"], ["near_done"]),
+        Node(OpType.RELU, "n4", ["far_small"], ["far_done"]),
+        Node(OpType.ADD, "n5", ["newcomer", "far_done"], ["out"]),
+    ]:
+        graph.add_node(node)
+
+    ctx = CompileContext(graph=graph, target="x86", optimization_level=2)
+    ctx.metadata["max_memory"] = 384
+    ctx.metadata["entry_point"] = "nnc_run"
+
+    for pass_obj in PassManager.get_default_passes(2):
+        pass_obj.run(ctx)
+
+    return ctx
+
+
+def _build_cost_aware_spill_model() -> onnx.ModelProto:
+    inputs = [
+        helper.make_tensor_value_info("x_big", onnx.TensorProto.FLOAT, [1, 16]),
+        helper.make_tensor_value_info("y_small", onnx.TensorProto.FLOAT, [1, 16]),
+        helper.make_tensor_value_info("z_small", onnx.TensorProto.FLOAT, [1, 16]),
+    ]
+    outputs = [
+        helper.make_tensor_value_info("near_done", onnx.TensorProto.FLOAT, [1, 16]),
+        helper.make_tensor_value_info("out", onnx.TensorProto.FLOAT, [1, 16]),
+    ]
+    nodes = [
+        helper.make_node("Relu", ["x_big"], ["near_big"], name="n0"),
+        helper.make_node("Relu", ["y_small"], ["far_small"], name="n1"),
+        helper.make_node("Relu", ["z_small"], ["newcomer"], name="n2"),
+        helper.make_node("Relu", ["near_big"], ["near_done"], name="n3"),
+        helper.make_node("Relu", ["far_small"], ["far_done"], name="n4"),
+        helper.make_node("Add", ["newcomer", "far_done"], ["out"], name="n5"),
+    ]
+    graph = helper.make_graph(nodes, "cost-aware-spill", inputs, outputs)
+    return helper.make_model(graph, opset_imports=[helper.make_operatorsetid("", 14)])
+
+
+def _write_artifacts(artifacts, output_dir: str) -> None:
+    for artifact in artifacts.files:
+        path = os.path.join(output_dir, artifact.filename)
+        if artifact.file_type == "binary":
+            with open(path, "wb") as f:
+                f.write(artifact.content)
+        else:
+            with open(path, "w") as f:
+                f.write(artifact.content)
 
 
 def create_simple_linear_model(
@@ -560,6 +647,49 @@ def test_memory_no_overlaps():
 
     finally:
         os.unlink(model_path)
+
+
+def test_cost_aware_unified_spill_codegen_handles_reloadable_spills():
+    ctx = _build_cost_aware_spill_context()
+    alloc_plan = get_memory_allocation_plan(ctx)
+
+    assert alloc_plan is not None
+    assert alloc_plan.has_spill
+
+    artifacts = X86Backend().generate(ctx)
+
+    with tempfile.TemporaryDirectory() as output_dir:
+        _write_artifacts(artifacts, output_dir)
+
+        with open(os.path.join(output_dir, "model.c"), "r") as f:
+            model_c = f.read()
+        with open(os.path.join(output_dir, "tensors.c"), "r") as f:
+            tensors_c = f.read()
+
+        assert "_nnc_slow_pool" in tensors_c
+        assert "_nnc_reload_buffer_" in model_c
+        assert "memcpy(_nnc_slow_pool +" in model_c
+
+
+def test_cost_aware_compile_path_uses_unified_spill_codegen():
+    model = _build_cost_aware_spill_model()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        model_path = os.path.join(tmpdir, "cost_aware_spill.onnx")
+        output_dir = os.path.join(tmpdir, "build")
+        onnx.save(model, model_path)
+
+        compiler = Compiler(target="x86", opt_level=2)
+        compiler.compile(model_path, output_dir, max_memory="128B")
+
+        with open(os.path.join(output_dir, "model.c"), "r") as f:
+            model_c = f.read()
+        with open(os.path.join(output_dir, "tensors.c"), "r") as f:
+            tensors_c = f.read()
+
+        assert "_nnc_reload_buffer_" in model_c
+        assert "memcpy(_nnc_slow_pool +" in model_c
+        assert "_nnc_slow_pool" in tensors_c
 
 
 if __name__ == '__main__':

@@ -109,6 +109,13 @@ class SpillAnalysisPass(PassBase):
         if "max_memory" not in ctx.metadata:
             return
 
+        alloc_plan = ctx.metadata.get("memory_allocation_plan")
+        if alloc_plan is not None and alloc_plan.has_spill:
+            # Unified allocators already emitted spill/reload operations.
+            # Skip legacy spill re-planning to preserve allocator decisions.
+            ctx.metadata["spill_plan"] = None
+            return
+
         if "memory_plan" not in ctx.metadata:
             # Memory planning must be run first
             raise RuntimeError("MemoryPlanningPass must be run before SpillAnalysisPass")

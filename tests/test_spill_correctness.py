@@ -5,6 +5,7 @@ produce the same results as ONNX Runtime reference implementation.
 """
 import os
 import re
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -19,8 +20,92 @@ except ImportError:
     HAS_ONNXRUNTIME = False
 
 from nnc_py import Compiler
+from nnc_py.codegen.x86_backend import X86Backend
+from nnc_py.ir.context import CompileContext
+from nnc_py.ir.graph import Graph
+from nnc_py.ir.node import Node, OpType
+from nnc_py.ir.tensor import TensorShape, TensorType
+from nnc_py.ir.types import DataType
+from nnc_py.passes.base import PassManager
 
 _NNC_RUNTIME_PATH = Path(__file__).parent.parent / "runtime"
+
+
+def _tensor(name: str, elements: int) -> TensorType:
+    return TensorType(
+        name=name,
+        dtype=DataType.FLOAT32,
+        shape=TensorShape([1, elements]),
+    )
+
+
+def _build_cost_aware_spill_context() -> CompileContext:
+    graph = Graph("cost-aware-spill")
+    graph.inputs.extend(["x_big", "y_small", "z_small"])
+    graph.outputs.extend(["near_done", "out"])
+
+    for tensor_name, elements in {
+        "x_big": 16,
+        "y_small": 16,
+        "z_small": 16,
+        "near_big": 64,
+        "far_small": 16,
+        "newcomer": 16,
+        "near_done": 16,
+        "far_done": 16,
+        "out": 16,
+    }.items():
+        graph.add_tensor(_tensor(tensor_name, elements))
+
+    for node in [
+        Node(OpType.RELU, "n0", ["x_big"], ["near_big"]),
+        Node(OpType.RELU, "n1", ["y_small"], ["far_small"]),
+        Node(OpType.RELU, "n2", ["z_small"], ["newcomer"]),
+        Node(OpType.RELU, "n3", ["near_big"], ["near_done"]),
+        Node(OpType.RELU, "n4", ["far_small"], ["far_done"]),
+        Node(OpType.ADD, "n5", ["newcomer", "far_done"], ["out"]),
+    ]:
+        graph.add_node(node)
+
+    ctx = CompileContext(graph=graph, target="x86", optimization_level=2)
+    ctx.metadata["max_memory"] = 384
+    ctx.metadata["entry_point"] = "nnc_run"
+
+    for pass_obj in PassManager.get_default_passes(2):
+        pass_obj.run(ctx)
+
+    return ctx
+
+
+def _build_cost_aware_spill_model() -> onnx.ModelProto:
+    inputs = [
+        onnx.helper.make_tensor_value_info("x_big", onnx.TensorProto.FLOAT, [1, 16]),
+        onnx.helper.make_tensor_value_info("y_small", onnx.TensorProto.FLOAT, [1, 16]),
+        onnx.helper.make_tensor_value_info("z_small", onnx.TensorProto.FLOAT, [1, 16]),
+    ]
+    outputs = [
+        onnx.helper.make_tensor_value_info("near_done", onnx.TensorProto.FLOAT, [1, 16]),
+        onnx.helper.make_tensor_value_info("out", onnx.TensorProto.FLOAT, [1, 16]),
+    ]
+    nodes = [
+        onnx.helper.make_node("Relu", ["x_big"], ["near_big"], name="n0"),
+        onnx.helper.make_node("Relu", ["y_small"], ["far_small"], name="n1"),
+        onnx.helper.make_node("Relu", ["z_small"], ["newcomer"], name="n2"),
+        onnx.helper.make_node("Relu", ["near_big"], ["near_done"], name="n3"),
+        onnx.helper.make_node("Relu", ["far_small"], ["far_done"], name="n4"),
+        onnx.helper.make_node("Add", ["newcomer", "far_done"], ["out"], name="n5"),
+    ]
+    graph = onnx.helper.make_graph(nodes, "cost-aware-spill", inputs, outputs)
+    return onnx.helper.make_model(graph, opset_imports=[onnx.helper.make_operatorsetid("", 14)])
+
+
+def _write_artifacts(artifacts, output_dir: Path) -> None:
+    for artifact in artifacts.files:
+        path = output_dir / artifact.filename
+        if artifact.file_type == "binary":
+            path.write_bytes(artifact.content)
+        else:
+            path.write_text(artifact.content)
 
 
 def create_model_for_spill_test(tensor_size: int = 128) -> onnx.ModelProto:
@@ -542,6 +627,267 @@ custom_runner.o: custom_runner.c model.h
 
     finally:
         os.unlink(model_path)
+
+
+def test_cost_aware_unified_spill_runtime_correctness():
+    ctx = _build_cost_aware_spill_context()
+    artifacts = X86Backend().generate(ctx)
+
+    with tempfile.TemporaryDirectory() as output_dir_str:
+        output_dir = Path(output_dir_str)
+        _write_artifacts(artifacts, output_dir)
+
+        makefile = output_dir / "Makefile"
+        makefile.write_text(
+            makefile.read_text().replace(
+                "NNC_RUNTIME ?= ../../runtime",
+                f"NNC_RUNTIME = {_NNC_RUNTIME_PATH}",
+            )
+        )
+
+        custom_runner = output_dir / "custom_runner.c"
+        custom_runner.write_text(
+            """
+#include <stdio.h>
+#include "model.h"
+#include "nnc_ops.h"
+
+extern Tensor tensor_x_big;
+extern Tensor tensor_y_small;
+extern Tensor tensor_z_small;
+extern Tensor tensor_near_done;
+extern Tensor tensor_out;
+
+int main(void) {
+    static float x_buffer[16];
+    static float y_buffer[16];
+    static float z_buffer[16];
+
+    tensor_x_big.data = x_buffer;
+    tensor_y_small.data = y_buffer;
+    tensor_z_small.data = z_buffer;
+
+    float *x = (float *)tensor_x_big.data;
+    float *y = (float *)tensor_y_small.data;
+    float *z = (float *)tensor_z_small.data;
+
+    for (int i = 0; i < 16; i++) {
+        x[i] = -(float)(i + 1);
+        y[i] = (float)(i + 1);
+        z[i] = (float)(100 + i);
+    }
+
+    nnc_run();
+
+    if (tensor_x_big.data != x_buffer || tensor_y_small.data != y_buffer || tensor_z_small.data != z_buffer) {
+        fprintf(stderr, "input binding not restored\\n");
+        return 2;
+    }
+
+    float *near_done = (float *)tensor_near_done.data;
+    float *out = (float *)tensor_out.data;
+
+    printf("NEAR_DONE:");
+    for (int i = 0; i < 8; i++) {
+        printf(" %.1f", near_done[i]);
+    }
+    printf("\\n");
+
+    printf("OUT:");
+    for (int i = 0; i < 8; i++) {
+        printf(" %.1f", out[i]);
+    }
+    printf("\\n");
+
+    for (int i = 0; i < 16; i++) {
+        x[i] = -(float)(2 * (i + 1));
+        y[i] = (float)(10 + i);
+        z[i] = (float)(200 + i);
+    }
+
+    nnc_run();
+
+    printf("NEAR_DONE_2:");
+    for (int i = 0; i < 8; i++) {
+        printf(" %.1f", near_done[i]);
+    }
+    printf("\\n");
+
+    printf("OUT_2:");
+    for (int i = 0; i < 8; i++) {
+        printf(" %.1f", out[i]);
+    }
+    printf("\\n");
+
+    return 0;
+}
+"""
+        )
+
+        with open(makefile, "a") as f:
+            f.write(
+                """
+custom_runner: model.o tensors.o ops.o custom_runner.o
+\t$(CC) $(CFLAGS) -o custom_runner $^ $(LDFLAGS)
+
+custom_runner.o: custom_runner.c model.h
+\t$(CC) $(CFLAGS) -c custom_runner.c
+"""
+            )
+
+        build = subprocess.run(
+            ["make", "clean", "all", "custom_runner"],
+            cwd=output_dir,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert build.returncode == 0, build.stderr
+
+        run = subprocess.run(
+            [str(output_dir / "custom_runner")],
+            cwd=output_dir,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert run.returncode == 0, run.stderr
+
+        near_match = re.search(r"NEAR_DONE:(.+)", run.stdout)
+        out_match = re.search(r"OUT:(.+)", run.stdout)
+        near_match_2 = re.search(r"NEAR_DONE_2:(.+)", run.stdout)
+        out_match_2 = re.search(r"OUT_2:(.+)", run.stdout)
+
+        assert near_match is not None
+        assert out_match is not None
+        assert near_match_2 is not None
+        assert out_match_2 is not None
+
+        near_done = np.array([float(x) for x in near_match.group(1).split()], dtype=np.float32)
+        out = np.array([float(x) for x in out_match.group(1).split()], dtype=np.float32)
+        near_done_2 = np.array([float(x) for x in near_match_2.group(1).split()], dtype=np.float32)
+        out_2 = np.array([float(x) for x in out_match_2.group(1).split()], dtype=np.float32)
+
+        expected_near_done = np.zeros(8, dtype=np.float32)
+        expected_out = np.array([101.0 + (2.0 * i) for i in range(8)], dtype=np.float32)
+        expected_near_done_2 = np.zeros(8, dtype=np.float32)
+        expected_out_2 = np.array([210.0 + (2.0 * i) for i in range(8)], dtype=np.float32)
+
+        assert np.allclose(near_done, expected_near_done)
+        assert np.allclose(out, expected_out)
+        assert np.allclose(near_done_2, expected_near_done_2)
+        assert np.allclose(out_2, expected_out_2)
+
+
+def test_cost_aware_unified_spill_compile_path_runtime_correctness():
+    model = _build_cost_aware_spill_model()
+
+    with tempfile.TemporaryDirectory() as output_dir_str:
+        output_dir = Path(output_dir_str)
+        model_path = output_dir / "cost_aware_spill.onnx"
+        onnx.save(model, model_path)
+
+        compiler = Compiler(target="x86", opt_level=2)
+        compiler.compile(str(model_path), str(output_dir / "build"), max_memory="128B")
+
+        build_dir = output_dir / "build"
+        makefile = build_dir / "Makefile"
+        makefile.write_text(
+            makefile.read_text().replace(
+                "NNC_RUNTIME ?= ../../runtime",
+                f"NNC_RUNTIME = {_NNC_RUNTIME_PATH}",
+            )
+        )
+
+        custom_runner = build_dir / "custom_runner.c"
+        custom_runner.write_text(
+            """
+#include <stdio.h>
+#include "model.h"
+#include "nnc_ops.h"
+
+extern Tensor tensor_x_big;
+extern Tensor tensor_y_small;
+extern Tensor tensor_z_small;
+extern Tensor tensor_near_done;
+extern Tensor tensor_out;
+
+int main(void) {
+    float *x = (float *)tensor_x_big.data;
+    float *y = (float *)tensor_y_small.data;
+    float *z = (float *)tensor_z_small.data;
+
+    for (int i = 0; i < 16; i++) {
+        x[i] = -(float)(i + 1);
+        y[i] = (float)(i + 1);
+        z[i] = (float)(100 + i);
+    }
+
+    nnc_run();
+
+    float *near_done = (float *)tensor_near_done.data;
+    float *out = (float *)tensor_out.data;
+
+    printf("NEAR_DONE:");
+    for (int i = 0; i < 8; i++) {
+        printf(" %.1f", near_done[i]);
+    }
+    printf("\\n");
+
+    printf("OUT:");
+    for (int i = 0; i < 8; i++) {
+        printf(" %.1f", out[i]);
+    }
+    printf("\\n");
+
+    return 0;
+}
+"""
+        )
+
+        with open(makefile, "a") as f:
+            f.write(
+                """
+custom_runner: model.o tensors.o ops.o custom_runner.o
+\t$(CC) $(CFLAGS) -o custom_runner $^ $(LDFLAGS)
+
+custom_runner.o: custom_runner.c model.h
+\t$(CC) $(CFLAGS) -c custom_runner.c
+"""
+            )
+
+        build = subprocess.run(
+            ["make", "clean", "all", "custom_runner"],
+            cwd=build_dir,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert build.returncode == 0, build.stderr
+
+        run = subprocess.run(
+            [str(build_dir / "custom_runner")],
+            cwd=build_dir,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert run.returncode == 0, run.stderr
+
+        near_match = re.search(r"NEAR_DONE:(.+)", run.stdout)
+        out_match = re.search(r"OUT:(.+)", run.stdout)
+
+        assert near_match is not None
+        assert out_match is not None
+
+        near_done = np.array([float(x) for x in near_match.group(1).split()], dtype=np.float32)
+        out = np.array([float(x) for x in out_match.group(1).split()], dtype=np.float32)
+
+        expected_near_done = np.zeros(8, dtype=np.float32)
+        expected_out = np.array([101.0 + (2.0 * i) for i in range(8)], dtype=np.float32)
+
+        assert np.allclose(near_done, expected_near_done)
+        assert np.allclose(out, expected_out)
 
 
 if __name__ == '__main__':

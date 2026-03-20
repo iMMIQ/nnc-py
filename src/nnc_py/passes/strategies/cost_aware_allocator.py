@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Dict, Optional
 
 from nnc_py.ir.context import CompileContext
+from nnc_py.ir.node import Node, OpType
 from nnc_py.passes.liveness import TensorLiveness
 from nnc_py.passes.memory_plan import MemoryBuffer
 from nnc_py.passes.memory_strategy import (
@@ -31,6 +32,19 @@ class CostAwareAllocator(MemoryAllocationStrategy):
 
     DEFAULT_ALIGNMENT = 16
     MAX_EXACT_EVICTION_CANDIDATES = 12
+    # These kernels are expected to tolerate input/output aliasing when the
+    # reused input dies at the current node. Keep this list aligned with
+    # runtime kernel behavior and the memory-limit regression tests.
+    INPLACE_REUSE_OPS = {
+        OpType.RELU,
+        OpType.SIGMOID,
+        OpType.TANH,
+        OpType.ADD,
+        OpType.SUB,
+        OpType.MUL,
+        OpType.DIV,
+        OpType.CLIP,
+    }
 
     def __init__(self) -> None:
         self._spill_bytes = 0
@@ -303,6 +317,32 @@ class CostAwareAllocator(MemoryAllocationStrategy):
             record_allocation(tensor_name, offset)
             update_peak_fast_footprint()
 
+        def take_inplace_input_slot(
+            node: Node,
+            node_idx: int,
+            output_name: str,
+        ) -> Optional[int]:
+            if node.op_type not in self.INPLACE_REUSE_OPS:
+                return None
+
+            output_size = tensor_sizes[output_name]
+            for input_name in node.inputs:
+                slot = resident.get(input_name)
+                if slot is None:
+                    continue
+
+                liveness = liveness_map[input_name]
+                if liveness.live_end > node_idx or liveness.is_output:
+                    continue
+                if slot.size != output_size:
+                    continue
+
+                resident.pop(input_name)
+                resident[output_name] = _ResidentTensor(output_name, slot.offset, output_size)
+                return slot.offset
+
+            return None
+
         for node_idx, node in enumerate(nodes):
             current_inputs = {
                 tensor_name
@@ -328,7 +368,9 @@ class CostAwareAllocator(MemoryAllocationStrategy):
 
                 size = tensor_sizes[tensor_name]
                 self._validate_tensor_fits(size, capacity)
-                offset = make_space(size, node_idx, protected, node_idx - 1)
+                offset = take_inplace_input_slot(node, node_idx, tensor_name)
+                if offset is None:
+                    offset = make_space(size, node_idx, protected, node_idx - 1)
                 resident[tensor_name] = _ResidentTensor(tensor_name, offset, size)
                 record_allocation(tensor_name, offset)
                 protected.add(tensor_name)

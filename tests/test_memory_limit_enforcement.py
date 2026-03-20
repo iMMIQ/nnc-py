@@ -18,6 +18,15 @@ from onnx import helper
 import pytest
 
 from nnc_py import Compiler
+from nnc_py.ir.context import CompileContext
+from nnc_py.ir.graph import Graph
+from nnc_py.ir.node import Node, OpType
+from nnc_py.ir.tensor import TensorShape, TensorType
+from nnc_py.ir.types import DataType
+from nnc_py.passes.base import PassManager
+from nnc_py.passes.memory_planning import get_memory_allocation_plan
+from nnc_py.passes.memory_strategy import MemoryAllocationPlan, SpillPoint
+from nnc_py.passes.spill import SpillAnalysisPass, get_spill_plan
 
 
 def extract_memory_size(source_file, define_name):
@@ -163,6 +172,51 @@ def create_simple_chain_model():
     return model
 
 
+def _tensor(name: str, elements: int) -> TensorType:
+    return TensorType(
+        name=name,
+        dtype=DataType.FLOAT32,
+        shape=TensorShape([1, elements]),
+    )
+
+
+def _build_cost_aware_spill_context() -> CompileContext:
+    graph = Graph("cost-aware-spill")
+    graph.inputs.extend(["x_big", "y_small", "z_small"])
+    graph.outputs.extend(["near_done", "out"])
+
+    for tensor_name, elements in {
+        "x_big": 16,
+        "y_small": 16,
+        "z_small": 16,
+        "near_big": 64,
+        "far_small": 16,
+        "newcomer": 16,
+        "near_done": 16,
+        "far_done": 16,
+        "out": 16,
+    }.items():
+        graph.add_tensor(_tensor(tensor_name, elements))
+
+    for node in [
+        Node(OpType.RELU, "n0", ["x_big"], ["near_big"]),
+        Node(OpType.RELU, "n1", ["y_small"], ["far_small"]),
+        Node(OpType.RELU, "n2", ["z_small"], ["newcomer"]),
+        Node(OpType.RELU, "n3", ["near_big"], ["near_done"]),
+        Node(OpType.RELU, "n4", ["far_small"], ["far_done"]),
+        Node(OpType.ADD, "n5", ["newcomer", "far_done"], ["out"]),
+    ]:
+        graph.add_node(node)
+
+    ctx = CompileContext(graph=graph, target="x86", optimization_level=2)
+    ctx.metadata["max_memory"] = 384
+
+    for pass_obj in PassManager.get_default_passes(2):
+        pass_obj.run(ctx)
+
+    return ctx
+
+
 class TestMemoryLimitEnforcement:
     """Test that memory allocation respects limits."""
 
@@ -276,3 +330,40 @@ class TestMemoryLimitEnforcement:
         # when a single operator's inputs+outputs exceed max_memory
         with pytest.raises(RuntimeError, match="Cannot fit.*in fast memory"):
             compiler.compile(onnx_path, output_dir, max_memory='2048')
+
+
+def test_cost_aware_plan_emits_transfer_metrics_under_memory_limit():
+    ctx = _build_cost_aware_spill_context()
+
+    alloc_plan = get_memory_allocation_plan(ctx)
+
+    assert alloc_plan is not None
+    assert alloc_plan.has_spill
+    assert alloc_plan.total_transfer_bytes > 0
+    assert alloc_plan.spill_bytes > 0
+    assert alloc_plan.reload_bytes > 0
+    assert get_spill_plan(ctx) is None
+
+
+def test_spill_analysis_skips_legacy_replanning_for_unified_spill():
+    ctx = CompileContext(graph=Graph("dummy"), target="x86", optimization_level=2)
+    ctx.metadata["max_memory"] = 64
+    ctx.metadata["memory_allocation_plan"] = MemoryAllocationPlan(
+        strategy_name="cost_aware",
+        total_fast_memory=64,
+        spill_points=[
+            SpillPoint(
+                tensor_name="x",
+                after_node="n0",
+                after_node_idx=0,
+                from_buffer_id=0,
+                from_fast_offset=0,
+                to_slow_offset=0,
+                size=64,
+            )
+        ],
+    )
+
+    SpillAnalysisPass().run(ctx)
+
+    assert ctx.metadata["spill_plan"] is None

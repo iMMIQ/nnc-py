@@ -360,6 +360,38 @@ extern FILE* debug_file;
             "",
         ]
 
+        def get_output_spill_points(node_idx: int) -> dict[str, SpillPoint]:
+            return {
+                point.tensor_name: point
+                for point in plan.get_spill_points_after(node_idx)
+            }
+
+        def get_internal_storage_expr(tensor_name: str) -> str | None:
+            alloc = plan.tensor_allocations.get(tensor_name)
+            if alloc is None:
+                return None
+            pool_name = "_nnc_slow_pool" if alloc.is_spilled else "_nnc_fast_pool"
+            return f"{pool_name} + {alloc.offset}"
+
+        def get_saved_input_binding_name(tensor_name: str) -> str:
+            symbol = ctx.tensor_symbols.get(tensor_name, tensor_name)
+            return f"_nnc_bound_input_{symbol}"
+
+        input_first_use: dict[str, int] = {}
+        liveness_map = ctx.metadata.get("tensor_liveness", {})
+        for tensor_name in ctx.graph.inputs:
+            liveness = liveness_map.get(tensor_name)
+            if liveness is None or not liveness.use_positions:
+                continue
+            input_first_use[tensor_name] = liveness.use_positions[0]
+
+        for tensor_name in ctx.graph.inputs:
+            if tensor_name not in plan.tensor_allocations:
+                continue
+            lines.append(f"static uint8_t* {get_saved_input_binding_name(tensor_name)} = NULL;")
+        if any(tensor_name in plan.tensor_allocations for tensor_name in ctx.graph.inputs):
+            lines.append("")
+
         # Calculate reload buffer requirements
         # Need buffers for:
         # 1. Inputs to reload
@@ -369,37 +401,41 @@ extern FILE* debug_file;
         # Count max total buffers needed at any node (inputs + spilled outputs)
         nodes = ctx.graph.topological_sort()
         max_total_slots = 0
-        for node in nodes:
+        for node_idx, node in enumerate(nodes):
             if node.op_type == OpType.CONSTANT:
                 continue
-            node_idx = next(i for i, n in enumerate(nodes) if n == node)
 
             # Count inputs that need reload
             reloads_before = plan.get_reload_points_before(node_idx)
             input_slots = len(reloads_before)
 
-            # Count outputs that are spilled (need temp buffers)
-            output_slots = 0
-            for o in node.outputs:
-                alloc = plan.tensor_allocations.get(o)
-                if alloc is not None and alloc.is_spilled:
-                    output_slots += 1
+            # Count outputs that spill after this node, even if they are later reloaded
+            # and do not remain slow-backed in the final tensor allocation map.
+            spill_outputs_after = get_output_spill_points(node_idx)
+            output_slots = len(spill_outputs_after)
 
             max_total_slots = max(max_total_slots, input_slots + output_slots)
 
         # Use the larger of the two calculations
         max_reload_slots = max(max_reload_slots, max_total_slots)
 
-        spilled_tensors = plan.spilled_tensors
-
         # Get max tensor size for reload buffer sizing
         max_tensor_size = 0
-        for tensor_name, alloc in plan.tensor_allocations.items():
-            if alloc.is_spilled:
+        transferred_tensors = {
+            point.tensor_name for point in plan.spill_points
+        } | {
+            point.tensor_name for point in plan.reload_points
+        } | plan.spilled_tensors
+        for tensor_name in transferred_tensors:
+            alloc = plan.tensor_allocations.get(tensor_name)
+            if alloc is not None:
                 max_tensor_size = max(max_tensor_size, alloc.size)
+        for point in plan.spill_points:
+            max_tensor_size = max(max_tensor_size, point.size)
+        for point in plan.reload_points:
+            max_tensor_size = max(max_tensor_size, point.size)
 
-        # If no spilled tensors, fall back to standard emitter
-        if not spilled_tensors:
+        if not plan.has_spill:
             emitter = CEmitter()
             return emitter.emit(ctx)
 
@@ -413,18 +449,24 @@ extern FILE* debug_file;
 
         # Generate forward declarations for node functions (only for those without spill/reload)
         nodes = ctx.graph.topological_sort()
-        for node in nodes:
+        for node_idx, node in enumerate(nodes):
             if node.op_type == OpType.CONSTANT:
                 continue
 
             func_name = ctx.node_symbols.get(node.name, node.name)
-            node_idx = next(i for i, n in enumerate(nodes) if n == node)
+            spill_outputs_after = get_output_spill_points(node_idx)
 
             # Check if this node needs spill/reload
-            has_spill = len(plan.get_spill_points_after(node_idx)) > 0
+            has_spill = len(spill_outputs_after) > 0
             has_reload = len(plan.get_reload_points_before(node_idx)) > 0
             has_spilled_output = any(
-                plan.tensor_allocations.get(o) is not None and plan.tensor_allocations.get(o).is_spilled  # type: ignore[union-attr]
+                (
+                    o in spill_outputs_after
+                    or (
+                        plan.tensor_allocations.get(o) is not None
+                        and plan.tensor_allocations.get(o).is_spilled  # type: ignore[union-attr]
+                    )
+                )
                 for o in node.outputs
             )
 
@@ -436,15 +478,14 @@ extern FILE* debug_file;
         lines.append("/* Spill/Reload wrapper functions */")
 
         # Generate wrapper functions with spill/reload
-        for node in nodes:
+        for node_idx, node in enumerate(nodes):
             if node.op_type == OpType.CONSTANT:
                 continue
 
             func_name = ctx.node_symbols.get(node.name, node.name)
-            node_idx = next(i for i, n in enumerate(nodes) if n == node)
 
             # Collect spills after this node
-            spills_after = plan.get_spill_points_after(node_idx)
+            spill_points_after = get_output_spill_points(node_idx)
 
             # Collect reloads before this node
             reloads_before = plan.get_reload_points_before(node_idx)
@@ -496,30 +537,47 @@ extern FILE* debug_file;
             # 2. There's a spill point after this node for it
             outputs_need_temp: dict[str, Union["ReloadPoint", "SpillPoint"]] = {}
             for output_name in node.outputs:
+                spill_point = spill_points_after.get(output_name)
+                if spill_point is not None:
+                    outputs_need_temp[output_name] = spill_point
+                    continue
+
                 alloc = plan.tensor_allocations.get(output_name)
                 if alloc is not None and alloc.is_spilled:
                     # Output lives in slow memory - need temp tensor
                     # Find the spill point for this output
-                    sp = next((s for s in spills_after if s.tensor_name == output_name), None)
-                    if sp:
-                        outputs_need_temp[output_name] = sp
-                    else:
-                        # Create a synthetic spill point for temp allocation
-                        # Look up the correct slow offset from existing spill points
-                        existing_spill = next((sp for sp in plan.spill_points if sp.tensor_name == output_name), None)
-                        slow_offset = existing_spill.to_slow_offset if existing_spill else 0
-                        outputs_need_temp[output_name] = SpillPoint(
-                            tensor_name=output_name,
-                            after_node=node.name,
-                            after_node_idx=node_idx,
-                            from_buffer_id=alloc.buffer_id,
-                            from_fast_offset=0,
-                            to_slow_offset=slow_offset,
-                            size=alloc.size,
-                        )
+                    # Create a synthetic spill point for temp allocation.
+                    existing_spill = next((sp for sp in plan.spill_points if sp.tensor_name == output_name), None)
+                    slow_offset = existing_spill.to_slow_offset if existing_spill else 0
+                    outputs_need_temp[output_name] = SpillPoint(
+                        tensor_name=output_name,
+                        after_node=node.name,
+                        after_node_idx=node_idx,
+                        from_buffer_id=alloc.buffer_id,
+                        from_fast_offset=0,
+                        to_slow_offset=slow_offset,
+                        size=alloc.size,
+                    )
 
             lines.append(f"/* {func_name}: {node.op_type.value} */")
             lines.append(f"static void {func_name}(void) {{")
+
+            for input_name in node.inputs:
+                if input_first_use.get(input_name) != node_idx:
+                    continue
+
+                alloc = plan.tensor_allocations.get(input_name)
+                target_expr = get_internal_storage_expr(input_name)
+                if alloc is None or target_expr is None:
+                    continue
+
+                var_name = ctx.tensor_symbols.get(input_name, input_name)
+                lines.extend([
+                    f"    /* Stage graph input {input_name} into planned memory */",
+                    f"    memcpy({target_expr}, {get_saved_input_binding_name(input_name)}, {alloc.size});",
+                    f"    {var_name}.data = {target_expr};",
+                    "",
+                ])
 
             # Declare temp tensors for spilled inputs
             temp_tensor_decls: list[tuple[str, int, str, int, str]] = []
@@ -620,21 +678,27 @@ extern FILE* debug_file;
 
         # Generate operator calls for all nodes (for reference)
         # We generate simplified versions that don't need spill/reload
-        for node in nodes:
+        for node_idx, node in enumerate(nodes):
             if node.op_type == OpType.CONSTANT:
                 continue
 
             func_name = ctx.node_symbols.get(node.name, node.name)
-            node_idx = next(i for i, n in enumerate(nodes) if n == node)
+            spill_outputs_after = get_output_spill_points(node_idx)
 
             # Check if this node needs spill/reload
             # A node needs spill/reload wrapper if:
             # 1. It has reload points before it (inputs to reload), OR
             # 2. Any of its outputs are spilled (live in slow memory)
-            has_spill = len(plan.get_spill_points_after(node_idx)) > 0
+            has_spill = len(spill_outputs_after) > 0
             has_reload = len(plan.get_reload_points_before(node_idx)) > 0
             has_spilled_output = any(
-                plan.tensor_allocations.get(o) is not None and plan.tensor_allocations.get(o).is_spilled  # type: ignore[union-attr]
+                (
+                    o in spill_outputs_after
+                    or (
+                        plan.tensor_allocations.get(o) is not None
+                        and plan.tensor_allocations.get(o).is_spilled  # type: ignore[union-attr]
+                    )
+                )
                 for o in node.outputs
             )
 
@@ -656,11 +720,23 @@ extern FILE* debug_file;
         lines.append("/* Main inference entry point */")
         lines.append("void nnc_run(void) {")
 
+        for tensor_name in ctx.graph.inputs:
+            if tensor_name not in plan.tensor_allocations:
+                continue
+            var_name = ctx.tensor_symbols.get(tensor_name, tensor_name)
+            lines.append(f"    {get_saved_input_binding_name(tensor_name)} = {var_name}.data;")
+
         for node in nodes:
             if node.op_type == OpType.CONSTANT:
                 continue
             func_name = ctx.node_symbols.get(node.name, node.name)
             lines.append(f"    {func_name}();")
+
+        for tensor_name in ctx.graph.inputs:
+            if tensor_name not in plan.tensor_allocations:
+                continue
+            var_name = ctx.tensor_symbols.get(tensor_name, tensor_name)
+            lines.append(f"    {var_name}.data = {get_saved_input_binding_name(tensor_name)};")
 
         lines.append("}")
 
@@ -1893,20 +1969,27 @@ run: model
             # Handle symbolic dimensions (strings) by converting to -1
             shape_init = ", ".join(str(d) if isinstance(d, (int, float)) else "-1" for d in shape_list)
 
-            lines.append(f"/* Tensor: {tensor_name} */")
-            lines.append(f"static int64_t {var_name}_shape[] = {{{shape_init}}};")
-
-            # Get memory info if available
+            data_init = "NULL"
             if tensor_name in tensor_offsets:
                 pool_type, offset = tensor_offsets[tensor_name]
-                if pool_type == "slow":
-                    pool_to_use = slow_pool_name
+                if has_spill and tensor_name in ctx.graph.inputs:
+                    input_buffer_name = f"_nnc_input_buffer_{var_name}"
+                    lines.append(f"/* Input staging buffer: {tensor_name} */")
+                    lines.append(
+                        f"uint8_t {input_buffer_name}[{tensor.byte_size()}] "
+                        f"__attribute__((aligned(NNC_MEMORY_ALIGNMENT))) = {{0}};"
+                    )
+                    lines.append("")
+                    data_init = input_buffer_name
                 else:
-                    pool_to_use = fast_pool_name
-                data_init = f"{pool_to_use} + {offset}" if pool_to_use else "NULL"
-            else:
-                # Tensor not in memory plan (e.g., constant)
-                data_init = "NULL"
+                    if pool_type == "slow":
+                        pool_to_use = slow_pool_name
+                    else:
+                        pool_to_use = fast_pool_name
+                    data_init = f"{pool_to_use} + {offset}" if pool_to_use else "NULL"
+
+            lines.append(f"/* Tensor: {tensor_name} */")
+            lines.append(f"static int64_t {var_name}_shape[] = {{{shape_init}}};")
 
             # Map dtype
             dtype_enum = self._map_dtype_to_enum(tensor.dtype)
@@ -1945,7 +2028,7 @@ run: model
                 f"/* Fast Memory Pool (SRAM/On-chip) */",
                 f"#define NNC_FAST_MEMORY_SIZE {fast_memory_size}",
                 f"#define NNC_MEMORY_ALIGNMENT 16",
-                f"static uint8_t _nnc_fast_pool[NNC_FAST_MEMORY_SIZE] "
+                f"uint8_t _nnc_fast_pool[NNC_FAST_MEMORY_SIZE] "
                 f"__attribute__((aligned(NNC_MEMORY_ALIGNMENT))) = {{0}};",
                 "",
                 f"/* Slow Memory Pool (DRAM/External) */",
