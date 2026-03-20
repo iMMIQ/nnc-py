@@ -21,6 +21,7 @@ from nnc_py.frontend.onnx_loader import ONNXFrontend
 from nnc_py.ir.context import CompileContext
 from nnc_py.ir.graph import Graph
 from nnc_py.codegen.x86_backend import X86Backend
+from test_common import is_lsan_ptrace_error
 
 
 class E2ETestHelper:
@@ -213,6 +214,11 @@ class TestEndToEnd:
 
         # Try to run
         success, stdout, stderr = self.helper.run_executable(output_dir)
+        if not success and is_lsan_ptrace_error(stderr):
+            pytest.skip(
+                "LeakSanitizer is unavailable in this execution environment "
+                "(ptrace restriction)."
+            )
         assert success, f"Execution failed: {stderr}"
 
     def test_reshape_model(self):

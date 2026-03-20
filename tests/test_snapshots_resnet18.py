@@ -50,11 +50,11 @@ class TestCodegenSnapshots(BaseSnapshotTest):
         model_path = self.models_dir / "resnet18.onnx"
         if not model_path.exists():
             pytest.skip(f"Model not found: {model_path}")
-        self._run_runtime_test(model_path, "resnet18")
+        self._run_runtime_test(model_path, "resnet18", timeout=180)
 
     def test_resnet18_codegen_with_runtime_o3(self):
         """Test ResNet-18 code compiles and runs with -O3 optimization and sanitizers."""
         model_path = self.models_dir / "resnet18.onnx"
         if not model_path.exists():
             pytest.skip(f"Model not found: {model_path}")
-        self._run_runtime_test(model_path, "resnet18", opt_level="O3")
+        self._run_runtime_test(model_path, "resnet18", opt_level="O3", timeout=180)

@@ -677,9 +677,13 @@
   extern uint8_t _nnc_fast_pool[];
   extern uint8_t _nnc_slow_pool[];
   
+  static uint8_t* _nnc_bound_input_tensor_input = NULL;
+  
   /* Reload buffers in fast memory for spilled tensors */
-  /* Max reload slots: 1, Slot size: 4 */
-  static uint8_t _nnc_reload_buffer_0[4];
+  /* Max reload slots: 3, Slot size: 131072 */
+  static uint8_t _nnc_reload_buffer_0[131072];
+  static uint8_t _nnc_reload_buffer_1[131072];
+  static uint8_t _nnc_reload_buffer_2[131072];
   
   static void node_ReduceMean_body(void);
   static void node_ReduceSum_body(void);
@@ -701,6 +705,10 @@
   /* Spill/Reload wrapper functions */
   /* node_Add: Add */
   static void node_Add(void) {
+      /* Stage graph input input into planned memory */
+      memcpy(_nnc_fast_pool + 0, _nnc_bound_input_tensor_input, 131072);
+      tensor_input.data = _nnc_fast_pool + 0;
+  
       /* Temp tensors pointing to fast memory */
       static Tensor temp_tensor_Constant_output_0;
       /* Reload /Constant_output_0 from slow to fast memory */
@@ -1062,6 +1070,7 @@
   
   /* Main inference entry point */
   void nnc_run(void) {
+      _nnc_bound_input_tensor_input = tensor_input.data;
       node_Add();
       node_Mul();
       node_Sub();
@@ -1092,6 +1101,7 @@
       node_Cast_6();
       node_Concat_2();
       node_ReduceMean_1();
+      tensor_input.data = _nnc_bound_input_tensor_input;
   }
   
   // model.h
@@ -1176,17 +1186,20 @@
   /* Fast Memory Pool (SRAM/On-chip) */
   #define NNC_FAST_MEMORY_SIZE 131072
   #define NNC_MEMORY_ALIGNMENT 16
-  static uint8_t _nnc_fast_pool[NNC_FAST_MEMORY_SIZE] __attribute__((aligned(NNC_MEMORY_ALIGNMENT))) = {0};
+  uint8_t _nnc_fast_pool[NNC_FAST_MEMORY_SIZE] __attribute__((aligned(NNC_MEMORY_ALIGNMENT))) = {0};
   
   /* Slow Memory Pool (DRAM/External) */
   #define NNC_SLOW_MEMORY_SIZE 1540140
   uint8_t _nnc_slow_pool[NNC_SLOW_MEMORY_SIZE] __attribute__((aligned(NNC_MEMORY_ALIGNMENT))) = {0};
   
   
+  /* Input staging buffer: input */
+  uint8_t _nnc_input_buffer_tensor_input[131072] __attribute__((aligned(NNC_MEMORY_ALIGNMENT))) = {0};
+  
   /* Tensor: input */
   static int64_t tensor_input_shape[] = {4, 64, 128};
   Tensor tensor_input = {
-      .data = _nnc_fast_pool + 0,
+      .data = _nnc_input_buffer_tensor_input,
       .dtype = NNC_DTYPE_FLOAT32,
       .shape = tensor_input_shape,
       .ndim = 3,

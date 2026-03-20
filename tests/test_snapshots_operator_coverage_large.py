@@ -24,7 +24,7 @@ import pytest
 
 from nnc_py import Compiler
 from nnc_py.frontend.onnx_loader import ONNXFrontend
-from test_common import BaseSnapshotTest, GraphSnapshotWrapper
+from test_common import BaseSnapshotTest, GraphSnapshotWrapper, is_lsan_ptrace_error
 
 
 class TestIRSnapshots(BaseSnapshotTest):
@@ -174,6 +174,12 @@ int main(void) {{
             # Run executable
             stdout, stderr, returncode = self._run_executable(exe_path)
 
+            if is_lsan_ptrace_error(stderr):
+                pytest.skip(
+                    "LeakSanitizer is unavailable in this execution environment "
+                    "(ptrace restriction)."
+                )
+
             assert returncode == 0, f"Program failed with return code {returncode}\\nstdout: {stdout}\\nstderr: {stderr}"
             assert "ERROR: AddressSanitizer" not in stderr, f"AddressSanitizer detected errors:\\n{stderr}"
 
@@ -228,6 +234,12 @@ int main(void) {{
             exe_path = self._compile_with_sanitizer(tmpdir, runtime_dir)
 
             stdout, stderr, returncode = self._run_executable(exe_path)
+
+            if is_lsan_ptrace_error(stderr):
+                pytest.skip(
+                    "LeakSanitizer is unavailable in this execution environment "
+                    "(ptrace restriction)."
+                )
 
             assert returncode == 0, f"Program failed with return code {returncode}\\nstdout: {stdout}\\nstderr: {stderr}"
             assert "ERROR: AddressSanitizer" not in stderr, f"AddressSanitizer detected errors:\\n{stderr}"
