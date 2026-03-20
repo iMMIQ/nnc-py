@@ -180,7 +180,11 @@ def _tensor(name: str, elements: int) -> TensorType:
     )
 
 
-def _build_cost_aware_spill_context() -> CompileContext:
+def _build_cost_aware_spill_context(
+    *,
+    optimization_level: int = 2,
+    memory_strategy: str | None = None,
+) -> CompileContext:
     graph = Graph("cost-aware-spill")
     graph.inputs.extend(["x_big", "y_small", "z_small"])
     graph.outputs.extend(["near_done", "out"])
@@ -208,10 +212,12 @@ def _build_cost_aware_spill_context() -> CompileContext:
     ]:
         graph.add_node(node)
 
-    ctx = CompileContext(graph=graph, target="x86", optimization_level=2)
+    ctx = CompileContext(graph=graph, target="x86", optimization_level=optimization_level)
     ctx.metadata["max_memory"] = 384
+    if memory_strategy is not None:
+        ctx.metadata["memory_strategy"] = memory_strategy
 
-    for pass_obj in PassManager.get_default_passes(2):
+    for pass_obj in PassManager.get_default_passes(optimization_level):
         pass_obj.run(ctx)
 
     return ctx
@@ -367,3 +373,22 @@ def test_spill_analysis_skips_legacy_replanning_for_unified_spill():
     SpillAnalysisPass().run(ctx)
 
     assert ctx.metadata["spill_plan"] is None
+
+
+def test_cost_aware_transfer_bytes_do_not_exceed_basic():
+    basic_ctx = _build_cost_aware_spill_context(
+        optimization_level=2,
+        memory_strategy="basic",
+    )
+    cost_aware_ctx = _build_cost_aware_spill_context()
+
+    basic_plan = get_memory_allocation_plan(basic_ctx)
+    cost_aware_plan = get_memory_allocation_plan(cost_aware_ctx)
+
+    assert basic_plan is not None
+    assert cost_aware_plan is not None
+    assert basic_plan.has_spill
+    assert cost_aware_plan.has_spill
+    assert basic_plan.total_transfer_bytes > 0
+    assert cost_aware_plan.total_transfer_bytes > 0
+    assert cost_aware_plan.total_transfer_bytes <= basic_plan.total_transfer_bytes

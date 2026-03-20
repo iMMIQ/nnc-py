@@ -90,6 +90,8 @@ class BasicAllocator(MemoryAllocationStrategy):
         buffers: List[MemoryBuffer] = []
         spill_points: List[SpillPoint] = []
         reload_points: List[ReloadPoint] = []
+        spill_bytes = 0
+        reload_bytes = 0
 
         # Track which tensors are in slow memory (for future spill/reload support)
         in_slow_memory: Set[str] = set()
@@ -106,7 +108,7 @@ class BasicAllocator(MemoryAllocationStrategy):
 
         def spill_all(node_idx: int) -> None:
             """Spill all active tensors to slow memory."""
-            nonlocal current_offset, slow_offset
+            nonlocal current_offset, slow_offset, spill_bytes
 
             for tensor_name, offset in list(tensor_offsets.items()):
                 if tensor_name not in in_slow_memory:
@@ -124,6 +126,7 @@ class BasicAllocator(MemoryAllocationStrategy):
                         to_slow_offset=slow_memory_offsets[tensor_name],
                         size=size,
                     ))
+                    spill_bytes += size
 
             # Clear all allocations and reset offset
             tensor_offsets.clear()
@@ -131,7 +134,7 @@ class BasicAllocator(MemoryAllocationStrategy):
 
         def allocate_tensor(tensor_name: str, node_idx: int) -> int:
             """Allocate a tensor in fast memory and return its offset."""
-            nonlocal current_offset
+            nonlocal current_offset, reload_bytes
 
             # If already allocated, return existing offset
             if tensor_name in tensor_offsets:
@@ -161,6 +164,7 @@ class BasicAllocator(MemoryAllocationStrategy):
                     size=size,
                     reload_slot_id=0,
                 ))
+                reload_bytes += size
 
             # Check if we need single-slot mode (tensor larger than max_memory)
             if max_memory != float("inf") and size > max_memory:
@@ -257,4 +261,7 @@ class BasicAllocator(MemoryAllocationStrategy):
             tensor_to_buffer=tensor_to_buffer,
             spill_points=spill_points,
             reload_points=reload_points,
+            spill_bytes=spill_bytes,
+            reload_bytes=reload_bytes,
+            total_transfer_bytes=spill_bytes + reload_bytes,
         )

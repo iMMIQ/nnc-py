@@ -202,8 +202,8 @@ def run_benchmark(
     case = get_benchmark_case(model_name)
 
     selected_batch_sizes = batch_sizes or list(case.workload_batch_sizes)
-    output_path = output or _default_output_path(repo_root=repo_root, model_name=model_name)
-    build_dir = _default_build_dir(repo_root=repo_root, model_name=model_name, output=output)
+    output_path = (output or _default_output_path(repo_root=repo_root, model_name=model_name)).resolve()
+    build_dir = _default_build_dir(repo_root=repo_root, model_name=model_name, output=output_path).resolve()
     build_dir.mkdir(parents=True, exist_ok=True)
 
     compiler = Compiler(target="x86", opt_level=3)

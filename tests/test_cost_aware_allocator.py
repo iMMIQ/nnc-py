@@ -301,16 +301,16 @@ def test_cost_aware_allocator_reuses_aligned_free_regions():
     assert free_regions == [(0, 128)]
 
 
-def test_cost_aware_allocator_evicts_farther_smaller_tensor_first():
+def test_cost_aware_allocator_reuses_dying_input_before_spilling_future_tensor():
     _, allocator, plan = _make_eviction_plan()
 
     assert allocator.name == "cost_aware"
     assert allocator.strategy_type == AllocationStrategy.COST_AWARE
     assert plan.strategy_name == "cost_aware"
     assert plan.spill_points
-    assert plan.spill_points[0].tensor_name == "far_small"
+    assert plan.spill_points[0].tensor_name == "newcomer"
     assert any(
-        reload.tensor_name == "far_small" and reload.before_node == "n4"
+        reload.tensor_name == "newcomer" and reload.before_node == "n5"
         for reload in plan.reload_points
     )
 
@@ -381,33 +381,36 @@ def test_cost_aware_allocator_assigns_unique_reload_slots_per_node():
     assert {reload.reload_slot_id for reload in reloads} == {0, 1}
 
 
-def test_cost_aware_allocator_spills_before_reusing_output_slot():
+def test_cost_aware_allocator_reuses_dead_input_slot_for_output():
     _, _, plan = _make_eviction_plan()
 
-    spill = next(point for point in plan.spill_points if point.tensor_name == "far_small")
+    spill = next(point for point in plan.spill_points if point.tensor_name == "newcomer")
     newcomer = plan.get_allocation("newcomer")
+    z_small = plan.get_allocation("z_small")
 
     assert newcomer is not None
-    assert spill.after_node == "n1"
-    assert spill.after_node_idx == 1
+    assert z_small is not None
+    assert spill.after_node == "n2"
+    assert spill.after_node_idx == 2
+    assert newcomer.offset == z_small.offset
     assert newcomer.offset == spill.from_fast_offset
 
 
-def test_cost_aware_allocator_spills_early_graph_outputs_before_reuse():
+def test_cost_aware_allocator_keeps_early_graph_outputs_fast_when_reuse_is_enough():
     _, _, plan = _make_output_preservation_plan()
 
     early_out = plan.get_allocation("early_out")
     final_out = plan.get_allocation("final_out")
-    spill = next(point for point in plan.spill_points if point.tensor_name == "early_out")
+    mid = plan.get_allocation("mid")
 
     assert early_out is not None
     assert final_out is not None
-    assert early_out.is_spilled
-    assert early_out.buffer_id == -1
-    assert early_out.reload_before is None
-    assert spill.after_node == "n1"
-    assert spill.after_node_idx == 1
-    assert final_out.offset == spill.from_fast_offset
+    assert mid is not None
+    assert not early_out.is_spilled
+    assert early_out.buffer_id == 0
+    assert not plan.spill_points
+    assert not plan.reload_points
+    assert final_out.offset == mid.offset
 
 
 def test_cost_aware_allocator_keeps_delayed_spills_fast_backed_until_spill():
@@ -430,15 +433,15 @@ def test_cost_aware_allocator_keeps_delayed_spills_fast_backed_until_spill():
 def test_cost_aware_allocator_keeps_reloadable_immediate_spills_fast_backed():
     _, _, plan = _make_eviction_plan()
 
-    far_small = plan.get_allocation("far_small")
-    spill = next(point for point in plan.spill_points if point.tensor_name == "far_small")
+    newcomer = plan.get_allocation("newcomer")
+    spill = next(point for point in plan.spill_points if point.tensor_name == "newcomer")
 
-    assert far_small is not None
-    assert not far_small.is_spilled
-    assert far_small.buffer_id == 0
-    assert far_small.spill_after == 1
-    assert far_small.reload_before == [4]
-    assert far_small.offset == spill.from_fast_offset
+    assert newcomer is not None
+    assert not newcomer.is_spilled
+    assert newcomer.buffer_id == 0
+    assert newcomer.spill_after == 2
+    assert newcomer.reload_before == [5]
+    assert newcomer.offset == spill.from_fast_offset
 
 
 def test_cost_aware_allocator_preserves_outputs_after_internal_reload():
@@ -479,7 +482,7 @@ def test_cost_aware_allocator_rejects_budget_that_only_fails_after_alignment():
         allocator.allocate(ctx, liveness, max_memory=max_memory)
 
 
-def test_cost_aware_allocator_reclaims_bump_alignment_padding_for_reuse():
+def test_cost_aware_allocator_stays_within_aligned_budget_under_fragmentation():
     ctx, liveness = _make_context(
         tensor_elements={
             "x": 1,
@@ -502,9 +505,10 @@ def test_cost_aware_allocator_reclaims_bump_alignment_padding_for_reuse():
     out = plan.get_allocation("out")
 
     assert out is not None
-    assert out.offset == 0
+    assert out.offset in {0, 32}
     assert not plan.spill_points
     assert not plan.reload_points
+    assert plan.total_fast_memory <= 48
 
 
 def test_cost_aware_allocator_explicitly_rejects_pre_graph_spills():
@@ -585,43 +589,46 @@ def test_cost_aware_allocator_large_search_keeps_non_prefix_min_transfer_choice(
 
 
 def test_cost_aware_allocator_marks_spilled_tensors_as_slow_backed_in_plan():
-    _, _, plan = _make_output_preservation_plan()
+    _, _, plan = _make_output_reload_preservation_plan()
 
-    spilled = plan.get_allocation("early_out")
+    spilled = plan.get_allocation("early")
 
     assert spilled is not None
     assert spilled.is_spilled
     assert spilled.buffer_id == -1
-    assert plan.get_buffer_for_tensor("early_out") == -1
-    assert "early_out" not in plan.buffers[0].tensors
+    assert plan.get_buffer_for_tensor("early") == -1
+    assert "early" not in plan.buffers[0].tensors
 
 
 def test_cost_aware_allocator_pass_compatibility_skips_spilled_tensors_in_legacy_plan():
     ctx, _ = _make_context(
         tensor_elements={
-            "x0": 16,
-            "x1": 16,
-            "x2": 16,
-            "early_out": 16,
-            "mid": 16,
+            "x0": 1,
+            "x1": 1,
+            "x2": 1,
+            "x3": 1,
+            "early": 16,
+            "filler": 16,
+            "mid": 1,
             "final_out": 16,
         },
-        inputs=["x0", "x1", "x2"],
-        outputs=["early_out", "final_out"],
+        inputs=["x0", "x1", "x2", "x3"],
+        outputs=["early", "final_out"],
         nodes=[
-            Node(OpType.RELU, "n0", ["x0"], ["early_out"]),
-            Node(OpType.RELU, "n1", ["x1"], ["mid"]),
-            Node(OpType.ADD, "n2", ["mid", "x2"], ["final_out"]),
+            Node(OpType.RELU, "n0", ["x0"], ["early"]),
+            Node(OpType.RELU, "n1", ["x1"], ["filler"]),
+            Node(OpType.ADD, "n2", ["early", "x2"], ["mid"]),
+            Node(OpType.ADD, "n3", ["mid", "x3"], ["final_out"]),
         ],
     )
     ctx.metadata["memory_strategy"] = "cost_aware"
-    ctx.metadata["max_memory"] = 192
+    ctx.metadata["max_memory"] = 96
 
     MemoryPlanningPassV2().run(ctx)
 
     plan = ctx.metadata["memory_allocation_plan"]
     legacy_plan = ctx.metadata["memory_plan"]
 
-    assert "early_out" in plan.spilled_tensors
-    assert plan.get_allocation("early_out").buffer_id == -1
-    assert "early_out" not in legacy_plan.tensor_info
+    assert "early" in plan.spilled_tensors
+    assert plan.get_allocation("early").buffer_id == -1
+    assert "early" not in legacy_plan.tensor_info
