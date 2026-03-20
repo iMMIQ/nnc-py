@@ -1,8 +1,13 @@
 """Pytest configuration and fixtures for nnc-py tests."""
 
 from pathlib import Path
+import sys
 
 import pytest
+
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 
 def pytest_configure(config):
@@ -29,4 +34,4 @@ def models_dir():
 @pytest.fixture
 def snapshot_dir():
     """Path to the snapshot directory."""
-    return Path(__file__).parent / "snapshots"
+    return Path(__file__).parent / "__snapshots__"
