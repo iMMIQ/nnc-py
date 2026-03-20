@@ -44,7 +44,7 @@ def main():
 )
 @click.option(
     "--entry-name",
-    default="main",
+    default="nnc_run",
     help="Entry point function name",
 )
 @click.option("-v", "--verbose", is_flag=True, help="Verbose output")
@@ -189,7 +189,7 @@ def targets():
     table.add_column("Description", style="white")
 
     table.add_row("x86", "Generate code for x86 simulation")
-    table.add_row("npu", "Generate code for NPU acceleration")
+    table.add_row("npu", "Reserved target; backend not yet implemented")
 
     console.print(table)
 

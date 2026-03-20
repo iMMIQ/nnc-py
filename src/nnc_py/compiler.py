@@ -101,7 +101,7 @@ class Compiler:
         self,
         onnx_path: str,
         output_dir: str,
-        entry_point: str = "main",
+        entry_point: str = "nnc_run",
         max_memory: str = None,
         memory_strategy: str = None,
     ) -> None:
@@ -140,6 +140,7 @@ class Compiler:
 
         # Stage 2: Create compilation context
         ctx = CompileContext(graph, self.target, self.opt_level)
+        ctx.metadata["entry_point"] = entry_point
 
         # Store max_memory in context for memory planning pass
         if max_memory_bytes is not None:
@@ -209,7 +210,9 @@ class Compiler:
         if target == "x86":
             return X86Backend(debug_mode=self.debug_mode)
         elif target == "npu":
-            return NPUBackend(debug_mode=self.debug_mode)
+            raise NotImplementedError(
+                "NPU backend is not implemented yet. Use target='x86' for now."
+            )
         else:
             raise ValueError(f"Unknown target: {target}")
 

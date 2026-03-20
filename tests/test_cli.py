@@ -56,6 +56,7 @@ def test_targets_command(runner):
     assert "x86" in result.output
     assert "npu" in result.output
     assert "Generate code for x86 simulation" in result.output
+    assert "not yet implemented" in result.output.lower()
 
 
 def test_info_command(runner, simple_onnx_model):
@@ -119,8 +120,9 @@ def test_compile_command_npu_target(runner, simple_onnx_model, tmp_path):
         "-o", str(output_dir),
         "-t", "npu",
     ])
-    assert result.exit_code == 0
+    assert result.exit_code != 0
     assert "Target: npu" in result.output
+    assert "not implemented" in result.output.lower()
 
 
 def test_compile_command_invalid_target(runner, simple_onnx_model, tmp_path):
@@ -172,6 +174,10 @@ def test_compile_command_with_entry_name(runner, simple_onnx_model, tmp_path):
         "--entry-name", "my_infer",
     ])
     assert result.exit_code == 0
+    model_header = (output_dir / "model.h").read_text()
+    model_source = (output_dir / "model.c").read_text()
+    assert "void my_infer(void);" in model_header
+    assert "void my_infer(void) {" in model_source
 
 
 def test_compile_command_constant_folding_enabled(runner, simple_onnx_model, tmp_path):

@@ -81,6 +81,13 @@ class X86Backend(BackendBase):
 
         return result
 
+    def _get_public_entry_point(self, ctx: CompileContext) -> str:
+        """Get the public entry-point symbol name for generated code."""
+        entry_point = ctx.metadata.get("entry_point", "nnc_run")
+        if not isinstance(entry_point, str) or not entry_point:
+            return "nnc_run"
+        return entry_point
+
     def _generate_source(self, ctx: CompileContext) -> str:
         """Generate main source file with spill/reload support."""
         from nnc_py.codegen.c_emitter import CEmitter
@@ -109,7 +116,20 @@ class X86Backend(BackendBase):
         source = self._add_debug_macros(source)
 
         # Inject debug code if enabled
-        return self._inject_debug_into_nnc_run(source, ctx)
+        source = self._inject_debug_into_nnc_run(source, ctx)
+        return self._append_entry_point_alias(source, ctx)
+
+    def _append_entry_point_alias(self, source_code: str, ctx: CompileContext) -> str:
+        """Append a public wrapper when the requested entry point is not nnc_run."""
+        entry_point = self._get_public_entry_point(ctx)
+        if entry_point == "nnc_run":
+            return source_code
+
+        return (
+            source_code
+            + "\n"
+            + f"/* Public entry point alias */\nvoid {entry_point}(void) {{\n    nnc_run();\n}}\n"
+        )
 
     def _add_debug_macros(self, source_code: str) -> str:
         """Add debug macro definitions to source code.
@@ -1414,6 +1434,17 @@ extern FILE* debug_file;
             "",
             "/* Main inference function */",
             "void nnc_run(void);",
+        ])
+
+        entry_point = self._get_public_entry_point(ctx)
+        if entry_point != "nnc_run":
+            lines.extend([
+                "",
+                "/* Public entry point alias */",
+                f"void {entry_point}(void);",
+            ])
+
+        lines.extend([
             "",
             "#endif  // MODEL_H",
         ])
