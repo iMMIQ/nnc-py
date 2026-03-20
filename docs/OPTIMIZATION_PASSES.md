@@ -14,11 +14,16 @@ Each pass transforms the computation graph to improve efficiency or reduce code 
 These passes are required for correct code generation:
 
 - **LivenessAnalysisPass**: Analyzes tensor lifetimes for memory planning
-- **MemoryPlanningPassV2**: Plans memory allocation for tensors
+- **MemoryPlanningPassV2**: Plans memory allocation for tensors using the conservative `basic` allocator at `O0`
 
 ### Basic Optimizations (O1)
 
 Applied at `opt_level=1` and above:
+
+- **MemoryPlanningPassV2**: Switches to the transfer-aware `cost_aware` allocator by default
+  - Treats fast memory as a fixed capacity constraint
+  - Reuses fast-memory regions when lifetimes permit
+  - Optimizes spill/reload behavior around lower `total_transfer_bytes`
 
 - **IdentityEliminationPass**: Removes Identity operations from the graph
   - Replaces all references to an Identity node's output with its input
@@ -37,6 +42,8 @@ Applied at `opt_level=2` and above:
 All O1 passes plus:
 
 - **SpillAnalysisPass**: Handles memory overflow when `max_memory` is set
+  - Legacy spill analysis only re-plans overflow for legacy/basic memory plans
+  - Unified `cost_aware` spill/reload plans are consumed directly by code generation
 
 ### Advanced Optimizations (O3)
 
@@ -99,3 +106,11 @@ Passes are executed in the order they are registered. For O3:
 5. LivenessAnalysisPass - analyzes lifetimes on optimized graph
 6. MemoryPlanningPassV2 - plans memory based on lifetimes
 7. SpillAnalysisPass - handles overflow if needed
+
+## Memory Planning Policy
+
+- `O0` defaults to the legacy `basic` allocator.
+- `O1`, `O2`, and `O3` default to the `cost_aware` allocator.
+- `max_memory` is interpreted as the available fast-memory budget.
+- The planner does not try to minimize fast-memory usage for its own sake. It tries to stay within the provided budget while minimizing fast/slow transfer traffic.
+- Transfer cost is surfaced through `spill_bytes`, `reload_bytes`, and `total_transfer_bytes`.

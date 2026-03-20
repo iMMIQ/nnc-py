@@ -8,7 +8,7 @@ NNC-Py is a compiler that converts ONNX neural network models to C code for embe
 
 - **ONNX Frontend**: Load and parse ONNX models with automatic shape inference
 - **Backend**: Generate and run x86 C code today, with an NPU target planned
-- **Optimization Passes**: Identity elimination, dead code elimination, fusion, memory planning, and spill analysis (O0-O3)
+- **Optimization Passes**: Identity elimination, dead code elimination, fusion, transfer-aware memory planning, and spill analysis (O0-O3)
 - **Runtime Library**: Optimized C runtime for common neural network operators
 - **CLI Interface**: Simple command-line interface for compiling models
 
@@ -119,10 +119,18 @@ Notes:
 
 ## Optimization Levels
 
-- **O0**: Required analysis only - liveness + memory planning
-- **O1**: Basic graph cleanup - identity elimination + dead code elimination
-- **O2**: O1 + spill analysis for memory-constrained builds
+- **O0**: Required analysis only, using the conservative legacy `basic` allocator
+- **O1**: O0 + graph cleanup, with `cost_aware` memory planning enabled by default
+- **O2**: O1 + constrained-memory spill/reload planning, still using the default `cost_aware` allocator
 - **O3**: O2 + pattern fusion + dominator fusion
+
+### Memory Planning Defaults
+
+- `O0` keeps the legacy `basic` allocator for conservative planning and debugging.
+- `O1`/`O2`/`O3` default to the `cost_aware` allocator.
+- `fast memory` is treated as a user-provided capacity constraint, not as a value to minimize on its own.
+- Under constrained memory, the planner optimizes for lower transfer cost: `spill_bytes + reload_bytes`, exposed as `total_transfer_bytes`.
+- The primary performance goal is to avoid unnecessary fast/slow memory traffic while staying within the declared fast-memory budget.
 
 ## Project Structure
 
@@ -192,6 +200,8 @@ This repo includes a host-side benchmark harness under `benchmarks/` intended to
 - Static memory footprint and artifact sizes from the generated build outputs
 
 Out of scope: compile time, embedded/cross targets, and system-level profiling (perf/valgrind/RSS/cache-miss).
+
+The current harness reports artifact memory sizes and end-to-end latency for the generated O3 build. Constrained-memory transfer comparisons are currently validated through planner/runtime tests rather than a dedicated `max_memory` benchmark mode.
 
 ### Workload Batch Semantics
 
