@@ -148,6 +148,7 @@ Thumbs.db
 
 # Project specific
 tests/build/
+benchmarks/results/
 *.o
 *.a
 model
