@@ -93,7 +93,7 @@ dev = [
 ]
 
 # Syrupy snapshot testing configuration
-[tool.syropy]
+[tool.syrupy]
 snapshots_path = "tests/__snapshots__"
 snapshot_extension = "ambr"
 snapshot_single_file = false

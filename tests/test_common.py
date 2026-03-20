@@ -18,6 +18,14 @@ from nnc_py import Compiler
 from nnc_py.frontend.onnx_loader import ONNXFrontend
 
 
+def is_lsan_ptrace_error(stderr: str) -> bool:
+    """Return True when LeakSanitizer fails due to ptrace restrictions."""
+    return (
+        "LeakSanitizer has encountered a fatal error" in stderr
+        and "LeakSanitizer does not work under ptrace" in stderr
+    )
+
+
 class GraphSnapshotWrapper:
     """Wrapper to serialize Graph for snapshot testing."""
 
@@ -502,6 +510,12 @@ class BaseSnapshotTest:
 
             stdout, stderr, returncode = self._run_executable(exe_path, timeout=timeout)
 
+            if is_lsan_ptrace_error(stderr):
+                pytest.skip(
+                    "LeakSanitizer is unavailable in this execution environment "
+                    "(ptrace restriction)."
+                )
+
             assert returncode == 0, f"Program failed with return code {returncode}\\nstdout: {stdout}\\nstderr: {stderr}"
             assert "ERROR: AddressSanitizer" not in stderr, f"AddressSanitizer detected errors:\\n{stderr}"
             assert "NNC Model Runner" in stdout
@@ -552,4 +566,3 @@ class BaseSnapshotTest:
                 f"Output mismatches found: {len(results['mismatched'])}"
 
             print(f"  [{model_name}] All {total} tensor outputs match ONNX Runtime!")
-
