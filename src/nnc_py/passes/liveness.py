@@ -6,7 +6,8 @@ of each tensor - when it becomes live (produced) and when it dies (last use).
 This information is used for memory reuse in the MemoryPlanningPass.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from bisect import bisect_right
 from typing import TYPE_CHECKING, Dict, List, Tuple
 
 from nnc_py.ir.context import CompileContext
@@ -25,6 +26,7 @@ class TensorLiveness:
     tensor_name: str
     live_start: int  # Index of node that produces this tensor
     live_end: int    # Index of last node that uses this tensor
+    use_positions: List[int] = field(default_factory=list)
     is_input: bool = False
     is_output: bool = False
     is_constant: bool = False
@@ -33,6 +35,18 @@ class TensorLiveness:
     def lifetime_range(self) -> int:
         """Return the length of this tensor's lifetime."""
         return self.live_end - self.live_start + 1
+
+    def next_use_after(self, node_idx: int) -> int | None:
+        """Return the first use position strictly after `node_idx`, or None."""
+        idx = bisect_right(self.use_positions, node_idx)
+        if idx < len(self.use_positions):
+            return self.use_positions[idx]
+        return None
+
+    def remaining_uses_after(self, node_idx: int) -> int:
+        """Count how many future uses occur strictly after `node_idx`."""
+        idx = bisect_right(self.use_positions, node_idx)
+        return len(self.use_positions) - idx
 
 
 class LivenessAnalysisPass(PassBase):
@@ -98,9 +112,11 @@ class LivenessAnalysisPass(PassBase):
             # Constant or other - assume live from start
             live_start = 0
 
+        use_positions = sorted(node_index[c.name] for c in consumers)
+
         # Compute live_end
-        if consumers:
-            live_end = max(node_index[c.name] for c in consumers)
+        if use_positions:
+            live_end = max(use_positions)
         else:
             # No consumers - must be an output
             live_end = len(nodes) - 1
@@ -109,6 +125,7 @@ class LivenessAnalysisPass(PassBase):
             tensor_name=tensor_name,
             live_start=live_start,
             live_end=live_end,
+            use_positions=use_positions,
             is_input=is_input,
             is_output=is_output,
             is_constant=is_constant,
