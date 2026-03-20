@@ -164,6 +164,28 @@ def test_compile_command_with_memory_strategy(runner, simple_onnx_model, tmp_pat
     assert "Memory Strategy: basic" in result.output
 
 
+def test_compile_command_default_memory_strategy_uses_optimization_default(runner, simple_onnx_model, tmp_path, monkeypatch):
+    """Test CLI leaves memory strategy unset when no explicit override is provided."""
+    output_dir = tmp_path / "output_strategy_default"
+    captured = {}
+
+    def fake_compile(self, onnx_path, output_dir, entry_point="nnc_run", max_memory=None, memory_strategy=None):
+        captured["memory_strategy"] = memory_strategy
+
+    monkeypatch.setattr("nnc_py.cli.Compiler.compile", fake_compile)
+
+    result = runner.invoke(main, [
+        "compile",
+        str(simple_onnx_model),
+        "-o", str(output_dir),
+        "-O", "2",
+    ])
+
+    assert result.exit_code == 0
+    assert "Memory Strategy: auto" in result.output
+    assert captured["memory_strategy"] is None
+
+
 def test_compile_command_with_entry_name(runner, simple_onnx_model, tmp_path):
     """Test 'nnc compile' with custom entry name."""
     output_dir = tmp_path / "output_entry"

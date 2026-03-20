@@ -14,6 +14,8 @@ from nnc_py.passes.memory_strategy import (
     MemoryAllocationPlan,
     MemoryAllocationStrategy,
     StrategyRegistry,
+    get_default_allocation_strategy,
+    _register_default_strategies,
 )
 
 if TYPE_CHECKING:
@@ -34,8 +36,6 @@ class MemoryPlanningPassV2(PassBase):
         plan = ctx.metadata["memory_allocation_plan"]  # MemoryAllocationPlan
     """
 
-    DEFAULT_STRATEGY = AllocationStrategy.BASIC
-
     @property
     def name(self) -> str:
         return "MemoryPlanningV2"
@@ -52,12 +52,12 @@ class MemoryPlanningPassV2(PassBase):
 
         # Get strategy from metadata or use default
         strategy_config: str | AllocationStrategy | None = ctx.metadata.get(
-            "memory_strategy", self.DEFAULT_STRATEGY
+            "memory_strategy"
         )
         max_memory_raw: float | int | None = ctx.metadata.get("max_memory", float("inf"))
 
         # Get strategy instance
-        strategy = self._get_strategy(strategy_config)
+        strategy = self._get_strategy(strategy_config, ctx.optimization_level)
 
         # Convert float infinity to None for the allocate call
         max_memory_for_alloc: int | None
@@ -84,19 +84,19 @@ class MemoryPlanningPassV2(PassBase):
     def _get_strategy(
         self,
         strategy_config: str | AllocationStrategy | None,
+        optimization_level: int,
     ) -> MemoryAllocationStrategy:
         """Get strategy instance from config."""
         if strategy_config is None:
-            strategy_config = self.DEFAULT_STRATEGY
+            strategy_config = get_default_allocation_strategy(optimization_level)
 
-        if isinstance(strategy_config, str):
-            return StrategyRegistry.get(strategy_config)
-        elif isinstance(strategy_config, AllocationStrategy):
-            return StrategyRegistry.get(strategy_config)
-        elif isinstance(strategy_config, MemoryAllocationStrategy):
+        if isinstance(strategy_config, MemoryAllocationStrategy):
             return strategy_config
-        else:
+
+        if not isinstance(strategy_config, (str, AllocationStrategy)):
             raise ValueError(f"Invalid strategy configuration: {strategy_config}")
+
+        return StrategyRegistry.get(strategy_config)
 
     def _store_legacy_formats(
         self,
@@ -174,9 +174,7 @@ class MemoryPlanningPassV2(PassBase):
 # Register default strategies when this module is imported
 def _initialize_strategies() -> None:
     """Import and register default strategies."""
-    from nnc_py.passes.strategies.basic_allocator import BasicAllocator
-
-    StrategyRegistry.register(BasicAllocator)
+    _register_default_strategies()
 
 
 # Auto-initialize on import

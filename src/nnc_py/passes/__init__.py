@@ -13,6 +13,7 @@ from nnc_py.passes.memory_strategy import (
     ReloadPoint,
     TensorAllocation,
     get_allocation_plan,
+    get_default_allocation_strategy,
     get_memory_strategy,
 )
 
@@ -49,6 +50,7 @@ __all__ = [
     "ReloadPoint",
     "TensorAllocation",
     "get_allocation_plan",
+    "get_default_allocation_strategy",
     "get_memory_strategy",
 
     # New unified pass

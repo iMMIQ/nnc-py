@@ -58,8 +58,8 @@ def main():
 @click.option(
     "--memory-strategy",
     type=str,
-    default="basic",
-    help="Memory allocation strategy: basic (default) - Simple sequential allocation with spill-all",
+    default=None,
+    help="Memory allocation strategy override. Leave unset to use the optimization-level default.",
 )
 @click.option(
     "--enable-constant-folding/--disable-constant-folding",
@@ -83,7 +83,9 @@ def compile(onnx_model, output, target, opt_level, entry_name, verbose, max_memo
     console.print(f"[bold blue]Compiling[/bold blue]: {onnx_model}")
     console.print(f"[bold blue]Target[/bold blue]: {target}")
     console.print(f"[bold blue]Optimization[/bold blue]: O{opt_level}")
-    console.print(f"[bold blue]Memory Strategy[/bold blue]: {memory_strategy}")
+    console.print(
+        f"[bold blue]Memory Strategy[/bold blue]: {memory_strategy if memory_strategy is not None else 'auto'}"
+    )
     console.print(f"[bold blue]Constant Folding[/bold blue]: {'enabled' if enable_constant_folding else 'disabled'}")
     console.print(f"[bold blue]Debug Mode[/bold blue]: {'enabled' if debug else 'disabled'}")
     if max_memory:

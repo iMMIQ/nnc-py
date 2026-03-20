@@ -16,6 +16,7 @@ from nnc_py.passes.memory_plan import MemoryBuffer
 class AllocationStrategy(Enum):
     """Available memory allocation strategies."""
     BASIC = "basic"    # Basic sequential allocation with spill-all
+    COST_AWARE = "cost_aware"
 
 
 @dataclass
@@ -80,6 +81,9 @@ class MemoryAllocationPlan:
     # Spill information (empty if no spill)
     spill_points: List[SpillPoint] = field(default_factory=list)
     reload_points: List[ReloadPoint] = field(default_factory=list)
+    spill_bytes: int = 0
+    reload_bytes: int = 0
+    total_transfer_bytes: int = 0
 
     # Timing/liveness info for each node (optional, for debugging)
     node_memory_usage: List[int] = field(default_factory=list)
@@ -162,7 +166,7 @@ class MemoryAllocationStrategy(ABC):
     def strategy_type(self) -> AllocationStrategy:
         """Return the strategy type enum."""
         # Default implementation - subclasses can override
-        return AllocationStrategy.LIVENESS_BASED
+        return AllocationStrategy.BASIC
 
     @abstractmethod
     def allocate(
@@ -209,7 +213,7 @@ class StrategyRegistry:
             strategy_name = instance.name
         except Exception:
             # If we can't create instance, try to get from class attributes
-            strategy_type = getattr(strategy_cls, 'strategy_type', AllocationStrategy.LIVENESS_BASED)
+            strategy_type = getattr(strategy_cls, 'strategy_type', AllocationStrategy.BASIC)
             strategy_name = getattr(strategy_cls, 'name', strategy_cls.__name__)
 
         cls._strategies[strategy_type] = strategy_cls
@@ -258,8 +262,12 @@ class StrategyRegistry:
 def _register_default_strategies() -> None:
     """Import and register default strategies."""
     from nnc_py.passes.strategies.basic_allocator import BasicAllocator
+    from nnc_py.passes.strategies.cost_aware_allocator import CostAwareAllocator
 
-    StrategyRegistry.register(BasicAllocator)
+    for strategy_cls in (BasicAllocator, CostAwareAllocator):
+        strategy = strategy_cls()
+        if not StrategyRegistry.is_registered(strategy.strategy_type):
+            StrategyRegistry.register(strategy_cls)
 
 
 def get_allocation_plan(ctx: CompileContext) -> Optional[MemoryAllocationPlan]:
@@ -274,6 +282,15 @@ def get_allocation_plan(ctx: CompileContext) -> Optional[MemoryAllocationPlan]:
     return ctx.metadata.get("memory_allocation_plan")
 
 
+def get_default_allocation_strategy(
+    optimization_level: int,
+) -> AllocationStrategy:
+    """Get the default allocation strategy for an optimization level."""
+    if optimization_level <= 0:
+        return AllocationStrategy.BASIC
+    return AllocationStrategy.COST_AWARE
+
+
 def get_memory_strategy(ctx: CompileContext) -> Optional[MemoryAllocationStrategy]:
     """Get a memory strategy instance based on context configuration.
 
@@ -286,7 +303,9 @@ def get_memory_strategy(ctx: CompileContext) -> Optional[MemoryAllocationStrateg
     strategy_config = ctx.metadata.get("memory_strategy")
 
     if strategy_config is None:
-        # Default to basic allocator
-        strategy_config = AllocationStrategy.BASIC
+        strategy_config = get_default_allocation_strategy(ctx.optimization_level)
 
     return StrategyRegistry.get(strategy_config)
+
+
+_register_default_strategies()
