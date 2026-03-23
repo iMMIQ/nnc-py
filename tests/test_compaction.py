@@ -1,9 +1,17 @@
 """Tests for intra-fast-memory compaction."""
 
+import os
+import re
+import subprocess
+import tempfile
 from types import MethodType
+from pathlib import Path
 
+import onnx
 import pytest
+from onnx import helper
 
+from nnc_py import Compiler
 from nnc_py.codegen.x86_backend import X86Backend
 from nnc_py.ir.context import CompileContext
 from nnc_py.ir.graph import Graph
@@ -17,6 +25,7 @@ from nnc_py.passes.memory_strategy import (
     TensorAllocation,
 )
 from nnc_py.passes.strategies.cost_aware_allocator import CostAwareAllocator
+from test_common import is_lsan_ptrace_error
 
 
 def test_move_point_fields():
@@ -447,3 +456,77 @@ def test_compaction_extreme_max_memory_equals_node_demand():
     allocator = CostAwareAllocator()
     plan = allocator.allocate(ctx, liveness, max_memory=48)
     assert plan.total_fast_memory <= 48
+
+
+def test_extreme_max_memory_compiles_and_runs():
+    """End-to-end: compile/build/run at peak node demand with ASan and stay within limit."""
+    input_t = helper.make_tensor_value_info("input", onnx.TensorProto.FLOAT, [8, 8])
+    nodes = [
+        helper.make_node("Relu", ["input"], ["relu1"]),
+        helper.make_node("Relu", ["input"], ["relu2"]),
+        helper.make_node("Add", ["relu1", "relu2"], ["output"]),
+    ]
+    output_t = helper.make_tensor_value_info("output", onnx.TensorProto.FLOAT, [8, 8])
+    graph = helper.make_graph(nodes, "extreme_test", [input_t], [output_t])
+    model = helper.make_model(graph, opset_imports=[helper.make_operatorsetid("", 13)])
+
+    tmpdir = tempfile.mkdtemp()
+    onnx_path = os.path.join(tmpdir, "model.onnx")
+    output_dir = os.path.join(tmpdir, "build")
+    onnx.save(model, onnx_path)
+
+    compiler = Compiler(target="x86", opt_level=0)
+    compiler.compile(onnx_path, output_dir, max_memory="768", memory_strategy="cost_aware")
+
+    tensors_c = Path(output_dir) / "tensors.c"
+    content = tensors_c.read_text()
+    match = re.search(
+        r"#define\s+(?:NNC_FAST_MEMORY_SIZE|NNC_MEMORY_SIZE)\s+(\d+)",
+        content,
+    )
+    assert match is not None
+    fast_size = int(match.group(1))
+    assert fast_size <= 768, f"Fast memory {fast_size} exceeds limit 768"
+
+    makefile = Path(output_dir) / "Makefile"
+    runtime_dir = Path(__file__).resolve().parent.parent / "runtime"
+    makefile_content = makefile.read_text()
+    makefile_content = makefile_content.replace(
+        "NNC_RUNTIME ?= ../../runtime",
+        f"NNC_RUNTIME = {runtime_dir}",
+    )
+    makefile_content = makefile_content.replace(
+        "CFLAGS = -std=c11 -O2",
+        "CFLAGS = -std=c11 -O0 -g -fsanitize=address "
+        "-fsanitize-address-use-after-scope -fno-omit-frame-pointer",
+    )
+    makefile.write_text(makefile_content)
+
+    subprocess.run(["make", "clean"], cwd=output_dir, capture_output=True, text=True)
+    build = subprocess.run(
+        ["make"],
+        cwd=output_dir,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert build.returncode == 0, build.stderr or build.stdout
+
+    env = os.environ.copy()
+    env["ASAN_OPTIONS"] = "detect_leaks=1:halt_on_error=0"
+    run = subprocess.run(
+        [str(Path(output_dir) / "model")],
+        cwd=output_dir,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=env,
+    )
+    if run.returncode != 0 and is_lsan_ptrace_error(run.stderr):
+        pytest.skip(
+            "LeakSanitizer is unavailable in this execution environment "
+            "(ptrace restriction)."
+        )
+    combined_output = run.stdout + run.stderr
+    assert run.returncode == 0, combined_output
+    assert "ERROR: AddressSanitizer" not in combined_output
