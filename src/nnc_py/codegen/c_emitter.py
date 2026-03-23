@@ -173,44 +173,8 @@ class CEmitter:
 
     def _emit_conv_call(self, ctx: CompileContext, node: Node) -> None:
         """Emit Conv operation call."""
-        args = []
-
-        if len(node.inputs) >= 1:
-            var_name = ctx.tensor_symbols.get(node.inputs[0], node.inputs[0])
-            args.append(f"&{var_name}")  # input
-        if len(node.inputs) >= 2:
-            var_name = ctx.tensor_symbols.get(node.inputs[1], node.inputs[1])
-            args.append(f"&{var_name}")  # weight
-
-        # bias parameter
-        if len(node.inputs) >= 3:
-            var_name = ctx.tensor_symbols.get(node.inputs[2], node.inputs[2])
-            args.append(f"&{var_name}")  # bias
-        else:
-            args.append("NULL")  # No bias
-
-        # Output tensor
-        if len(node.outputs) >= 1:
-            var_name = ctx.tensor_symbols.get(node.outputs[0], node.outputs[0])
-            args.append(f"&{var_name}")  # output
-
-        # Conv attributes: kernel_h, kernel_w, stride_h, stride_w, pad_h, pad_w
-        kernel_shape = node.attrs.get("kernel_shape", [1, 1])
-        strides = node.attrs.get("strides", [1, 1])
-        pads = node.attrs.get("pads", [0, 0])
-
-        args.extend([str(kernel_shape[0]), str(kernel_shape[1])])
-        args.extend([str(strides[0]), str(strides[1])])
-
-        if len(pads) == 4:
-            args.append(str(pads[0]))  # pad_h (top)
-            args.append(str(pads[1]))  # pad_w (left)
-        elif len(pads) == 2:
-            args.extend([str(pads[0]), str(pads[1])])
-        else:
-            args.extend(["0", "0"])
-
-        self.write_line(f"nnc_conv({', '.join(args)});")
+        entrypoint, args = self._select_conv_call(ctx, node, fused=False)
+        self.write_line(f"{entrypoint}({', '.join(args)});")
 
     def _emit_gemm_call(self, ctx: CompileContext, node: Node) -> None:
         """Emit Gemm operation call."""
@@ -248,9 +212,18 @@ class CEmitter:
 
         args.append(f"{alpha}f")
         args.append(f"{beta}f")
+        lowering = node.metadata.get("lowering", {})
+        if (
+            isinstance(lowering, dict)
+            and lowering.get("weight_pack") == "rhs_transposed_constant"
+            and int(trans_a) == 0
+            and int(trans_b) == 1
+        ):
+            self.write_line(f"nnc_gemm_nt({', '.join(args)});")
+            return
+
         args.append(str(trans_a))
         args.append(str(trans_b))
-
         self.write_line(f"nnc_gemm({', '.join(args)});")
 
     def _emit_maxpool_call(self, ctx: CompileContext, node: Node) -> None:
@@ -941,44 +914,82 @@ class CEmitter:
         Arguments: input, weight, bias (or NULL), output, kernel_h, kernel_w,
                    stride_h, stride_w, pad_h, pad_w
         """
-        args = []
+        entrypoint, args = self._select_conv_call(ctx, node, fused=True)
+        self.write_line(f"{entrypoint}({', '.join(args)});")
 
+    def _select_conv_call(
+        self, ctx: CompileContext, node: Node, *, fused: bool
+    ) -> tuple[str, list[str]]:
+        """Select conv entrypoint based on lowering metadata."""
+        args = self._collect_conv_io_args(ctx, node)
+        lowering = node.metadata.get("lowering", {})
+        kernel_kind = lowering.get("kernel_kind") if isinstance(lowering, dict) else None
+        prefix = "nnc_conv_relu" if fused else "nnc_conv"
+
+        stride_h, stride_w = self._get_conv_strides(node)
+        pad_h, pad_w = self._get_conv_pads(node)
+        if kernel_kind == "pointwise_1x1":
+            args.extend([str(stride_h), str(stride_w), str(pad_h), str(pad_w)])
+            return f"{prefix}1x1", args
+        if kernel_kind == "spatial_3x3":
+            return f"{prefix}3x3_s1", args
+        if kernel_kind == "stem_7x7_s2":
+            return f"{prefix}7x7_s2", args
+
+        kernel_h, kernel_w = self._get_conv_kernel_shape(node)
+        args.extend([
+            str(kernel_h),
+            str(kernel_w),
+            str(stride_h),
+            str(stride_w),
+            str(pad_h),
+            str(pad_w),
+        ])
+        return prefix, args
+
+    def _collect_conv_io_args(self, ctx: CompileContext, node: Node) -> list[str]:
+        """Collect common conv input/output arguments."""
+        args = []
         if len(node.inputs) >= 1:
             var_name = ctx.tensor_symbols.get(node.inputs[0], node.inputs[0])
-            args.append(f"&{var_name}")  # input
+            args.append(f"&{var_name}")
         if len(node.inputs) >= 2:
             var_name = ctx.tensor_symbols.get(node.inputs[1], node.inputs[1])
-            args.append(f"&{var_name}")  # weight
-
-        # bias parameter
+            args.append(f"&{var_name}")
         if len(node.inputs) >= 3:
             var_name = ctx.tensor_symbols.get(node.inputs[2], node.inputs[2])
-            args.append(f"&{var_name}")  # bias
+            args.append(f"&{var_name}")
         else:
-            args.append("NULL")  # No bias
-
-        # Output tensor
+            args.append("NULL")
         if len(node.outputs) >= 1:
             var_name = ctx.tensor_symbols.get(node.outputs[0], node.outputs[0])
-            args.append(f"&{var_name}")  # output
+            args.append(f"&{var_name}")
+        return args
 
-        # Conv attributes: kernel_h, kernel_w, stride_h, stride_w, pad_h, pad_w
+    def _get_conv_kernel_shape(self, node: Node) -> tuple[int, int]:
+        """Get conv kernel shape."""
         kernel_shape = node.attrs.get("kernel_shape", [1, 1])
+        if len(kernel_shape) >= 2:
+            return int(kernel_shape[0]), int(kernel_shape[1])
+        return 1, 1
+
+    def _get_conv_strides(self, node: Node) -> tuple[int, int]:
+        """Get conv strides."""
         strides = node.attrs.get("strides", [1, 1])
+        if len(strides) >= 2:
+            return int(strides[0]), int(strides[1])
+        if len(strides) == 1:
+            return int(strides[0]), int(strides[0])
+        return 1, 1
+
+    def _get_conv_pads(self, node: Node) -> tuple[int, int]:
+        """Get conv top/left padding."""
         pads = node.attrs.get("pads", [0, 0])
-
-        args.extend([str(kernel_shape[0]), str(kernel_shape[1])])
-        args.extend([str(strides[0]), str(strides[1])])
-
-        if len(pads) == 4:
-            args.append(str(pads[0]))  # pad_h (top)
-            args.append(str(pads[1]))  # pad_w (left)
-        elif len(pads) == 2:
-            args.extend([str(pads[0]), str(pads[1])])
-        else:
-            args.extend(["0", "0"])
-
-        self.write_line(f"nnc_conv_relu({', '.join(args)});")
+        if len(pads) >= 4:
+            return int(pads[0]), int(pads[1])
+        if len(pads) >= 2:
+            return int(pads[0]), int(pads[1])
+        return 0, 0
 
     def _emit_fused_conv_sigmoid_call(self, ctx: CompileContext, node: Node) -> None:
         """Emit direct nnc_conv_sigmoid() function call.

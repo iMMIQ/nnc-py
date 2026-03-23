@@ -66,6 +66,13 @@ void nnc_conv(
     int stride_h, int stride_w,
     int pad_h, int pad_w
 );
+void nnc_conv1x1(
+    Tensor* input, Tensor* weight, Tensor* bias, Tensor* output,
+    int stride_h, int stride_w,
+    int pad_h, int pad_w
+);
+void nnc_conv3x3_s1(Tensor* input, Tensor* weight, Tensor* bias, Tensor* output);
+void nnc_conv7x7_s2(Tensor* input, Tensor* weight, Tensor* bias, Tensor* output);
 
 /* Fused operations */
 void nnc_conv_relu(
@@ -74,6 +81,13 @@ void nnc_conv_relu(
     int stride_h, int stride_w,
     int pad_h, int pad_w
 );
+void nnc_conv_relu1x1(
+    Tensor* input, Tensor* weight, Tensor* bias, Tensor* output,
+    int stride_h, int stride_w,
+    int pad_h, int pad_w
+);
+void nnc_conv_relu3x3_s1(Tensor* input, Tensor* weight, Tensor* bias, Tensor* output);
+void nnc_conv_relu7x7_s2(Tensor* input, Tensor* weight, Tensor* bias, Tensor* output);
 
 /* Activation functions */
 void nnc_relu(Tensor* input, Tensor* output);
@@ -184,6 +198,10 @@ void nnc_matmul(Tensor* a, Tensor* b, Tensor* output);
 void nnc_gemm(
     Tensor* a, Tensor* b, Tensor* c, Tensor* output,
     float alpha, float beta, int trans_a, int trans_b
+);
+void nnc_gemm_nt(
+    Tensor* a, Tensor* b, Tensor* c, Tensor* output,
+    float alpha, float beta
 );
 
 /* ============================================================================

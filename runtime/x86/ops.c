@@ -1065,6 +1065,22 @@ void nnc_conv(
     );
 }
 
+void nnc_conv1x1(
+    Tensor* input, Tensor* weight, Tensor* bias, Tensor* output,
+    int stride_h, int stride_w,
+    int pad_h, int pad_w
+) {
+    nnc_conv(input, weight, bias, output, 1, 1, stride_h, stride_w, pad_h, pad_w);
+}
+
+void nnc_conv3x3_s1(Tensor* input, Tensor* weight, Tensor* bias, Tensor* output) {
+    nnc_conv(input, weight, bias, output, 3, 3, 1, 1, 1, 1);
+}
+
+void nnc_conv7x7_s2(Tensor* input, Tensor* weight, Tensor* bias, Tensor* output) {
+    nnc_conv(input, weight, bias, output, 7, 7, 2, 2, 3, 3);
+}
+
 /* ============================================================================
  * Shape Manipulation Operations
  * ============================================================================ */
@@ -1400,6 +1416,13 @@ void nnc_gemm(
             out_row[j] = (float)sum;
         }
     }
+}
+
+void nnc_gemm_nt(
+    Tensor* a, Tensor* b, Tensor* c, Tensor* output,
+    float alpha, float beta
+) {
+    nnc_gemm(a, b, c, output, alpha, beta, 0, 1);
 }
 
 /* ============================================================================
@@ -2667,6 +2690,22 @@ void nnc_conv_relu(
         NNC_ACTIVATION_RELU,
         "nnc_conv_relu"
     );
+}
+
+void nnc_conv_relu1x1(
+    Tensor* input, Tensor* weight, Tensor* bias, Tensor* output,
+    int stride_h, int stride_w,
+    int pad_h, int pad_w
+) {
+    nnc_conv_relu(input, weight, bias, output, 1, 1, stride_h, stride_w, pad_h, pad_w);
+}
+
+void nnc_conv_relu3x3_s1(Tensor* input, Tensor* weight, Tensor* bias, Tensor* output) {
+    nnc_conv_relu(input, weight, bias, output, 3, 3, 1, 1, 1, 1);
+}
+
+void nnc_conv_relu7x7_s2(Tensor* input, Tensor* weight, Tensor* bias, Tensor* output) {
+    nnc_conv_relu(input, weight, bias, output, 7, 7, 2, 2, 3, 3);
 }
 
 void nnc_conv_sigmoid(
