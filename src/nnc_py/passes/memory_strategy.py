@@ -59,6 +59,16 @@ class ReloadPoint:
 
 
 @dataclass
+class MovePoint:
+    """Intra-fast-memory relocation during compaction."""
+    tensor_name: str
+    at_node_idx: int
+    from_offset: int
+    to_offset: int
+    size: int
+
+
+@dataclass
 class MemoryAllocationPlan:
     """Unified memory allocation plan result.
 
@@ -84,6 +94,8 @@ class MemoryAllocationPlan:
     spill_bytes: int = 0
     reload_bytes: int = 0
     total_transfer_bytes: int = 0
+    move_points: List['MovePoint'] = field(default_factory=list)
+    move_bytes: int = 0
 
     # Timing/liveness info for each node (optional, for debugging)
     node_memory_usage: List[int] = field(default_factory=list)
@@ -127,6 +139,10 @@ class MemoryAllocationPlan:
             for alloc in self.tensor_allocations.values()
             if alloc.is_spilled
         }
+
+    def get_move_points_at(self, node_idx: int) -> List['MovePoint']:
+        """Get move points at a specific node."""
+        return [mp for mp in self.move_points if mp.at_node_idx == node_idx]
 
     def get_max_reload_slots(self) -> int:
         """Get maximum number of concurrent reload slots needed.
