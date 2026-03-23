@@ -14,6 +14,9 @@ from benchmarks.compare import compare_results
 from benchmarks.metrics import collect_artifact_metrics, has_memory_layout_defines
 from benchmarks.runner_gen import generate_benchmark_runner
 
+QUICK_WARMUP_ITERATIONS = 1
+QUICK_MEASURE_ITERATIONS = 3
+
 
 def parse_runner_output(stdout: str) -> dict:
     if not isinstance(stdout, str):
@@ -191,17 +194,25 @@ def _benchmark_build_sources(build_dir: Path) -> list[str]:
     return sources
 
 
+def _resolve_iteration_counts(*, case, quick: bool) -> tuple[int, int]:
+    if quick:
+        return QUICK_WARMUP_ITERATIONS, QUICK_MEASURE_ITERATIONS
+    return case.warmup_iterations, case.measure_iterations
+
+
 def run_benchmark(
     *,
     model_name: str,
     batch_sizes: list[int] | None = None,
     baseline_result: Path | None = None,
     output: Path | None = None,
+    quick: bool = False,
 ) -> tuple[Path, Path | None]:
     repo_root = get_repo_root()
     case = get_benchmark_case(model_name)
 
     selected_batch_sizes = batch_sizes or list(case.workload_batch_sizes)
+    warmup_iterations, measure_iterations = _resolve_iteration_counts(case=case, quick=quick)
     output_path = (output or _default_output_path(repo_root=repo_root, model_name=model_name)).resolve()
     build_dir = _default_build_dir(repo_root=repo_root, model_name=model_name, output=output_path).resolve()
     build_dir.mkdir(parents=True, exist_ok=True)
@@ -227,8 +238,8 @@ def run_benchmark(
     runner_source = generate_benchmark_runner(
         model_name=model_name,
         workload_batch_sizes=selected_batch_sizes,
-        warmup_iterations=case.warmup_iterations,
-        measure_iterations=case.measure_iterations,
+        warmup_iterations=warmup_iterations,
+        measure_iterations=measure_iterations,
         entry_point="nnc_run",
         has_constants=has_constants,
         input_tensor_symbols=input_tensor_symbols,
@@ -322,6 +333,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="Path to write result JSON (default: benchmarks/results/...)",
     )
+    parser.add_argument(
+        "--quick",
+        action="store_true",
+        help=(
+            "Use reduced iteration counts for faster local feedback "
+            f"(warmup={QUICK_WARMUP_ITERATIONS}, measure={QUICK_MEASURE_ITERATIONS})"
+        ),
+    )
     return parser
 
 
@@ -338,6 +357,7 @@ def main(argv: list[str] | None = None) -> None:
         batch_sizes=batch_sizes,
         baseline_result=baseline_result,
         output=output,
+        quick=args.quick,
     )
 
 

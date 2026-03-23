@@ -459,45 +459,48 @@ void nnc_avgpool2d(
  * Convolution (Placeholder implementation)
  * ============================================================================ */
 
-void nnc_conv(
+enum {
+    NNC_ACTIVATION_NONE = 0,
+    NNC_ACTIVATION_RELU = 1,
+    NNC_ACTIVATION_SIGMOID = 2,
+};
+
+static float nnc_apply_activation(float value, int activation_kind) {
+    if (activation_kind == NNC_ACTIVATION_RELU) {
+        return value > 0.0f ? value : 0.0f;
+    }
+    if (activation_kind == NNC_ACTIVATION_SIGMOID) {
+        return 1.0f / (1.0f + expf(-value));
+    }
+    return value;
+}
+
+static void nnc_conv_impl(
     Tensor* input, Tensor* weight, Tensor* bias, Tensor* output,
     int kernel_h, int kernel_w,
     int stride_h, int stride_w,
-    int pad_h, int pad_w
+    int pad_h, int pad_w,
+    int activation_kind,
+    const char* op_name
 ) {
-    /* Standard 2D convolution implementation
-     * Input: [N, C_in, H, W]
-     * Weight: [C_out, C_in, kH, kW]
-     * Bias: [C_out] (optional)
-     * Output: [N, C_out, H_out, W_out]
-     */
-
-    /* Debug: Check pointers */
-    fprintf(stderr, "nnc_conv: Checking pointers...\\n");
-    fflush(stderr);
-
     if (!input || !weight || !output) {
-        fprintf(stderr, "nnc_conv: NULL tensor pointer\\n");
+        fprintf(stderr, "%s: NULL tensor pointer\n", op_name);
         fflush(stderr);
         return;
     }
     if (!input->data || !weight->data || !output->data) {
-        fprintf(stderr, "nnc_conv: NULL data pointer\\n");
-        fprintf(stderr, "  input->data=%p, weight->data=%p, output->data=%p\\n",
+        fprintf(stderr, "%s: NULL data pointer\n", op_name);
+        fprintf(stderr, "  input->data=%p, weight->data=%p, output->data=%p\n",
                 input->data, weight->data, output->data);
         fflush(stderr);
         return;
     }
     if (!input->shape || !weight->shape || !output->shape) {
-        fprintf(stderr, "nnc_conv: NULL shape pointer\\n");
+        fprintf(stderr, "%s: NULL shape pointer\n", op_name);
         fflush(stderr);
         return;
     }
 
-    fprintf(stderr, "nnc_conv: All pointers valid\\n");
-    fflush(stderr);
-
-    /* Extract dimensions */
     int N = (int)input->shape[0];
     int C_in = (int)input->shape[1];
     int H_in = (int)input->shape[2];
@@ -507,87 +510,131 @@ void nnc_conv(
     int H_out = (int)output->shape[2];
     int W_out = (int)output->shape[3];
 
-    fprintf(stderr, "nnc_conv: dimensions\\n");
-    fprintf(stderr, "  input: [%d, %d, %d, %d]\\n", N, C_in, H_in, W_in);
-    fprintf(stderr, "  weight: [%d, %d, %d, %d]\\n", C_out, (int)weight->shape[1], (int)weight->shape[2], (int)weight->shape[3]);
-    fprintf(stderr, "  output: [%d, %d, %d, %d]\\n", (int)output->shape[0], (int)output->shape[1], H_out, W_out);
-    fprintf(stderr, "  kernel: [%d, %d], stride: [%d, %d], pad: [%d, %d]\\n",
-            kernel_h, kernel_w, stride_h, stride_w, pad_h, pad_w);
-    fflush(stderr);
-
-    /* Get data pointers */
     float* in_data = (float*)input->data;
     float* weight_data = (float*)weight->data;
     float* bias_data = bias ? (float*)bias->data : NULL;
     float* out_data = (float*)output->data;
 
-    /* Compute output dimensions */
-    /* H_out = (H_in + 2*pad_h - kernel_h) / stride_h + 1 */
-    /* W_out = (W_in + 2*pad_w - kernel_w) / stride_w + 1 */
+    int64_t input_batch_stride = (int64_t)C_in * H_in * W_in;
+    int64_t input_channel_stride = (int64_t)H_in * W_in;
+    int64_t weight_out_stride = (int64_t)C_in * kernel_h * kernel_w;
+    int64_t weight_channel_stride = (int64_t)kernel_h * kernel_w;
+    int64_t output_batch_stride = (int64_t)C_out * H_out * W_out;
+    int64_t output_channel_stride = (int64_t)H_out * W_out;
 
-    /* Initialize output to zero */
-    int64_t output_size = N * C_out * H_out * W_out;
-    for (int64_t i = 0; i < output_size; i++) {
-        out_data[i] = 0.0f;
-    }
+    int use_1x1_fast_path = (
+        kernel_h == 1 && kernel_w == 1 && pad_h == 0 && pad_w == 0
+    );
+    int use_no_pad_fast_path = (
+        !use_1x1_fast_path && pad_h == 0 && pad_w == 0
+    );
 
-    /* Perform convolution */
     for (int n = 0; n < N; n++) {
+        float* batch_input = in_data + ((int64_t)n * input_batch_stride);
+        float* batch_output = out_data + ((int64_t)n * output_batch_stride);
+
         for (int c_out = 0; c_out < C_out; c_out++) {
-            for (int h_out = 0; h_out < H_out; h_out++) {
-                for (int w_out = 0; w_out < W_out; w_out++) {
-                    /* Compute convolution window start position */
-                    int h_in = h_out * stride_h - pad_h;
-                    int w_in = w_out * stride_w - pad_w;
+            float* output_channel = batch_output + ((int64_t)c_out * output_channel_stride);
+            float* weight_out = weight_data + ((int64_t)c_out * weight_out_stride);
+            double bias_value = bias_data ? (double)bias_data[c_out] : 0.0;
 
-                    float sum = 0.0f;
-                    float c = 0.0f;  /* Kahan compensation */
+            if (use_1x1_fast_path) {
+                for (int h_out_idx = 0; h_out_idx < H_out; h_out_idx++) {
+                    int in_h = h_out_idx * stride_h;
+                    float* output_row = output_channel + ((int64_t)h_out_idx * W_out);
+                    for (int w_out_idx = 0; w_out_idx < W_out; w_out_idx++) {
+                        int in_w = w_out_idx * stride_w;
+                        int64_t input_offset = ((int64_t)in_h * W_in) + in_w;
+                        double sum = bias_value;
 
-                    /* Convolve over kernel */
-                    for (int c_in = 0; c_in < C_in; c_in++) {
-                        for (int kh = 0; kh < kernel_h; kh++) {
-                            for (int kw = 0; kw < kernel_w; kw++) {
-                                int h = h_in + kh;
-                                int w = w_in + kw;
+                        for (int c_in = 0; c_in < C_in; c_in++) {
+                            float* input_channel = batch_input + ((int64_t)c_in * input_channel_stride);
+                            sum += (double)input_channel[input_offset] * (double)weight_out[c_in];
+                        }
 
-                                /* Check bounds */
-                                if (h >= 0 && h < H_in && w >= 0 && w < W_in) {
-                                    /* Calculate indices */
-                                    int64_t in_idx = n * C_in * H_in * W_in
-                                                   + c_in * H_in * W_in
-                                                   + h * W_in
-                                                   + w;
+                        output_row[w_out_idx] = nnc_apply_activation((float)sum, activation_kind);
+                    }
+                }
+                continue;
+            }
 
-                                    int64_t weight_idx = c_out * C_in * kernel_h * kernel_w
-                                                      + c_in * kernel_h * kernel_w
-                                                      + kh * kernel_w
-                                                      + kw;
+            if (use_no_pad_fast_path) {
+                for (int h_out_idx = 0; h_out_idx < H_out; h_out_idx++) {
+                    int h_base = h_out_idx * stride_h;
+                    float* output_row = output_channel + ((int64_t)h_out_idx * W_out);
+                    for (int w_out_idx = 0; w_out_idx < W_out; w_out_idx++) {
+                        int w_base = w_out_idx * stride_w;
+                        double sum = bias_value;
 
-                                    /* Kahan summation for improved numerical accuracy */
-                                    float y = in_data[in_idx] * weight_data[weight_idx] - c;
-                                    float t = sum + y;
-                                    c = (t - sum) - y;
-                                    sum = t;
+                        for (int c_in = 0; c_in < C_in; c_in++) {
+                            float* input_channel = batch_input + ((int64_t)c_in * input_channel_stride);
+                            float* input_patch = input_channel + ((int64_t)h_base * W_in) + w_base;
+                            float* kernel = weight_out + ((int64_t)c_in * weight_channel_stride);
+
+                            for (int kh = 0; kh < kernel_h; kh++) {
+                                float* input_row = input_patch + ((int64_t)kh * W_in);
+                                float* kernel_row = kernel + ((int64_t)kh * kernel_w);
+                                for (int kw = 0; kw < kernel_w; kw++) {
+                                    sum += (double)input_row[kw] * (double)kernel_row[kw];
                                 }
+                            }
+                        }
+
+                        output_row[w_out_idx] = nnc_apply_activation((float)sum, activation_kind);
+                    }
+                }
+                continue;
+            }
+
+            for (int h_out_idx = 0; h_out_idx < H_out; h_out_idx++) {
+                int h_base = h_out_idx * stride_h - pad_h;
+                float* output_row = output_channel + ((int64_t)h_out_idx * W_out);
+                for (int w_out_idx = 0; w_out_idx < W_out; w_out_idx++) {
+                    int w_base = w_out_idx * stride_w - pad_w;
+                    double sum = bias_value;
+
+                    for (int c_in = 0; c_in < C_in; c_in++) {
+                        float* input_channel = batch_input + ((int64_t)c_in * input_channel_stride);
+                        float* kernel = weight_out + ((int64_t)c_in * weight_channel_stride);
+
+                        for (int kh = 0; kh < kernel_h; kh++) {
+                            int h = h_base + kh;
+                            if (h < 0 || h >= H_in) {
+                                continue;
+                            }
+                            float* input_row = input_channel + ((int64_t)h * W_in);
+                            float* kernel_row = kernel + ((int64_t)kh * kernel_w);
+                            for (int kw = 0; kw < kernel_w; kw++) {
+                                int w = w_base + kw;
+                                if (w < 0 || w >= W_in) {
+                                    continue;
+                                }
+                                sum += (double)input_row[w] * (double)kernel_row[kw];
                             }
                         }
                     }
 
-                    /* Add bias if present */
-                    if (bias_data) {
-                        sum += bias_data[c_out];
-                    }
-
-                    /* Write output */
-                    int64_t out_idx = n * C_out * H_out * W_out
-                                    + c_out * H_out * W_out
-                                    + h_out * W_out
-                                    + w_out;
-                    out_data[out_idx] = sum;
+                    output_row[w_out_idx] = nnc_apply_activation((float)sum, activation_kind);
                 }
             }
         }
     }
+}
+
+void nnc_conv(
+    Tensor* input, Tensor* weight, Tensor* bias, Tensor* output,
+    int kernel_h, int kernel_w,
+    int stride_h, int stride_w,
+    int pad_h, int pad_w
+) {
+    nnc_conv_impl(
+        input, weight, bias, output,
+        kernel_h, kernel_w,
+        stride_h, stride_w,
+        pad_h, pad_w,
+        NNC_ACTIVATION_NONE,
+        "nnc_conv"
+    );
 }
 
 /* ============================================================================
@@ -2197,125 +2244,14 @@ void nnc_conv_relu(
      * ReLU: output = max(0, conv_result)
      */
 
-    /* Debug: Check pointers */
-    fprintf(stderr, "nnc_conv_relu: Checking pointers...\n");
-    fflush(stderr);
-
-    if (!input || !weight || !output) {
-        fprintf(stderr, "nnc_conv_relu: NULL tensor pointer\n");
-        fflush(stderr);
-        return;
-    }
-    if (!input->data || !weight->data || !output->data) {
-        fprintf(stderr, "nnc_conv_relu: NULL data pointer\n");
-        fprintf(stderr, "  input->data=%p, weight->data=%p, output->data=%p\n",
-                input->data, weight->data, output->data);
-        fflush(stderr);
-        return;
-    }
-    if (!input->shape || !weight->shape || !output->shape) {
-        fprintf(stderr, "nnc_conv_relu: NULL shape pointer\n");
-        fflush(stderr);
-        return;
-    }
-
-    fprintf(stderr, "nnc_conv_relu: All pointers valid\n");
-    fflush(stderr);
-
-    /* Extract dimensions */
-    int N = (int)input->shape[0];
-    int C_in = (int)input->shape[1];
-    int H_in = (int)input->shape[2];
-    int W_in = (int)input->shape[3];
-
-    int C_out = (int)weight->shape[0];
-    int H_out = (int)output->shape[2];
-    int W_out = (int)output->shape[3];
-
-    fprintf(stderr, "nnc_conv_relu: dimensions\n");
-    fprintf(stderr, "  input: [%d, %d, %d, %d]\n", N, C_in, H_in, W_in);
-    fprintf(stderr, "  weight: [%d, %d, %d, %d]\n", C_out, (int)weight->shape[1], (int)weight->shape[2], (int)weight->shape[3]);
-    fprintf(stderr, "  output: [%d, %d, %d, %d]\n", (int)output->shape[0], (int)output->shape[1], H_out, W_out);
-    fprintf(stderr, "  kernel: [%d, %d], stride: [%d, %d], pad: [%d, %d]\n",
-            kernel_h, kernel_w, stride_h, stride_w, pad_h, pad_w);
-    fflush(stderr);
-
-    /* Get data pointers */
-    float* in_data = (float*)input->data;
-    float* weight_data = (float*)weight->data;
-    float* bias_data = bias ? (float*)bias->data : NULL;
-    float* out_data = (float*)output->data;
-
-    /* Compute output dimensions */
-    /* H_out = (H_in + 2*pad_h - kernel_h) / stride_h + 1 */
-    /* W_out = (W_in + 2*pad_w - kernel_w) / stride_w + 1 */
-
-    /* Initialize output to zero */
-    int64_t output_size = N * C_out * H_out * W_out;
-    for (int64_t i = 0; i < output_size; i++) {
-        out_data[i] = 0.0f;
-    }
-
-    /* Perform convolution with fused ReLU activation */
-    for (int n = 0; n < N; n++) {
-        for (int c_out = 0; c_out < C_out; c_out++) {
-            for (int h_out = 0; h_out < H_out; h_out++) {
-                for (int w_out = 0; w_out < W_out; w_out++) {
-                    /* Compute convolution window start position */
-                    int h_in = h_out * stride_h - pad_h;
-                    int w_in = w_out * stride_w - pad_w;
-
-                    float sum = 0.0f;
-                    float c = 0.0f;  /* Kahan compensation */
-
-                    /* Convolve over kernel */
-                    for (int c_in = 0; c_in < C_in; c_in++) {
-                        for (int kh = 0; kh < kernel_h; kh++) {
-                            for (int kw = 0; kw < kernel_w; kw++) {
-                                int h = h_in + kh;
-                                int w = w_in + kw;
-
-                                /* Check bounds */
-                                if (h >= 0 && h < H_in && w >= 0 && w < W_in) {
-                                    /* Calculate indices */
-                                    int64_t in_idx = n * C_in * H_in * W_in
-                                                   + c_in * H_in * W_in
-                                                   + h * W_in
-                                                   + w;
-
-                                    int64_t weight_idx = c_out * C_in * kernel_h * kernel_w
-                                                      + c_in * kernel_h * kernel_w
-                                                      + kh * kernel_w
-                                                      + kw;
-
-                                    /* Kahan summation for improved numerical accuracy */
-                                    float y = in_data[in_idx] * weight_data[weight_idx] - c;
-                                    float t = sum + y;
-                                    c = (t - sum) - y;
-                                    sum = t;
-                                }
-                            }
-                        }
-                    }
-
-                    /* Add bias if present */
-                    if (bias_data) {
-                        sum += bias_data[c_out];
-                    }
-
-                    /* Apply ReLU activation: max(0, x) */
-                    float relu_result = sum > 0.0f ? sum : 0.0f;
-
-                    /* Write output */
-                    int64_t out_idx = n * C_out * H_out * W_out
-                                    + c_out * H_out * W_out
-                                    + h_out * W_out
-                                    + w_out;
-                    out_data[out_idx] = relu_result;
-                }
-            }
-        }
-    }
+    nnc_conv_impl(
+        input, weight, bias, output,
+        kernel_h, kernel_w,
+        stride_h, stride_w,
+        pad_h, pad_w,
+        NNC_ACTIVATION_RELU,
+        "nnc_conv_relu"
+    );
 }
 
 void nnc_conv_sigmoid(
@@ -2341,125 +2277,14 @@ void nnc_conv_sigmoid(
      * Sigmoid: output = 1 / (1 + exp(-conv_result))
      */
 
-    /* Debug: Check pointers */
-    fprintf(stderr, "nnc_conv_sigmoid: Checking pointers...\n");
-    fflush(stderr);
-
-    if (!input || !weight || !output) {
-        fprintf(stderr, "nnc_conv_sigmoid: NULL tensor pointer\n");
-        fflush(stderr);
-        return;
-    }
-    if (!input->data || !weight->data || !output->data) {
-        fprintf(stderr, "nnc_conv_sigmoid: NULL data pointer\n");
-        fprintf(stderr, "  input->data=%p, weight->data=%p, output->data=%p\n",
-                input->data, weight->data, output->data);
-        fflush(stderr);
-        return;
-    }
-    if (!input->shape || !weight->shape || !output->shape) {
-        fprintf(stderr, "nnc_conv_sigmoid: NULL shape pointer\n");
-        fflush(stderr);
-        return;
-    }
-
-    fprintf(stderr, "nnc_conv_sigmoid: All pointers valid\n");
-    fflush(stderr);
-
-    /* Extract dimensions */
-    int N = (int)input->shape[0];
-    int C_in = (int)input->shape[1];
-    int H_in = (int)input->shape[2];
-    int W_in = (int)input->shape[3];
-
-    int C_out = (int)weight->shape[0];
-    int H_out = (int)output->shape[2];
-    int W_out = (int)output->shape[3];
-
-    fprintf(stderr, "nnc_conv_sigmoid: dimensions\n");
-    fprintf(stderr, "  input: [%d, %d, %d, %d]\n", N, C_in, H_in, W_in);
-    fprintf(stderr, "  weight: [%d, %d, %d, %d]\n", C_out, (int)weight->shape[1], (int)weight->shape[2], (int)weight->shape[3]);
-    fprintf(stderr, "  output: [%d, %d, %d, %d]\n", (int)output->shape[0], (int)output->shape[1], H_out, W_out);
-    fprintf(stderr, "  kernel: [%d, %d], stride: [%d, %d], pad: [%d, %d]\n",
-            kernel_h, kernel_w, stride_h, stride_w, pad_h, pad_w);
-    fflush(stderr);
-
-    /* Get data pointers */
-    float* in_data = (float*)input->data;
-    float* weight_data = (float*)weight->data;
-    float* bias_data = bias ? (float*)bias->data : NULL;
-    float* out_data = (float*)output->data;
-
-    /* Compute output dimensions */
-    /* H_out = (H_in + 2*pad_h - kernel_h) / stride_h + 1 */
-    /* W_out = (W_in + 2*pad_w - kernel_w) / stride_w + 1 */
-
-    /* Initialize output to zero */
-    int64_t output_size = N * C_out * H_out * W_out;
-    for (int64_t i = 0; i < output_size; i++) {
-        out_data[i] = 0.0f;
-    }
-
-    /* Perform convolution with fused Sigmoid activation */
-    for (int n = 0; n < N; n++) {
-        for (int c_out = 0; c_out < C_out; c_out++) {
-            for (int h_out = 0; h_out < H_out; h_out++) {
-                for (int w_out = 0; w_out < W_out; w_out++) {
-                    /* Compute convolution window start position */
-                    int h_in = h_out * stride_h - pad_h;
-                    int w_in = w_out * stride_w - pad_w;
-
-                    float sum = 0.0f;
-                    float c = 0.0f;  /* Kahan compensation */
-
-                    /* Convolve over kernel */
-                    for (int c_in = 0; c_in < C_in; c_in++) {
-                        for (int kh = 0; kh < kernel_h; kh++) {
-                            for (int kw = 0; kw < kernel_w; kw++) {
-                                int h = h_in + kh;
-                                int w = w_in + kw;
-
-                                /* Check bounds */
-                                if (h >= 0 && h < H_in && w >= 0 && w < W_in) {
-                                    /* Calculate indices */
-                                    int64_t in_idx = n * C_in * H_in * W_in
-                                                   + c_in * H_in * W_in
-                                                   + h * W_in
-                                                   + w;
-
-                                    int64_t weight_idx = c_out * C_in * kernel_h * kernel_w
-                                                      + c_in * kernel_h * kernel_w
-                                                      + kh * kernel_w
-                                                      + kw;
-
-                                    /* Kahan summation for improved numerical accuracy */
-                                    float y = in_data[in_idx] * weight_data[weight_idx] - c;
-                                    float t = sum + y;
-                                    c = (t - sum) - y;
-                                    sum = t;
-                                }
-                            }
-                        }
-                    }
-
-                    /* Add bias if present */
-                    if (bias_data) {
-                        sum += bias_data[c_out];
-                    }
-
-                    /* Apply Sigmoid activation: 1 / (1 + exp(-x)) */
-                    float sigmoid_result = 1.0f / (1.0f + expf(-sum));
-
-                    /* Write output */
-                    int64_t out_idx = n * C_out * H_out * W_out
-                                    + c_out * H_out * W_out
-                                    + h_out * W_out
-                                    + w_out;
-                    out_data[out_idx] = sigmoid_result;
-                }
-            }
-        }
-    }
+    nnc_conv_impl(
+        input, weight, bias, output,
+        kernel_h, kernel_w,
+        stride_h, stride_w,
+        pad_h, pad_w,
+        NNC_ACTIVATION_SIGMOID,
+        "nnc_conv_sigmoid"
+    );
 }
 
 /* ============================================================================

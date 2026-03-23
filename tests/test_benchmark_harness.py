@@ -4,7 +4,12 @@ from pathlib import Path
 import subprocess
 import pytest
 
-from benchmarks.harness import build_result_payload, parse_runner_output, run_benchmark
+from benchmarks.harness import (
+    build_arg_parser,
+    build_result_payload,
+    parse_runner_output,
+    run_benchmark,
+)
 
 
 def test_parse_runner_output_returns_json_payload():
@@ -65,6 +70,13 @@ def test_build_result_payload_includes_commit_memory_and_runs(tmp_path):
     assert result["compiler_config"]["opt_level"] == 3
     assert result["memory"]["total_static_bytes"] == 264
     assert result["runs"][0]["batch_size"] == 1
+
+
+def test_build_arg_parser_accepts_quick_flag():
+    args = build_arg_parser().parse_args(["--model", "resnet18", "--quick"])
+
+    assert args.model == "resnet18"
+    assert args.quick is True
 
 
 def test_harness_writes_result_and_diff_files(tmp_path, monkeypatch):
@@ -155,6 +167,64 @@ def test_harness_writes_result_and_diff_files(tmp_path, monkeypatch):
     diff_payload = json.loads(diff_path.read_text())
     assert diff_payload["baseline_commit"] == "base123"
     assert diff_payload["candidate_commit"] == "abc1234"
+
+
+def test_harness_quick_mode_uses_reduced_iteration_counts(tmp_path, monkeypatch):
+    import benchmarks.harness as harness
+
+    captured_iterations: dict[str, int] = {}
+
+    def fake_compile(self, onnx_path: str, output_dir: str, entry_point: str = "nnc_run", **kwargs):
+        out = Path(output_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "model.c").write_text("int dummy_model_c(void){return 0;}\n")
+        (out / "tensors.c").write_text("#define NNC_MEMORY_SIZE 512\n")
+        (out / "model.h").write_text("void nnc_run(void);\n")
+
+    def fake_generate_benchmark_runner(**kwargs):
+        captured_iterations["warmup_iterations"] = kwargs["warmup_iterations"]
+        captured_iterations["measure_iterations"] = kwargs["measure_iterations"]
+        return "int main(void){return 0;}\n"
+
+    runner_stdout = json.dumps(
+        {
+            "model": "resnet18",
+            "runs": [
+                {
+                    "batch_size": 1,
+                    "latency_ms_samples": [1.0, 2.0, 3.0],
+                    "throughput_samples_per_sec": 100.0,
+                }
+            ],
+        }
+    )
+
+    def fake_run(cmd, **kwargs):
+        if isinstance(cmd, list) and cmd and cmd[0] == "gcc":
+            if "-o" in cmd:
+                exe_path = Path(cmd[cmd.index("-o") + 1])
+                exe_path.write_bytes(b"binary")
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if isinstance(cmd, list) and cmd and str(cmd[0]).endswith("_bench"):
+            return subprocess.CompletedProcess(cmd, 0, stdout=runner_stdout, stderr="")
+        raise AssertionError(f"unexpected subprocess.run call: {cmd!r}")
+
+    monkeypatch.setattr(harness.Compiler, "compile", fake_compile, raising=True)
+    monkeypatch.setattr(harness, "generate_benchmark_runner", fake_generate_benchmark_runner, raising=True)
+    monkeypatch.setattr(harness, "get_git_commit", lambda repo_root: "abc1234", raising=True)
+    monkeypatch.setattr(harness.subprocess, "run", fake_run, raising=True)
+
+    run_benchmark(
+        model_name="resnet18",
+        batch_sizes=[1],
+        output=tmp_path / "quick.json",
+        quick=True,
+    )
+
+    assert captured_iterations == {
+        "warmup_iterations": 1,
+        "measure_iterations": 3,
+    }
 
 
 def test_harness_accepts_single_pool_tensors_layout(tmp_path, monkeypatch):

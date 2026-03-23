@@ -13,6 +13,123 @@ import tempfile
 from pathlib import Path
 
 
+def _build_conv_logging_probe(tmp_path: Path) -> Path:
+    runtime_dir = Path(__file__).parent.parent / "runtime"
+    source_path = tmp_path / "conv_logging_probe.c"
+    source_path.write_text(
+        """
+#include "nnc_ops.h"
+
+int main(void) {
+    float input_data[1] = {1.0f};
+    float weight_data[1] = {2.0f};
+    float output_data[1] = {0.0f};
+
+    int64_t input_shape[4] = {1, 1, 1, 1};
+    int64_t weight_shape[4] = {1, 1, 1, 1};
+    int64_t output_shape[4] = {1, 1, 1, 1};
+
+    Tensor input = {
+        .data = input_data,
+        .dtype = NNC_DTYPE_FLOAT32,
+        .shape = input_shape,
+        .ndim = 4,
+        .nbytes = sizeof(input_data),
+    };
+    Tensor weight = {
+        .data = weight_data,
+        .dtype = NNC_DTYPE_FLOAT32,
+        .shape = weight_shape,
+        .ndim = 4,
+        .nbytes = sizeof(weight_data),
+    };
+    Tensor output = {
+        .data = output_data,
+        .dtype = NNC_DTYPE_FLOAT32,
+        .shape = output_shape,
+        .ndim = 4,
+        .nbytes = sizeof(output_data),
+    };
+
+    nnc_conv(&input, &weight, NULL, &output, 1, 1, 1, 1, 0, 0);
+    return output_data[0] == 2.0f ? 0 : 1;
+}
+"""
+    )
+
+    exe_path = tmp_path / "conv_logging_probe"
+    cmd = [
+        "gcc",
+        "-std=c11",
+        "-O2",
+        f"-I{runtime_dir / 'include'}",
+    ]
+    cmd.extend(
+        [
+            str(runtime_dir / "x86" / "ops.c"),
+            str(source_path),
+            "-lm",
+            "-o",
+            str(exe_path),
+        ]
+    )
+    build = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    assert build.returncode == 0, build.stderr or build.stdout
+    return exe_path
+
+
+def _reference_conv_nchw(
+    input_data: np.ndarray,
+    weight_data: np.ndarray,
+    bias_data: np.ndarray | None,
+    *,
+    stride_h: int,
+    stride_w: int,
+    pad_h: int,
+    pad_w: int,
+) -> np.ndarray:
+    n, c_in, h_in, w_in = input_data.shape
+    c_out, _, kernel_h, kernel_w = weight_data.shape
+    h_out = ((h_in + 2 * pad_h - kernel_h) // stride_h) + 1
+    w_out = ((w_in + 2 * pad_w - kernel_w) // stride_w) + 1
+    output = np.zeros((n, c_out, h_out, w_out), dtype=np.float32)
+
+    for batch in range(n):
+        for out_ch in range(c_out):
+            for h_out_idx in range(h_out):
+                h_base = h_out_idx * stride_h - pad_h
+                for w_out_idx in range(w_out):
+                    w_base = w_out_idx * stride_w - pad_w
+                    acc = 0.0
+                    for in_ch in range(c_in):
+                        for kh in range(kernel_h):
+                            h = h_base + kh
+                            if h < 0 or h >= h_in:
+                                continue
+                            for kw in range(kernel_w):
+                                w = w_base + kw
+                                if w < 0 or w >= w_in:
+                                    continue
+                                acc += (
+                                    float(input_data[batch, in_ch, h, w])
+                                    * float(weight_data[out_ch, in_ch, kh, kw])
+                                )
+                    if bias_data is not None:
+                        acc += float(bias_data[out_ch])
+                    output[batch, out_ch, h_out_idx, w_out_idx] = acc
+
+    return output
+
+
+def test_conv_debug_logging_is_disabled_by_default(tmp_path):
+    exe_path = _build_conv_logging_probe(tmp_path)
+
+    run = subprocess.run([str(exe_path)], capture_output=True, text=True, timeout=60)
+
+    assert run.returncode == 0, run.stderr or run.stdout
+    assert run.stderr == ""
+
+
 class TestX86Runtime:
     """Test x86 runtime operator implementations."""
 
@@ -126,6 +243,25 @@ clean:
         # nnc_tanh(Tensor* input, Tensor* output)
         self.lib.nnc_tanh.argtypes = [ctypes.POINTER(Tensor), ctypes.POINTER(Tensor)]
         self.lib.nnc_tanh.restype = None
+
+        # nnc_conv(Tensor* input, Tensor* weight, Tensor* bias, Tensor* output, ...)
+        self.lib.nnc_conv.argtypes = [
+            ctypes.POINTER(Tensor),
+            ctypes.POINTER(Tensor),
+            ctypes.POINTER(Tensor),
+            ctypes.POINTER(Tensor),
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+        ]
+        self.lib.nnc_conv.restype = None
+
+        # nnc_conv_relu(Tensor* input, Tensor* weight, Tensor* bias, Tensor* output, ...)
+        self.lib.nnc_conv_relu.argtypes = list(self.lib.nnc_conv.argtypes)
+        self.lib.nnc_conv_relu.restype = None
 
         # nnc_softmax(Tensor* input, Tensor* output, int axis)
         self.lib.nnc_softmax.argtypes = [ctypes.POINTER(Tensor), ctypes.POINTER(Tensor), ctypes.c_int]
@@ -354,6 +490,95 @@ clean:
 
         max_diff = self._compare_results(data_out, expected, tol=1e-4)
         print(f"  softmax max_diff: {max_diff}")
+
+    def test_conv_no_padding_matches_reference(self):
+        """Test nnc_conv fast path for no-padding 3x3 convolution."""
+        input_data = np.arange(1, 26, dtype=np.float32).reshape(1, 1, 5, 5)
+        weight_data = np.array(
+            [[[[1.0, 0.0, -1.0], [0.5, 0.25, -0.5], [1.5, -0.25, 0.75]]]],
+            dtype=np.float32,
+        )
+        bias_data = np.array([0.75], dtype=np.float32)
+        expected = _reference_conv_nchw(
+            input_data,
+            weight_data,
+            bias_data,
+            stride_h=1,
+            stride_w=1,
+            pad_h=0,
+            pad_w=0,
+        )
+
+        tensor_input, _ = self._make_tensor(input_data)
+        tensor_weight, _ = self._make_tensor(weight_data)
+        tensor_bias, _ = self._make_tensor(bias_data)
+        tensor_output, data_output = self._make_tensor(np.zeros_like(expected))
+
+        self.lib.nnc_conv(
+            ctypes.byref(tensor_input),
+            ctypes.byref(tensor_weight),
+            ctypes.byref(tensor_bias),
+            ctypes.byref(tensor_output),
+            3,
+            3,
+            1,
+            1,
+            0,
+            0,
+        )
+
+        max_diff = self._compare_results(data_output, expected)
+        print(f"  conv_no_padding max_diff: {max_diff}")
+
+    def test_conv_1x1_matches_reference(self):
+        """Test nnc_conv fast path for 1x1 convolution."""
+        input_data = np.array(
+            [
+                [
+                    [[1.0, 2.0], [3.0, 4.0]],
+                    [[-1.0, -2.0], [-3.0, -4.0]],
+                ]
+            ],
+            dtype=np.float32,
+        )
+        weight_data = np.array(
+            [
+                [[[2.0]], [[-1.0]]],
+                [[[0.5]], [[3.0]]],
+            ],
+            dtype=np.float32,
+        )
+        bias_data = np.array([0.25, -0.5], dtype=np.float32)
+        expected = _reference_conv_nchw(
+            input_data,
+            weight_data,
+            bias_data,
+            stride_h=1,
+            stride_w=1,
+            pad_h=0,
+            pad_w=0,
+        )
+
+        tensor_input, _ = self._make_tensor(input_data)
+        tensor_weight, _ = self._make_tensor(weight_data)
+        tensor_bias, _ = self._make_tensor(bias_data)
+        tensor_output, data_output = self._make_tensor(np.zeros_like(expected))
+
+        self.lib.nnc_conv(
+            ctypes.byref(tensor_input),
+            ctypes.byref(tensor_weight),
+            ctypes.byref(tensor_bias),
+            ctypes.byref(tensor_output),
+            1,
+            1,
+            1,
+            1,
+            0,
+            0,
+        )
+
+        max_diff = self._compare_results(data_output, expected)
+        print(f"  conv_1x1 max_diff: {max_diff}")
 
     def test_matmul_2d(self):
         """Test nnc_matmul with 2D matrices."""
