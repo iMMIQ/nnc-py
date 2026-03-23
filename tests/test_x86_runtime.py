@@ -604,6 +604,62 @@ clean:
         max_diff = self._compare_results(data_output, expected)
         print(f"  conv_same_padding max_diff: {max_diff}")
 
+    def test_conv_same_padding_stride2_matches_reference(self):
+        """Test nnc_conv for the common 3x3 stride-2 same-padding case."""
+        input_data = np.array(
+            [
+                [
+                    [[1.0, -2.0, 3.0, 0.5, -1.5, 2.0], [2.5, 0.0, -1.0, 4.0, 1.5, -0.25], [-3.0, 2.0, 1.0, -0.5, 2.5, 1.25], [1.5, -1.5, 2.5, 3.0, -2.0, 0.75], [0.25, 1.25, -2.5, 0.75, 1.0, -1.0], [2.0, -0.75, 1.5, -2.0, 0.5, 3.0]],
+                    [[-1.0, 0.5, 2.0, -2.5, 1.0, 0.25], [3.0, -1.5, 0.25, 1.5, -0.75, 2.25], [1.25, 2.5, -3.0, 0.5, 2.0, -1.5], [-2.0, 1.0, 1.5, -1.0, 0.25, 1.75], [0.5, -0.5, 2.25, 1.75, -1.25, 0.0], [1.5, -2.25, 0.75, 2.5, -0.5, 1.0]],
+                ]
+            ],
+            dtype=np.float32,
+        )
+        weight_data = np.array(
+            [
+                [
+                    [[0.5, -1.0, 0.25], [1.5, 0.75, -0.5], [-0.25, 0.5, 1.0]],
+                    [[-0.75, 0.5, 1.25], [0.0, -1.5, 0.5], [1.0, -0.25, 0.75]],
+                ],
+                [
+                    [[1.0, 0.25, -0.5], [-1.25, 0.5, 0.75], [0.5, -0.75, 1.5]],
+                    [[0.25, -1.0, 0.5], [1.5, 0.25, -0.25], [-0.5, 1.0, 0.75]],
+                ],
+            ],
+            dtype=np.float32,
+        )
+        bias_data = np.array([0.5, -0.25], dtype=np.float32)
+        expected = _reference_conv_nchw(
+            input_data,
+            weight_data,
+            bias_data,
+            stride_h=2,
+            stride_w=2,
+            pad_h=1,
+            pad_w=1,
+        )
+
+        tensor_input, _ = self._make_tensor(input_data)
+        tensor_weight, _ = self._make_tensor(weight_data)
+        tensor_bias, _ = self._make_tensor(bias_data)
+        tensor_output, data_output = self._make_tensor(np.zeros_like(expected))
+
+        self.lib.nnc_conv(
+            ctypes.byref(tensor_input),
+            ctypes.byref(tensor_weight),
+            ctypes.byref(tensor_bias),
+            ctypes.byref(tensor_output),
+            3,
+            3,
+            2,
+            2,
+            1,
+            1,
+        )
+
+        max_diff = self._compare_results(data_output, expected)
+        print(f"  conv_same_padding_stride2 max_diff: {max_diff}")
+
     def test_conv_1x1_matches_reference(self):
         """Test nnc_conv fast path for 1x1 convolution."""
         input_data = np.array(
