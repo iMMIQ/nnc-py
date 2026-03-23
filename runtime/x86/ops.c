@@ -11,6 +11,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#if defined(__SSE2__)
+#include <emmintrin.h>
+#endif
 
 /* Helper: Calculate total number of elements */
 static int64_t tensor_numel(Tensor* t) {
@@ -546,6 +549,68 @@ static inline double nnc_conv3x3_samepad_interior_accumulate(
     return sum;
 }
 
+#if defined(__SSE2__)
+static inline void nnc_conv3x3_samepad_interior_accumulate_sse2(
+    float* batch_input,
+    float* weight_out,
+    int C_in,
+    int W_in,
+    int64_t input_channel_stride,
+    int64_t weight_channel_stride,
+    int h_center,
+    int w_out_idx,
+    double bias_value,
+    int activation_kind,
+    float* output_ptr
+) {
+    __m128d acc01 = _mm_set1_pd(bias_value);
+    __m128d acc23 = _mm_set1_pd(bias_value);
+
+    for (int c_in = 0; c_in < C_in; c_in++) {
+        float* input_channel = batch_input + ((int64_t)c_in * input_channel_stride);
+        float* kernel = weight_out + ((int64_t)c_in * weight_channel_stride);
+
+        float* input_row0 = input_channel + ((int64_t)(h_center - 1) * W_in) + (w_out_idx - 1);
+        float* input_row1 = input_channel + ((int64_t)h_center * W_in) + (w_out_idx - 1);
+        float* input_row2 = input_channel + ((int64_t)(h_center + 1) * W_in) + (w_out_idx - 1);
+
+#define NNC_ACCUMULATE_4_LANES(input_row_ptr, kernel_index)                                    \
+        do {                                                                                    \
+            __m128 values_f32 = _mm_loadu_ps((input_row_ptr));                                 \
+            __m128d coeff = _mm_set1_pd((double)kernel[(kernel_index)]);                       \
+            __m128d values01 = _mm_cvtps_pd(values_f32);                                       \
+            __m128 hi = _mm_movehl_ps(values_f32, values_f32);                                 \
+            __m128d values23 = _mm_cvtps_pd(hi);                                               \
+            acc01 = _mm_add_pd(acc01, _mm_mul_pd(values01, coeff));                            \
+            acc23 = _mm_add_pd(acc23, _mm_mul_pd(values23, coeff));                            \
+        } while (0)
+
+        NNC_ACCUMULATE_4_LANES(input_row0, 0);
+        NNC_ACCUMULATE_4_LANES(input_row0 + 1, 1);
+        NNC_ACCUMULATE_4_LANES(input_row0 + 2, 2);
+        NNC_ACCUMULATE_4_LANES(input_row1, 3);
+        NNC_ACCUMULATE_4_LANES(input_row1 + 1, 4);
+        NNC_ACCUMULATE_4_LANES(input_row1 + 2, 5);
+        NNC_ACCUMULATE_4_LANES(input_row2, 6);
+        NNC_ACCUMULATE_4_LANES(input_row2 + 1, 7);
+        NNC_ACCUMULATE_4_LANES(input_row2 + 2, 8);
+
+#undef NNC_ACCUMULATE_4_LANES
+    }
+
+    {
+        double sums01[2];
+        double sums23[2];
+        _mm_storeu_pd(sums01, acc01);
+        _mm_storeu_pd(sums23, acc23);
+        output_ptr[0] = nnc_apply_activation((float)sums01[0], activation_kind);
+        output_ptr[1] = nnc_apply_activation((float)sums01[1], activation_kind);
+        output_ptr[2] = nnc_apply_activation((float)sums23[0], activation_kind);
+        output_ptr[3] = nnc_apply_activation((float)sums23[1], activation_kind);
+    }
+}
+#endif
+
 static inline double nnc_conv3x3_samepad_stride2_interior_accumulate(
     float* batch_input,
     float* weight_out,
@@ -754,19 +819,39 @@ static void nnc_conv_impl(
                         output_row[0] = nnc_apply_activation((float)sum, activation_kind);
                     }
 
-                    for (int w_out_idx = 1; w_out_idx < W_out - 1; w_out_idx++) {
-                        double sum = nnc_conv3x3_samepad_interior_accumulate(
-                            batch_input,
-                            weight_out,
-                            C_in,
-                            W_in,
-                            input_channel_stride,
-                            weight_channel_stride,
-                            h_out_idx,
-                            w_out_idx,
-                            bias_value
-                        );
-                        output_row[w_out_idx] = nnc_apply_activation((float)sum, activation_kind);
+                    {
+                        int w_out_idx = 1;
+#if defined(__SSE2__)
+                        for (; w_out_idx + 3 < W_out - 1; w_out_idx += 4) {
+                            nnc_conv3x3_samepad_interior_accumulate_sse2(
+                                batch_input,
+                                weight_out,
+                                C_in,
+                                W_in,
+                                input_channel_stride,
+                                weight_channel_stride,
+                                h_out_idx,
+                                w_out_idx,
+                                bias_value,
+                                activation_kind,
+                                output_row + w_out_idx
+                            );
+                        }
+#endif
+                        for (; w_out_idx < W_out - 1; w_out_idx++) {
+                            double sum = nnc_conv3x3_samepad_interior_accumulate(
+                                batch_input,
+                                weight_out,
+                                C_in,
+                                W_in,
+                                input_channel_stride,
+                                weight_channel_stride,
+                                h_out_idx,
+                                w_out_idx,
+                                bias_value
+                            );
+                            output_row[w_out_idx] = nnc_apply_activation((float)sum, activation_kind);
+                        }
                     }
 
                     {
