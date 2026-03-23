@@ -930,59 +930,46 @@ void nnc_gemm(
 
     /* Compute matrix multiplication
      * output[i][j] = alpha * sum(A[i][k] * B[k][j]) + beta * C[i][j]
-     * Uses Kahan summation for improved numerical accuracy
      */
     for (int i = 0; i < M; i++) {
+        float* out_row = out_data + (i * N);
+        float* a_row = trans_a ? NULL : (a_data + (i * K));
         for (int j = 0; j < N; j++) {
-            float sum = 0.0f;
-            float c_comp = 0.0f;  /* Running compensation for lost low-order bits */
+            double sum = 0.0;
 
-            /* Compute dot product: A[i,:] @ B[:,j] using Kahan summation */
-            for (int k = 0; k < K; k++) {
-                float a_val, b_val;
-
-                /* Get A[i][k] */
-                if (trans_a) {
-                    a_val = a_data[k * M + i];  /* [K][M] */
-                } else {
-                    a_val = a_data[i * K + k];  /* [M][K] */
+            if (!trans_a && trans_b) {
+                float* b_row = b_data + (j * K);
+                for (int k = 0; k < K; k++) {
+                    sum += (double)a_row[k] * (double)b_row[k];
                 }
-
-                /* Get B[k][j] */
-                if (trans_b) {
-                    b_val = b_data[j * K + k];  /* [N][K] */
-                } else {
-                    b_val = b_data[k * N + j];  /* [K][N] */
+            } else if (!trans_a && !trans_b) {
+                for (int k = 0; k < K; k++) {
+                    sum += (double)a_row[k] * (double)b_data[k * N + j];
                 }
-
-                /* Kahan summation: accumulate with compensation */
-                float y = a_val * b_val - c_comp;
-                float t = sum + y;
-                c_comp = (t - sum) - y;
-                sum = t;
+            } else if (trans_a && trans_b) {
+                float* b_row = b_data + (j * K);
+                for (int k = 0; k < K; k++) {
+                    sum += (double)a_data[k * M + i] * (double)b_row[k];
+                }
+            } else {
+                for (int k = 0; k < K; k++) {
+                    sum += (double)a_data[k * M + i] * (double)b_data[k * N + j];
+                }
             }
 
-            /* Apply alpha scaling */
-            sum *= alpha;
+            sum *= (double)alpha;
 
-            /* Add bias (if present) with beta scaling using Kahan summation */
             if (c_data != NULL) {
                 float c_val;
                 if (c->ndim == 1) {
-                    /* 1D bias: broadcast along output dimension */
                     c_val = c_data[j];
                 } else {
-                    /* 2D bias: [M, N] */
                     c_val = c_data[i * N + j];
                 }
-                /* Add bias with proper precision using Kahan summation */
-                float y = beta * c_val - c_comp;
-                float t = sum + y;
-                c_comp = (t - sum) - y;
-                sum = t;
+                sum += (double)beta * (double)c_val;
             }
 
-            out_data[i * N + j] = sum;
+            out_row[j] = (float)sum;
         }
     }
 }

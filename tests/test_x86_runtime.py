@@ -121,6 +121,24 @@ def _reference_conv_nchw(
     return output
 
 
+def _reference_gemm(
+    a_data: np.ndarray,
+    b_data: np.ndarray,
+    c_data: np.ndarray | None,
+    *,
+    alpha: float,
+    beta: float,
+    trans_a: int,
+    trans_b: int,
+) -> np.ndarray:
+    a_mat = a_data.T if trans_a else a_data
+    b_mat = b_data.T if trans_b else b_data
+    result = alpha * np.matmul(a_mat, b_mat)
+    if c_data is not None:
+        result = result + (beta * c_data)
+    return result.astype(np.float32, copy=False)
+
+
 def test_conv_debug_logging_is_disabled_by_default(tmp_path):
     exe_path = _build_conv_logging_probe(tmp_path)
 
@@ -596,6 +614,35 @@ clean:
 
         max_diff = self._compare_results(data_out, expected)
         print(f"  matmul_2d max_diff: {max_diff}")
+
+    def test_gemm_transposed_weight_with_bias(self):
+        """Test nnc_gemm for the trans_b=1 + bias path used by FC layers."""
+        a = np.array([[1.0, 2.0, 3.0], [0.5, -1.0, 4.0]], dtype=np.float32)  # [2, 3]
+        b = np.array(
+            [[1.0, 0.0, -1.0], [2.0, 1.0, 0.5], [0.5, -0.25, 3.0], [4.0, 2.0, -2.0]],
+            dtype=np.float32,
+        )  # [4, 3] -> trans_b=1 gives [3, 4]
+        c = np.array([0.25, -0.5, 1.25, 0.75], dtype=np.float32)  # [4]
+        expected = _reference_gemm(a, b, c, alpha=1.0, beta=1.0, trans_a=0, trans_b=1)
+
+        tensor_a, _ = self._make_tensor(a)
+        tensor_b, _ = self._make_tensor(b)
+        tensor_c, _ = self._make_tensor(c)
+        tensor_out, data_out = self._make_tensor(np.zeros_like(expected))
+
+        self.lib.nnc_gemm(
+            ctypes.byref(tensor_a),
+            ctypes.byref(tensor_b),
+            ctypes.byref(tensor_c),
+            ctypes.byref(tensor_out),
+            ctypes.c_float(1.0),
+            ctypes.c_float(1.0),
+            0,
+            1,
+        )
+
+        max_diff = self._compare_results(data_out, expected)
+        print(f"  gemm_transposed_weight_with_bias max_diff: {max_diff}")
 
     def test_matmul_vector_matrix(self):
         """Test nnc_matmul with vector @ matrix."""
