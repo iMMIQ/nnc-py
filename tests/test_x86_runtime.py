@@ -280,6 +280,32 @@ clean:
         # nnc_conv_relu(Tensor* input, Tensor* weight, Tensor* bias, Tensor* output, ...)
         self.lib.nnc_conv_relu.argtypes = list(self.lib.nnc_conv.argtypes)
         self.lib.nnc_conv_relu.restype = None
+        self.lib.nnc_conv1x1.argtypes = [
+            ctypes.POINTER(Tensor),
+            ctypes.POINTER(Tensor),
+            ctypes.POINTER(Tensor),
+            ctypes.POINTER(Tensor),
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+        ]
+        self.lib.nnc_conv1x1.restype = None
+        self.lib.nnc_conv3x3_s1.argtypes = [
+            ctypes.POINTER(Tensor),
+            ctypes.POINTER(Tensor),
+            ctypes.POINTER(Tensor),
+            ctypes.POINTER(Tensor),
+        ]
+        self.lib.nnc_conv3x3_s1.restype = None
+        self.lib.nnc_conv7x7_s2.argtypes = list(self.lib.nnc_conv3x3_s1.argtypes)
+        self.lib.nnc_conv7x7_s2.restype = None
+        self.lib.nnc_conv_relu1x1.argtypes = list(self.lib.nnc_conv1x1.argtypes)
+        self.lib.nnc_conv_relu1x1.restype = None
+        self.lib.nnc_conv_relu3x3_s1.argtypes = list(self.lib.nnc_conv3x3_s1.argtypes)
+        self.lib.nnc_conv_relu3x3_s1.restype = None
+        self.lib.nnc_conv_relu7x7_s2.argtypes = list(self.lib.nnc_conv3x3_s1.argtypes)
+        self.lib.nnc_conv_relu7x7_s2.restype = None
 
         # nnc_softmax(Tensor* input, Tensor* output, int axis)
         self.lib.nnc_softmax.argtypes = [ctypes.POINTER(Tensor), ctypes.POINTER(Tensor), ctypes.c_int]
@@ -288,6 +314,15 @@ clean:
         # nnc_matmul(Tensor* a, Tensor* b, Tensor* output)
         self.lib.nnc_matmul.argtypes = [ctypes.POINTER(Tensor), ctypes.POINTER(Tensor), ctypes.POINTER(Tensor)]
         self.lib.nnc_matmul.restype = None
+        self.lib.nnc_gemm_nt.argtypes = [
+            ctypes.POINTER(Tensor),
+            ctypes.POINTER(Tensor),
+            ctypes.POINTER(Tensor),
+            ctypes.POINTER(Tensor),
+            ctypes.c_float,
+            ctypes.c_float,
+        ]
+        self.lib.nnc_gemm_nt.restype = None
 
         # nnc_transpose(Tensor* input, Tensor* output, int64_t* perm, int ndim)
         self.lib.nnc_transpose.argtypes = [ctypes.POINTER(Tensor), ctypes.POINTER(Tensor), ctypes.POINTER(ctypes.c_int64), ctypes.c_int]
@@ -806,6 +841,192 @@ clean:
         max_diff = self._compare_results(data_output, expected)
         print(f"  conv_1x1 max_diff: {max_diff}")
 
+    def test_conv1x1_matches_reference(self):
+        """Test specialized nnc_conv1x1 kernel."""
+        input_data = np.array(
+            [
+                [
+                    [[1.0, 2.0], [3.0, 4.0]],
+                    [[-1.0, -2.0], [-3.0, -4.0]],
+                ]
+            ],
+            dtype=np.float32,
+        )
+        weight_data = np.array(
+            [
+                [[[2.0]], [[-1.0]]],
+                [[[0.5]], [[3.0]]],
+            ],
+            dtype=np.float32,
+        )
+        bias_data = np.array([0.25, -0.5], dtype=np.float32)
+        expected = _reference_conv_nchw(
+            input_data,
+            weight_data,
+            bias_data,
+            stride_h=1,
+            stride_w=1,
+            pad_h=0,
+            pad_w=0,
+        )
+
+        tensor_input, _ = self._make_tensor(input_data)
+        tensor_weight, _ = self._make_tensor(weight_data)
+        tensor_bias, _ = self._make_tensor(bias_data)
+        tensor_output, data_output = self._make_tensor(np.zeros_like(expected))
+
+        self.lib.nnc_conv1x1(
+            ctypes.byref(tensor_input),
+            ctypes.byref(tensor_weight),
+            ctypes.byref(tensor_bias),
+            ctypes.byref(tensor_output),
+            1,
+            1,
+            0,
+            0,
+        )
+
+        max_diff = self._compare_results(data_output, expected)
+        print(f"  conv1x1 max_diff: {max_diff}")
+
+    def test_conv_relu1x1_matches_reference(self):
+        """Test specialized nnc_conv_relu1x1 kernel."""
+        input_data = np.array(
+            [
+                [
+                    [[1.0, 2.0], [3.0, 4.0]],
+                    [[-1.0, -2.0], [-3.0, -4.0]],
+                ]
+            ],
+            dtype=np.float32,
+        )
+        weight_data = np.array(
+            [
+                [[[2.0]], [[-1.0]]],
+                [[[0.5]], [[3.0]]],
+            ],
+            dtype=np.float32,
+        )
+        bias_data = np.array([0.25, -0.5], dtype=np.float32)
+        expected = np.maximum(
+            _reference_conv_nchw(
+                input_data,
+                weight_data,
+                bias_data,
+                stride_h=1,
+                stride_w=1,
+                pad_h=0,
+                pad_w=0,
+            ),
+            0.0,
+        )
+
+        tensor_input, _ = self._make_tensor(input_data)
+        tensor_weight, _ = self._make_tensor(weight_data)
+        tensor_bias, _ = self._make_tensor(bias_data)
+        tensor_output, data_output = self._make_tensor(np.zeros_like(expected))
+
+        self.lib.nnc_conv_relu1x1(
+            ctypes.byref(tensor_input),
+            ctypes.byref(tensor_weight),
+            ctypes.byref(tensor_bias),
+            ctypes.byref(tensor_output),
+            1,
+            1,
+            0,
+            0,
+        )
+
+        max_diff = self._compare_results(data_output, expected)
+        print(f"  conv_relu1x1 max_diff: {max_diff}")
+
+    def test_conv3x3_s1_matches_reference(self):
+        """Test specialized nnc_conv3x3_s1 kernel."""
+        input_data = np.arange(1, 1 + (1 * 2 * 5 * 6), dtype=np.float32).reshape(1, 2, 5, 6)
+        weight_data = np.array(
+            [
+                [
+                    [[0.5, -1.0, 0.25], [1.5, 0.75, -0.5], [-0.25, 0.5, 1.0]],
+                    [[-0.75, 0.5, 1.25], [0.0, -1.5, 0.5], [1.0, -0.25, 0.75]],
+                ],
+                [
+                    [[1.0, 0.25, -0.5], [-1.25, 0.5, 0.75], [0.5, -0.75, 1.5]],
+                    [[0.25, -1.0, 0.5], [1.5, 0.25, -0.25], [-0.5, 1.0, 0.75]],
+                ],
+            ],
+            dtype=np.float32,
+        )
+        bias_data = np.array([0.5, -0.25], dtype=np.float32)
+        expected = _reference_conv_nchw(
+            input_data,
+            weight_data,
+            bias_data,
+            stride_h=1,
+            stride_w=1,
+            pad_h=1,
+            pad_w=1,
+        )
+
+        tensor_input, _ = self._make_tensor(input_data)
+        tensor_weight, _ = self._make_tensor(weight_data)
+        tensor_bias, _ = self._make_tensor(bias_data)
+        tensor_output, data_output = self._make_tensor(np.zeros_like(expected))
+
+        self.lib.nnc_conv3x3_s1(
+            ctypes.byref(tensor_input),
+            ctypes.byref(tensor_weight),
+            ctypes.byref(tensor_bias),
+            ctypes.byref(tensor_output),
+        )
+
+        max_diff = self._compare_results(data_output, expected)
+        print(f"  conv3x3_s1 max_diff: {max_diff}")
+
+    def test_conv_relu3x3_s1_matches_reference(self):
+        """Test specialized nnc_conv_relu3x3_s1 kernel."""
+        input_data = np.arange(1, 1 + (1 * 2 * 5 * 6), dtype=np.float32).reshape(1, 2, 5, 6)
+        weight_data = np.array(
+            [
+                [
+                    [[0.5, -1.0, 0.25], [1.5, 0.75, -0.5], [-0.25, 0.5, 1.0]],
+                    [[-0.75, 0.5, 1.25], [0.0, -1.5, 0.5], [1.0, -0.25, 0.75]],
+                ],
+                [
+                    [[1.0, 0.25, -0.5], [-1.25, 0.5, 0.75], [0.5, -0.75, 1.5]],
+                    [[0.25, -1.0, 0.5], [1.5, 0.25, -0.25], [-0.5, 1.0, 0.75]],
+                ],
+            ],
+            dtype=np.float32,
+        )
+        bias_data = np.array([0.5, -0.25], dtype=np.float32)
+        expected = np.maximum(
+            _reference_conv_nchw(
+                input_data,
+                weight_data,
+                bias_data,
+                stride_h=1,
+                stride_w=1,
+                pad_h=1,
+                pad_w=1,
+            ),
+            0.0,
+        )
+
+        tensor_input, _ = self._make_tensor(input_data)
+        tensor_weight, _ = self._make_tensor(weight_data)
+        tensor_bias, _ = self._make_tensor(bias_data)
+        tensor_output, data_output = self._make_tensor(np.zeros_like(expected))
+
+        self.lib.nnc_conv_relu3x3_s1(
+            ctypes.byref(tensor_input),
+            ctypes.byref(tensor_weight),
+            ctypes.byref(tensor_bias),
+            ctypes.byref(tensor_output),
+        )
+
+        max_diff = self._compare_results(data_output, expected)
+        print(f"  conv_relu3x3_s1 max_diff: {max_diff}")
+
     def test_matmul_2d(self):
         """Test nnc_matmul with 2D matrices."""
         a = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], dtype=np.float32)  # [2, 3]
@@ -851,6 +1072,33 @@ clean:
 
         max_diff = self._compare_results(data_out, expected)
         print(f"  gemm_transposed_weight_with_bias max_diff: {max_diff}")
+
+    def test_gemm_nt_matches_reference(self):
+        """Test specialized nnc_gemm_nt path used by prepacked FC layers."""
+        a = np.array([[1.0, 2.0, 3.0], [0.5, -1.0, 4.0]], dtype=np.float32)
+        b = np.array(
+            [[1.0, 0.0, -1.0], [2.0, 1.0, 0.5], [0.5, -0.25, 3.0], [4.0, 2.0, -2.0]],
+            dtype=np.float32,
+        )
+        c = np.array([0.25, -0.5, 1.25, 0.75], dtype=np.float32)
+        expected = _reference_gemm(a, b, c, alpha=1.0, beta=1.0, trans_a=0, trans_b=1)
+
+        tensor_a, _ = self._make_tensor(a)
+        tensor_b, _ = self._make_tensor(b)
+        tensor_c, _ = self._make_tensor(c)
+        tensor_out, data_out = self._make_tensor(np.zeros_like(expected))
+
+        self.lib.nnc_gemm_nt(
+            ctypes.byref(tensor_a),
+            ctypes.byref(tensor_b),
+            ctypes.byref(tensor_c),
+            ctypes.byref(tensor_out),
+            ctypes.c_float(1.0),
+            ctypes.c_float(1.0),
+        )
+
+        max_diff = self._compare_results(data_out, expected)
+        print(f"  gemm_nt max_diff: {max_diff}")
 
     def test_matmul_vector_matrix(self):
         """Test nnc_matmul with vector @ matrix."""

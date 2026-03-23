@@ -1049,6 +1049,253 @@ static void nnc_conv_impl(
     }
 }
 
+static void nnc_conv3x3_samepad_s1_impl(
+    Tensor* input,
+    Tensor* weight,
+    Tensor* bias,
+    Tensor* output,
+    int activation_kind,
+    const char* op_name
+) {
+    if (!input || !weight || !output) {
+        fprintf(stderr, "%s: NULL tensor pointer\n", op_name);
+        fflush(stderr);
+        return;
+    }
+    if (!input->data || !weight->data || !output->data) {
+        fprintf(stderr, "%s: NULL data pointer\n", op_name);
+        fflush(stderr);
+        return;
+    }
+    if (!input->shape || !weight->shape || !output->shape) {
+        fprintf(stderr, "%s: NULL shape pointer\n", op_name);
+        fflush(stderr);
+        return;
+    }
+    if (input->ndim != 4 || weight->ndim != 4 || output->ndim != 4) {
+        fprintf(stderr, "%s: expected 4D tensors\n", op_name);
+        fflush(stderr);
+        return;
+    }
+
+    int N = (int)input->shape[0];
+    int C_in = (int)input->shape[1];
+    int H_in = (int)input->shape[2];
+    int W_in = (int)input->shape[3];
+    int C_out = (int)weight->shape[0];
+    int H_out = (int)output->shape[2];
+    int W_out = (int)output->shape[3];
+
+    if (H_out != H_in || W_out != W_in) {
+        fprintf(stderr, "%s: expected same-padding output shape\n", op_name);
+        fflush(stderr);
+        return;
+    }
+
+    float* in_data = (float*)input->data;
+    float* weight_data = (float*)weight->data;
+    float* bias_data = bias ? (float*)bias->data : NULL;
+    float* out_data = (float*)output->data;
+
+    int64_t input_batch_stride = (int64_t)C_in * H_in * W_in;
+    int64_t input_channel_stride = (int64_t)H_in * W_in;
+    int64_t weight_out_stride = (int64_t)C_in * 9;
+    int64_t weight_channel_stride = 9;
+    int64_t output_batch_stride = (int64_t)C_out * H_out * W_out;
+    int64_t output_channel_stride = (int64_t)H_out * W_out;
+
+    for (int n = 0; n < N; n++) {
+        float* batch_input = in_data + ((int64_t)n * input_batch_stride);
+        float* batch_output = out_data + ((int64_t)n * output_batch_stride);
+
+        for (int c_out = 0; c_out < C_out; c_out++) {
+            float* output_channel = batch_output + ((int64_t)c_out * output_channel_stride);
+            float* weight_out = weight_data + ((int64_t)c_out * weight_out_stride);
+            double bias_value = bias_data ? (double)bias_data[c_out] : 0.0;
+
+            for (int h_out_idx = 0; h_out_idx < H_out; h_out_idx++) {
+                float* output_row = output_channel + ((int64_t)h_out_idx * W_out);
+
+                if (h_out_idx == 0 || h_out_idx == H_out - 1 || W_out <= 2) {
+                    int h_base = h_out_idx - 1;
+                    for (int w_out_idx = 0; w_out_idx < W_out; w_out_idx++) {
+                        int w_base = w_out_idx - 1;
+                        double sum = nnc_conv_accumulate_point(
+                            batch_input,
+                            weight_out,
+                            C_in,
+                            H_in,
+                            W_in,
+                            3,
+                            3,
+                            input_channel_stride,
+                            weight_channel_stride,
+                            h_base,
+                            w_base,
+                            bias_value
+                        );
+                        output_row[w_out_idx] = nnc_apply_activation((float)sum, activation_kind);
+                    }
+                    continue;
+                }
+
+                {
+                    double sum = nnc_conv_accumulate_point(
+                        batch_input,
+                        weight_out,
+                        C_in,
+                        H_in,
+                        W_in,
+                        3,
+                        3,
+                        input_channel_stride,
+                        weight_channel_stride,
+                        h_out_idx - 1,
+                        -1,
+                        bias_value
+                    );
+                    output_row[0] = nnc_apply_activation((float)sum, activation_kind);
+                }
+
+                {
+                    int w_out_idx = 1;
+#if defined(__SSE2__)
+                    for (; w_out_idx + 3 < W_out - 1; w_out_idx += 4) {
+                        nnc_conv3x3_samepad_interior_accumulate_sse2(
+                            batch_input,
+                            weight_out,
+                            C_in,
+                            W_in,
+                            input_channel_stride,
+                            weight_channel_stride,
+                            h_out_idx,
+                            w_out_idx,
+                            bias_value,
+                            activation_kind,
+                            output_row + w_out_idx
+                        );
+                    }
+#endif
+                    for (; w_out_idx < W_out - 1; w_out_idx++) {
+                        double sum = nnc_conv3x3_samepad_interior_accumulate(
+                            batch_input,
+                            weight_out,
+                            C_in,
+                            W_in,
+                            input_channel_stride,
+                            weight_channel_stride,
+                            h_out_idx,
+                            w_out_idx,
+                            bias_value
+                        );
+                        output_row[w_out_idx] = nnc_apply_activation((float)sum, activation_kind);
+                    }
+                }
+
+                {
+                    double sum = nnc_conv_accumulate_point(
+                        batch_input,
+                        weight_out,
+                        C_in,
+                        H_in,
+                        W_in,
+                        3,
+                        3,
+                        input_channel_stride,
+                        weight_channel_stride,
+                        h_out_idx - 1,
+                        W_out - 2,
+                        bias_value
+                    );
+                    output_row[W_out - 1] = nnc_apply_activation((float)sum, activation_kind);
+                }
+            }
+        }
+    }
+}
+
+static void nnc_conv1x1_impl(
+    Tensor* input,
+    Tensor* weight,
+    Tensor* bias,
+    Tensor* output,
+    int stride_h,
+    int stride_w,
+    int pad_h,
+    int pad_w,
+    int activation_kind,
+    const char* op_name
+) {
+    if (!input || !weight || !output) {
+        fprintf(stderr, "%s: NULL tensor pointer\n", op_name);
+        fflush(stderr);
+        return;
+    }
+    if (!input->data || !weight->data || !output->data) {
+        fprintf(stderr, "%s: NULL data pointer\n", op_name);
+        fflush(stderr);
+        return;
+    }
+    if (!input->shape || !weight->shape || !output->shape) {
+        fprintf(stderr, "%s: NULL shape pointer\n", op_name);
+        fflush(stderr);
+        return;
+    }
+    if (input->ndim != 4 || weight->ndim != 4 || output->ndim != 4) {
+        fprintf(stderr, "%s: expected 4D tensors\n", op_name);
+        fflush(stderr);
+        return;
+    }
+
+    int N = (int)input->shape[0];
+    int C_in = (int)input->shape[1];
+    int H_in = (int)input->shape[2];
+    int W_in = (int)input->shape[3];
+    int C_out = (int)weight->shape[0];
+    int H_out = (int)output->shape[2];
+    int W_out = (int)output->shape[3];
+
+    float* in_data = (float*)input->data;
+    float* weight_data = (float*)weight->data;
+    float* bias_data = bias ? (float*)bias->data : NULL;
+    float* out_data = (float*)output->data;
+
+    int64_t input_batch_stride = (int64_t)C_in * H_in * W_in;
+    int64_t input_channel_stride = (int64_t)H_in * W_in;
+    int64_t output_batch_stride = (int64_t)C_out * H_out * W_out;
+    int64_t output_channel_stride = (int64_t)H_out * W_out;
+
+    for (int n = 0; n < N; n++) {
+        float* batch_input = in_data + ((int64_t)n * input_batch_stride);
+        float* batch_output = out_data + ((int64_t)n * output_batch_stride);
+
+        for (int c_out = 0; c_out < C_out; c_out++) {
+            float* output_channel = batch_output + ((int64_t)c_out * output_channel_stride);
+            float* weight_out = weight_data + ((int64_t)c_out * C_in);
+            double bias_value = bias_data ? (double)bias_data[c_out] : 0.0;
+
+            for (int h_out_idx = 0; h_out_idx < H_out; h_out_idx++) {
+                int in_h = (h_out_idx * stride_h) - pad_h;
+                float* output_row = output_channel + ((int64_t)h_out_idx * W_out);
+                for (int w_out_idx = 0; w_out_idx < W_out; w_out_idx++) {
+                    int in_w = (w_out_idx * stride_w) - pad_w;
+                    double sum = bias_value;
+
+                    if (in_h >= 0 && in_h < H_in && in_w >= 0 && in_w < W_in) {
+                        int64_t input_offset = ((int64_t)in_h * W_in) + in_w;
+                        for (int c_in = 0; c_in < C_in; c_in++) {
+                            float* input_channel = batch_input + ((int64_t)c_in * input_channel_stride);
+                            sum += (double)input_channel[input_offset] * (double)weight_out[c_in];
+                        }
+                    }
+
+                    output_row[w_out_idx] = nnc_apply_activation((float)sum, activation_kind);
+                }
+            }
+        }
+    }
+}
+
 void nnc_conv(
     Tensor* input, Tensor* weight, Tensor* bias, Tensor* output,
     int kernel_h, int kernel_w,
@@ -1070,11 +1317,29 @@ void nnc_conv1x1(
     int stride_h, int stride_w,
     int pad_h, int pad_w
 ) {
-    nnc_conv(input, weight, bias, output, 1, 1, stride_h, stride_w, pad_h, pad_w);
+    nnc_conv1x1_impl(
+        input,
+        weight,
+        bias,
+        output,
+        stride_h,
+        stride_w,
+        pad_h,
+        pad_w,
+        NNC_ACTIVATION_NONE,
+        "nnc_conv1x1"
+    );
 }
 
 void nnc_conv3x3_s1(Tensor* input, Tensor* weight, Tensor* bias, Tensor* output) {
-    nnc_conv(input, weight, bias, output, 3, 3, 1, 1, 1, 1);
+    nnc_conv3x3_samepad_s1_impl(
+        input,
+        weight,
+        bias,
+        output,
+        NNC_ACTIVATION_NONE,
+        "nnc_conv3x3_s1"
+    );
 }
 
 void nnc_conv7x7_s2(Tensor* input, Tensor* weight, Tensor* bias, Tensor* output) {
@@ -1422,7 +1687,45 @@ void nnc_gemm_nt(
     Tensor* a, Tensor* b, Tensor* c, Tensor* output,
     float alpha, float beta
 ) {
-    nnc_gemm(a, b, c, output, alpha, beta, 0, 1);
+    float* a_data = (float*)a->data;
+    float* b_data = (float*)b->data;
+    float* c_data = c ? (float*)c->data : NULL;
+    float* out_data = (float*)output->data;
+
+    int M, K, N;
+    if (a->ndim == 2 && b->ndim == 2) {
+        M = (int)a->shape[0];
+        K = (int)a->shape[1];
+        N = (int)b->shape[0];
+    } else if (a->ndim == 1 && b->ndim == 2) {
+        M = 1;
+        K = (int)a->shape[0];
+        N = (int)b->shape[0];
+    } else {
+        M = 1;
+        K = (int)tensor_numel(a);
+        N = (b->ndim == 2) ? (int)b->shape[0] : (int)tensor_numel(b);
+    }
+
+    for (int i = 0; i < M; i++) {
+        float* out_row = out_data + ((int64_t)i * N);
+        float* a_row = (a->ndim == 1) ? a_data : (a_data + ((int64_t)i * K));
+        for (int j = 0; j < N; j++) {
+            float* b_row = b_data + ((int64_t)j * K);
+            double sum = 0.0;
+            for (int k = 0; k < K; k++) {
+                sum += (double)a_row[k] * (double)b_row[k];
+            }
+            sum *= (double)alpha;
+
+            if (c_data != NULL) {
+                float c_val = (c->ndim == 1) ? c_data[j] : c_data[((int64_t)i * N) + j];
+                sum += (double)beta * (double)c_val;
+            }
+
+            out_row[j] = (float)sum;
+        }
+    }
 }
 
 /* ============================================================================
@@ -2697,11 +3000,29 @@ void nnc_conv_relu1x1(
     int stride_h, int stride_w,
     int pad_h, int pad_w
 ) {
-    nnc_conv_relu(input, weight, bias, output, 1, 1, stride_h, stride_w, pad_h, pad_w);
+    nnc_conv1x1_impl(
+        input,
+        weight,
+        bias,
+        output,
+        stride_h,
+        stride_w,
+        pad_h,
+        pad_w,
+        NNC_ACTIVATION_RELU,
+        "nnc_conv_relu1x1"
+    );
 }
 
 void nnc_conv_relu3x3_s1(Tensor* input, Tensor* weight, Tensor* bias, Tensor* output) {
-    nnc_conv_relu(input, weight, bias, output, 3, 3, 1, 1, 1, 1);
+    nnc_conv3x3_samepad_s1_impl(
+        input,
+        weight,
+        bias,
+        output,
+        NNC_ACTIVATION_RELU,
+        "nnc_conv_relu3x3_s1"
+    );
 }
 
 void nnc_conv_relu7x7_s2(Tensor* input, Tensor* weight, Tensor* bias, Tensor* output) {
