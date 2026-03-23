@@ -81,6 +81,30 @@ class CostAwareAllocator(MemoryAllocationStrategy):
             if size >= 0:
                 tensor_sizes[tensor_name] = size
 
+        if capacity != float("inf"):
+            max_node_demand = 0
+            for node in nodes:
+                unique_inputs = {
+                    tensor_name for tensor_name in node.inputs if tensor_name in tensor_sizes
+                }
+                unique_outputs = {
+                    tensor_name for tensor_name in node.outputs if tensor_name in tensor_sizes
+                }
+                demand = sum(
+                    self._align(tensor_sizes[tensor_name], self.DEFAULT_ALIGNMENT)
+                    for tensor_name in unique_inputs
+                )
+                demand += sum(
+                    self._align(tensor_sizes[tensor_name], self.DEFAULT_ALIGNMENT)
+                    for tensor_name in unique_outputs
+                )
+                max_node_demand = max(max_node_demand, demand)
+            if max_node_demand > capacity:
+                raise ValueError(
+                    f"max_memory ({capacity}) < peak node demand ({max_node_demand}). "
+                    f"Minimum required: {max_node_demand} bytes for the aligned fast-memory pool."
+                )
+
         resident: Dict[str, _ResidentTensor] = {}
         free_regions: list[tuple[int, int]] = []
         tensor_allocations: Dict[str, TensorAllocation] = {}
