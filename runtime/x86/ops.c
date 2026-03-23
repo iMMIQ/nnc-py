@@ -475,6 +475,77 @@ static float nnc_apply_activation(float value, int activation_kind) {
     return value;
 }
 
+static inline double nnc_conv_accumulate_point(
+    float* batch_input,
+    float* weight_out,
+    int C_in,
+    int H_in,
+    int W_in,
+    int kernel_h,
+    int kernel_w,
+    int64_t input_channel_stride,
+    int64_t weight_channel_stride,
+    int h_base,
+    int w_base,
+    double sum
+) {
+    for (int c_in = 0; c_in < C_in; c_in++) {
+        float* input_channel = batch_input + ((int64_t)c_in * input_channel_stride);
+        float* kernel = weight_out + ((int64_t)c_in * weight_channel_stride);
+
+        for (int kh = 0; kh < kernel_h; kh++) {
+            int h = h_base + kh;
+            if (h < 0 || h >= H_in) {
+                continue;
+            }
+            float* input_row = input_channel + ((int64_t)h * W_in);
+            float* kernel_row = kernel + ((int64_t)kh * kernel_w);
+            for (int kw = 0; kw < kernel_w; kw++) {
+                int w = w_base + kw;
+                if (w < 0 || w >= W_in) {
+                    continue;
+                }
+                sum += (double)input_row[w] * (double)kernel_row[kw];
+            }
+        }
+    }
+
+    return sum;
+}
+
+static inline double nnc_conv3x3_samepad_interior_accumulate(
+    float* batch_input,
+    float* weight_out,
+    int C_in,
+    int W_in,
+    int64_t input_channel_stride,
+    int64_t weight_channel_stride,
+    int h_center,
+    int w_center,
+    double sum
+) {
+    for (int c_in = 0; c_in < C_in; c_in++) {
+        float* input_channel = batch_input + ((int64_t)c_in * input_channel_stride);
+        float* kernel = weight_out + ((int64_t)c_in * weight_channel_stride);
+
+        float* input_row0 = input_channel + ((int64_t)(h_center - 1) * W_in) + (w_center - 1);
+        float* input_row1 = input_channel + ((int64_t)h_center * W_in) + (w_center - 1);
+        float* input_row2 = input_channel + ((int64_t)(h_center + 1) * W_in) + (w_center - 1);
+
+        sum += (double)input_row0[0] * (double)kernel[0];
+        sum += (double)input_row0[1] * (double)kernel[1];
+        sum += (double)input_row0[2] * (double)kernel[2];
+        sum += (double)input_row1[0] * (double)kernel[3];
+        sum += (double)input_row1[1] * (double)kernel[4];
+        sum += (double)input_row1[2] * (double)kernel[5];
+        sum += (double)input_row2[0] * (double)kernel[6];
+        sum += (double)input_row2[1] * (double)kernel[7];
+        sum += (double)input_row2[2] * (double)kernel[8];
+    }
+
+    return sum;
+}
+
 static void nnc_conv_impl(
     Tensor* input, Tensor* weight, Tensor* bias, Tensor* output,
     int kernel_h, int kernel_w,
@@ -527,6 +598,14 @@ static void nnc_conv_impl(
     );
     int use_no_pad_fast_path = (
         !use_1x1_fast_path && pad_h == 0 && pad_w == 0
+    );
+    int use_same_pad_3x3_fast_path = (
+        !use_1x1_fast_path &&
+        !use_no_pad_fast_path &&
+        kernel_h == 3 && kernel_w == 3 &&
+        stride_h == 1 && stride_w == 1 &&
+        pad_h == 1 && pad_w == 1 &&
+        H_out == H_in && W_out == W_in
     );
 
     for (int n = 0; n < N; n++) {
@@ -586,34 +665,106 @@ static void nnc_conv_impl(
                 continue;
             }
 
+            if (use_same_pad_3x3_fast_path) {
+                for (int h_out_idx = 0; h_out_idx < H_out; h_out_idx++) {
+                    float* output_row = output_channel + ((int64_t)h_out_idx * W_out);
+
+                    if (h_out_idx == 0 || h_out_idx == H_out - 1 || W_out <= 2) {
+                        int h_base = h_out_idx - 1;
+                        for (int w_out_idx = 0; w_out_idx < W_out; w_out_idx++) {
+                            int w_base = w_out_idx - 1;
+                            double sum = nnc_conv_accumulate_point(
+                                batch_input,
+                                weight_out,
+                                C_in,
+                                H_in,
+                                W_in,
+                                kernel_h,
+                                kernel_w,
+                                input_channel_stride,
+                                weight_channel_stride,
+                                h_base,
+                                w_base,
+                                bias_value
+                            );
+                            output_row[w_out_idx] = nnc_apply_activation((float)sum, activation_kind);
+                        }
+                        continue;
+                    }
+
+                    {
+                        double sum = nnc_conv_accumulate_point(
+                            batch_input,
+                            weight_out,
+                            C_in,
+                            H_in,
+                            W_in,
+                            kernel_h,
+                            kernel_w,
+                            input_channel_stride,
+                            weight_channel_stride,
+                            h_out_idx - 1,
+                            -1,
+                            bias_value
+                        );
+                        output_row[0] = nnc_apply_activation((float)sum, activation_kind);
+                    }
+
+                    for (int w_out_idx = 1; w_out_idx < W_out - 1; w_out_idx++) {
+                        double sum = nnc_conv3x3_samepad_interior_accumulate(
+                            batch_input,
+                            weight_out,
+                            C_in,
+                            W_in,
+                            input_channel_stride,
+                            weight_channel_stride,
+                            h_out_idx,
+                            w_out_idx,
+                            bias_value
+                        );
+                        output_row[w_out_idx] = nnc_apply_activation((float)sum, activation_kind);
+                    }
+
+                    {
+                        double sum = nnc_conv_accumulate_point(
+                            batch_input,
+                            weight_out,
+                            C_in,
+                            H_in,
+                            W_in,
+                            kernel_h,
+                            kernel_w,
+                            input_channel_stride,
+                            weight_channel_stride,
+                            h_out_idx - 1,
+                            W_out - 2,
+                            bias_value
+                        );
+                        output_row[W_out - 1] = nnc_apply_activation((float)sum, activation_kind);
+                    }
+                }
+                continue;
+            }
+
             for (int h_out_idx = 0; h_out_idx < H_out; h_out_idx++) {
                 int h_base = h_out_idx * stride_h - pad_h;
                 float* output_row = output_channel + ((int64_t)h_out_idx * W_out);
                 for (int w_out_idx = 0; w_out_idx < W_out; w_out_idx++) {
                     int w_base = w_out_idx * stride_w - pad_w;
-                    double sum = bias_value;
-
-                    for (int c_in = 0; c_in < C_in; c_in++) {
-                        float* input_channel = batch_input + ((int64_t)c_in * input_channel_stride);
-                        float* kernel = weight_out + ((int64_t)c_in * weight_channel_stride);
-
-                        for (int kh = 0; kh < kernel_h; kh++) {
-                            int h = h_base + kh;
-                            if (h < 0 || h >= H_in) {
-                                continue;
-                            }
-                            float* input_row = input_channel + ((int64_t)h * W_in);
-                            float* kernel_row = kernel + ((int64_t)kh * kernel_w);
-                            for (int kw = 0; kw < kernel_w; kw++) {
-                                int w = w_base + kw;
-                                if (w < 0 || w >= W_in) {
-                                    continue;
-                                }
-                                sum += (double)input_row[w] * (double)kernel_row[kw];
-                            }
-                        }
-                    }
-
+                    double sum = nnc_conv_accumulate_point(
+                        batch_input,
+                        weight_out,
+                        C_in,
+                        H_in,
+                        W_in,
+                        kernel_h,
+                        kernel_w,
+                        input_channel_stride,
+                        weight_channel_stride,
+                        h_base,
+                        w_base,
+                        bias_value
+                    );
                     output_row[w_out_idx] = nnc_apply_activation((float)sum, activation_kind);
                 }
             }
