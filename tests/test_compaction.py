@@ -4,6 +4,7 @@ from types import MethodType
 
 import pytest
 
+from nnc_py.codegen.x86_backend import X86Backend
 from nnc_py.ir.context import CompileContext
 from nnc_py.ir.graph import Graph
 from nnc_py.ir.node import Node, OpType
@@ -13,6 +14,7 @@ from nnc_py.passes.liveness import LivenessAnalysisPass
 from nnc_py.passes.memory_strategy import (
     MovePoint,
     MemoryAllocationPlan,
+    TensorAllocation,
 )
 from nnc_py.passes.strategies.cost_aware_allocator import CostAwareAllocator
 
@@ -282,6 +284,145 @@ def test_compaction_bytes_do_not_leak_into_slow_transfer_totals():
     assert plan_generous.total_transfer_bytes == (
         plan_generous.spill_bytes + plan_generous.reload_bytes
     ) == 0
+
+
+def test_move_only_plan_codegen_uses_unified_runtime_path():
+    """Move-only plans must still emit the unified runtime path and fast pool."""
+    ctx, _ = _make_ctx(
+        tensor_elements={"x": 4, "a": 4},
+        inputs=["x"],
+        outputs=["a"],
+        nodes=[Node(OpType.RELU, "n0", ["x"], ["a"])],
+    )
+    x_size = ctx.graph.tensors["x"].byte_size()
+    plan = MemoryAllocationPlan(
+        strategy_name="test",
+        total_fast_memory=32,
+        num_buffers=1,
+        tensor_allocations={
+            "x": TensorAllocation("x", buffer_id=0, offset=0, size=x_size),
+            "a": TensorAllocation(
+                "a",
+                buffer_id=0,
+                offset=x_size,
+                size=ctx.graph.tensors["a"].byte_size(),
+            ),
+        },
+        move_points=[
+            MovePoint(
+                tensor_name="x",
+                at_node_idx=0,
+                from_offset=32,
+                to_offset=0,
+                size=x_size,
+            )
+        ],
+        move_bytes=x_size,
+    )
+
+    ctx.metadata["memory_allocation_plan"] = plan
+    ctx.metadata["max_memory"] = 48
+
+    artifacts = X86Backend().generate(ctx)
+    model_c = next(file.content for file in artifacts.files if file.filename == "model.c")
+    tensors_c = next(file.content for file in artifacts.files if file.filename == "tensors.c")
+
+    assert "memmove(" in model_c
+    assert "nnc_relu(" in model_c
+    assert "_nnc_fast_pool" in model_c
+    assert "_nnc_fast_pool" in tensors_c
+    assert "_nnc_memory_pool" not in tensors_c
+
+
+def test_move_only_codegen_stages_first_use_input_before_memmove():
+    """A moved graph input must stage into from_offset before the move runs."""
+    ctx, _ = _make_ctx(
+        tensor_elements={"x": 4, "a": 4},
+        inputs=["x"],
+        outputs=["a"],
+        nodes=[Node(OpType.RELU, "n0", ["x"], ["a"])],
+    )
+    x_size = ctx.graph.tensors["x"].byte_size()
+    plan = MemoryAllocationPlan(
+        strategy_name="test",
+        total_fast_memory=32,
+        num_buffers=1,
+        tensor_allocations={
+            "x": TensorAllocation("x", buffer_id=0, offset=0, size=x_size),
+            "a": TensorAllocation(
+                "a",
+                buffer_id=0,
+                offset=x_size,
+                size=ctx.graph.tensors["a"].byte_size(),
+            ),
+        },
+        move_points=[
+            MovePoint(
+                tensor_name="x",
+                at_node_idx=0,
+                from_offset=32,
+                to_offset=0,
+                size=x_size,
+            )
+        ],
+        move_bytes=x_size,
+    )
+    ctx.metadata["memory_allocation_plan"] = plan
+    ctx.metadata["max_memory"] = 48
+
+    artifacts = X86Backend().generate(ctx)
+    model_c = next(file.content for file in artifacts.files if file.filename == "model.c")
+
+    stage_stmt = "memcpy(_nnc_fast_pool + 32, _nnc_bound_input_tensor_x, 16);"
+    move_stmt = "memmove(_nnc_fast_pool + 0, _nnc_fast_pool + 32, 16);"
+    update_stmt = "tensor_x.data = _nnc_fast_pool + 0;"
+
+    assert stage_stmt in model_c
+    assert move_stmt in model_c
+    assert update_stmt in model_c
+    assert model_c.index(stage_stmt) < model_c.index(move_stmt) < model_c.index(update_stmt)
+
+
+def test_codegen_sorts_move_points_by_source_offset():
+    """MovePoint codegen should emit memmoves in ascending source-offset order."""
+    ctx, _ = _make_ctx(
+        tensor_elements={"x": 4, "y": 4, "a": 4},
+        inputs=["x", "y"],
+        outputs=["a"],
+        nodes=[Node(OpType.ADD, "n0", ["x", "y"], ["a"])],
+    )
+    size = ctx.graph.tensors["x"].byte_size()
+    plan = MemoryAllocationPlan(
+        strategy_name="test",
+        total_fast_memory=48,
+        num_buffers=1,
+        tensor_allocations={
+            "x": TensorAllocation("x", buffer_id=0, offset=0, size=size),
+            "y": TensorAllocation("y", buffer_id=0, offset=size, size=size),
+            "a": TensorAllocation(
+                "a",
+                buffer_id=0,
+                offset=size * 2,
+                size=ctx.graph.tensors["a"].byte_size(),
+            ),
+        },
+        move_points=[
+            MovePoint("y", at_node_idx=0, from_offset=32, to_offset=16, size=size),
+            MovePoint("x", at_node_idx=0, from_offset=16, to_offset=0, size=size),
+        ],
+        move_bytes=size * 2,
+    )
+    ctx.metadata["memory_allocation_plan"] = plan
+    ctx.metadata["max_memory"] = 64
+
+    artifacts = X86Backend().generate(ctx)
+    model_c = next(file.content for file in artifacts.files if file.filename == "model.c")
+
+    first_move = "memmove(_nnc_fast_pool + 0, _nnc_fast_pool + 16, 16);"
+    second_move = "memmove(_nnc_fast_pool + 16, _nnc_fast_pool + 32, 16);"
+    assert first_move in model_c
+    assert second_move in model_c
+    assert model_c.index(first_move) < model_c.index(second_move)
 
 
 def test_compaction_extreme_max_memory_equals_node_demand():

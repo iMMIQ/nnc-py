@@ -11,6 +11,7 @@ from nnc_py.ir.node import Node, OpType
 from nnc_py.ir.types import DataType
 from nnc_py.passes.memory_strategy import (
     MemoryAllocationPlan,
+    MovePoint,
     ReloadPoint,
     SpillPoint,
     TensorAllocation,
@@ -101,7 +102,7 @@ class X86Backend(BackendBase):
         spill_plan = get_spill_plan(ctx)
 
         # Determine which plan to use
-        if alloc_plan is not None and alloc_plan.has_spill:
+        if alloc_plan is not None and (alloc_plan.has_spill or bool(alloc_plan.move_points)):
             # Use new MemoryAllocationPlan with reload code generation
             source = self._generate_source_with_unified_spill(ctx, alloc_plan)
         elif spill_plan is not None and spill_plan.has_overflow:
@@ -366,6 +367,9 @@ extern FILE* debug_file;
                 for point in plan.get_spill_points_after(node_idx)
             }
 
+        def get_move_points_at(node_idx: int) -> list[MovePoint]:
+            return plan.get_move_points_at(node_idx)
+
         def get_internal_storage_expr(tensor_name: str) -> str | None:
             alloc = plan.tensor_allocations.get(tensor_name)
             if alloc is None:
@@ -435,7 +439,7 @@ extern FILE* debug_file;
         for point in plan.reload_points:
             max_tensor_size = max(max_tensor_size, point.size)
 
-        if not plan.has_spill:
+        if not plan.has_spill and not plan.move_points:
             emitter = CEmitter()
             return emitter.emit(ctx)
 
@@ -455,9 +459,14 @@ extern FILE* debug_file;
 
             func_name = ctx.node_symbols.get(node.name, node.name)
             spill_outputs_after = get_output_spill_points(node_idx)
+            move_points_at = sorted(
+                get_move_points_at(node_idx),
+                key=lambda move: move.from_offset,
+            )
 
             # Check if this node needs spill/reload
             has_spill = len(spill_outputs_after) > 0
+            has_move = len(move_points_at) > 0
             has_reload = len(plan.get_reload_points_before(node_idx)) > 0
             has_spilled_output = any(
                 (
@@ -471,7 +480,7 @@ extern FILE* debug_file;
             )
 
             # Only declare _body if no spill/reload needed
-            if not has_spill and not has_reload and not has_spilled_output:
+            if not has_spill and not has_move and not has_reload and not has_spilled_output:
                 lines.append(f"static void {func_name}_body(void);")
 
         lines.append("")
@@ -486,6 +495,13 @@ extern FILE* debug_file;
 
             # Collect spills after this node
             spill_points_after = get_output_spill_points(node_idx)
+            move_points_at = sorted(
+                get_move_points_at(node_idx),
+                key=lambda move: move.from_offset,
+            )
+            move_points_by_tensor = {
+                move.tensor_name: move for move in move_points_at
+            }
 
             # Collect reloads before this node
             reloads_before = plan.get_reload_points_before(node_idx)
@@ -562,8 +578,41 @@ extern FILE* debug_file;
             lines.append(f"/* {func_name}: {node.op_type.value} */")
             lines.append(f"static void {func_name}(void) {{")
 
+            moved_first_use_inputs = [
+                input_name
+                for input_name in node.inputs
+                if input_first_use.get(input_name) == node_idx
+                and input_name in move_points_by_tensor
+            ]
+            for input_name in moved_first_use_inputs:
+                alloc = plan.tensor_allocations.get(input_name)
+                move = move_points_by_tensor[input_name]
+                var_name = ctx.tensor_symbols.get(input_name, input_name)
+                from_expr = f"_nnc_fast_pool + {move.from_offset}"
+                if alloc is None:
+                    continue
+                lines.extend([
+                    f"    /* Stage graph input {input_name} into pre-move fast memory */",
+                    f"    memcpy({from_expr}, {get_saved_input_binding_name(input_name)}, {alloc.size});",
+                    f"    {var_name}.data = {from_expr};",
+                    "",
+                ])
+
+            for move in move_points_at:
+                var_name = ctx.tensor_symbols.get(move.tensor_name, move.tensor_name)
+                to_expr = f"_nnc_fast_pool + {move.to_offset}"
+                from_expr = f"_nnc_fast_pool + {move.from_offset}"
+                lines.extend([
+                    f"    /* Move {move.tensor_name} within fast memory */",
+                    f"    memmove({to_expr}, {from_expr}, {move.size});",
+                    f"    {var_name}.data = {to_expr};",
+                    "",
+                ])
+
             for input_name in node.inputs:
                 if input_first_use.get(input_name) != node_idx:
+                    continue
+                if input_name in move_points_by_tensor:
                     continue
 
                 alloc = plan.tensor_allocations.get(input_name)
@@ -684,12 +733,14 @@ extern FILE* debug_file;
 
             func_name = ctx.node_symbols.get(node.name, node.name)
             spill_outputs_after = get_output_spill_points(node_idx)
+            move_points_at = get_move_points_at(node_idx)
 
             # Check if this node needs spill/reload
             # A node needs spill/reload wrapper if:
             # 1. It has reload points before it (inputs to reload), OR
             # 2. Any of its outputs are spilled (live in slow memory)
             has_spill = len(spill_outputs_after) > 0
+            has_move = len(move_points_at) > 0
             has_reload = len(plan.get_reload_points_before(node_idx)) > 0
             has_spilled_output = any(
                 (
@@ -702,7 +753,7 @@ extern FILE* debug_file;
                 for o in node.outputs
             )
 
-            if not has_spill and not has_reload and not has_spilled_output:
+            if not has_spill and not has_move and not has_reload and not has_spilled_output:
                 # No spill/reload needed, generate standard operator call
                 lines.append(f"/* {func_name}: {node.op_type.value} */")
                 lines.append(f"static void {func_name}_body(void) {{")
@@ -1900,15 +1951,16 @@ run: model
         from nnc_py.passes.memory_planning import get_memory_allocation_plan
         alloc_plan = get_memory_allocation_plan(ctx)
 
-        # Determine if we have spill
-        has_spill = alloc_plan is not None and alloc_plan.has_spill
-
-        # Also check if any tensors are allocated in slow memory
         has_slow_memory_tensors = False
         if alloc_plan is not None:
             has_slow_memory_tensors = any(
                 alloc.is_spilled for alloc in alloc_plan.tensor_allocations.values()
             )
+        has_spill = alloc_plan is not None and alloc_plan.has_spill
+        has_moves = alloc_plan is not None and bool(alloc_plan.move_points)
+        uses_unified_runtime = alloc_plan is not None and (
+            has_spill or has_slow_memory_tensors or has_moves
+        )
 
         # Generate slow pool if we have spill points OR slow memory tensors
         needs_slow_pool = has_spill or has_slow_memory_tensors
@@ -1922,9 +1974,9 @@ run: model
             lines.append("")
 
         # Determine which pool names to use
-        if has_spill:
+        if uses_unified_runtime:
             fast_pool_name = "_nnc_fast_pool"
-            slow_pool_name = "_nnc_slow_pool"
+            slow_pool_name = "_nnc_slow_pool" if needs_slow_pool else None
         else:
             fast_pool_name = "_nnc_memory_pool"
             slow_pool_name = None
@@ -1972,7 +2024,7 @@ run: model
             data_init = "NULL"
             if tensor_name in tensor_offsets:
                 pool_type, offset = tensor_offsets[tensor_name]
-                if has_spill and tensor_name in ctx.graph.inputs:
+                if uses_unified_runtime and tensor_name in ctx.graph.inputs:
                     input_buffer_name = f"_nnc_input_buffer_{var_name}"
                     lines.append(f"/* Input staging buffer: {tensor_name} */")
                     lines.append(
@@ -2014,29 +2066,47 @@ run: model
         # Check for new memory allocation plan first
         alloc_plan = get_memory_allocation_plan(ctx)
 
-        if alloc_plan is not None and (alloc_plan.has_spill or any(alloc.is_spilled for alloc in alloc_plan.tensor_allocations.values())):
-            # When there's a spill, use max_memory as the pool size instead of total_fast_memory
-            # This ensures all tensor offsets fit within the declared pool
-            max_memory = ctx.metadata.get('max_memory', alloc_plan.total_fast_memory)
-            fast_memory_size = max(alloc_plan.total_fast_memory, max_memory)
-            return [
-                "/* Dual Memory Pools (Fast + Slow for spilled tensors) */",
-                f"/* Fast memory: {fast_memory_size} bytes ({fast_memory_size / 1024:.2f} KB) */",
-                f"/* Slow memory: {alloc_plan.total_slow_memory} bytes ({alloc_plan.total_slow_memory / 1024:.2f} KB) */",
-                f"/* Buffers: {alloc_plan.num_buffers}, Spill points: {alloc_plan.spill_count}, Reload points: {alloc_plan.reload_count} */",
-                "",
-                f"/* Fast Memory Pool (SRAM/On-chip) */",
-                f"#define NNC_FAST_MEMORY_SIZE {fast_memory_size}",
-                f"#define NNC_MEMORY_ALIGNMENT 16",
-                f"uint8_t _nnc_fast_pool[NNC_FAST_MEMORY_SIZE] "
-                f"__attribute__((aligned(NNC_MEMORY_ALIGNMENT))) = {{0}};",
-                "",
-                f"/* Slow Memory Pool (DRAM/External) */",
-                f"#define NNC_SLOW_MEMORY_SIZE {alloc_plan.total_slow_memory}",
-                f"uint8_t _nnc_slow_pool[NNC_SLOW_MEMORY_SIZE] "
-                f"__attribute__((aligned(NNC_MEMORY_ALIGNMENT))) = {{0}};",
-                "",
-            ]
+        if alloc_plan is not None:
+            has_slow_memory_tensors = any(
+                alloc.is_spilled for alloc in alloc_plan.tensor_allocations.values()
+            )
+            uses_unified_runtime = (
+                alloc_plan.has_spill
+                or has_slow_memory_tensors
+                or bool(alloc_plan.move_points)
+            )
+
+            if uses_unified_runtime:
+                # Use max_memory when available so transient pre-compaction offsets fit.
+                # Move-only plans still need the unified fast pool symbol.
+                move_count = len(alloc_plan.move_points)
+                spill_count = alloc_plan.spill_count
+                reload_count = alloc_plan.reload_count
+                needs_slow_pool = alloc_plan.has_spill or has_slow_memory_tensors
+                max_memory = ctx.metadata.get('max_memory', alloc_plan.total_fast_memory)
+                fast_memory_size = max(alloc_plan.total_fast_memory, max_memory)
+                lines = [
+                    "/* Unified Memory Pools */",
+                    f"/* Fast memory: {fast_memory_size} bytes ({fast_memory_size / 1024:.2f} KB) */",
+                    f"/* Buffers: {alloc_plan.num_buffers}, Spill points: {spill_count}, Reload points: {reload_count}, Move points: {move_count} */",
+                    "",
+                    "/* Fast Memory Pool (SRAM/On-chip) */",
+                    f"#define NNC_FAST_MEMORY_SIZE {fast_memory_size}",
+                    "#define NNC_MEMORY_ALIGNMENT 16",
+                    f"uint8_t _nnc_fast_pool[NNC_FAST_MEMORY_SIZE] "
+                    f"__attribute__((aligned(NNC_MEMORY_ALIGNMENT))) = {{0}};",
+                    "",
+                ]
+
+                if needs_slow_pool:
+                    lines.extend([
+                        "/* Slow Memory Pool (DRAM/External) */",
+                        f"#define NNC_SLOW_MEMORY_SIZE {alloc_plan.total_slow_memory}",
+                        f"uint8_t _nnc_slow_pool[NNC_SLOW_MEMORY_SIZE] "
+                        f"__attribute__((aligned(NNC_MEMORY_ALIGNMENT))) = {{0}};",
+                        "",
+                    ])
+                return lines
 
         # Fall back to legacy implementation
         plan = get_memory_plan(ctx)
