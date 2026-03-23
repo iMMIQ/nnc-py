@@ -2070,6 +2070,10 @@ run: model
             has_slow_memory_tensors = any(
                 alloc.is_spilled for alloc in alloc_plan.tensor_allocations.values()
             )
+            move_count = len(alloc_plan.move_points)
+            spill_count = alloc_plan.spill_count
+            reload_count = alloc_plan.reload_count
+            needs_slow_pool = alloc_plan.has_spill or has_slow_memory_tensors
             uses_unified_runtime = (
                 alloc_plan.has_spill
                 or has_slow_memory_tensors
@@ -2077,12 +2081,30 @@ run: model
             )
 
             if uses_unified_runtime:
-                # Use max_memory when available so transient pre-compaction offsets fit.
-                # Move-only plans still need the unified fast pool symbol.
-                move_count = len(alloc_plan.move_points)
-                spill_count = alloc_plan.spill_count
-                reload_count = alloc_plan.reload_count
-                needs_slow_pool = alloc_plan.has_spill or has_slow_memory_tensors
+                if needs_slow_pool:
+                    fast_memory_size = alloc_plan.total_fast_memory
+                    lines = [
+                        "/* Dual Memory Pools (Fast + Slow for spilled tensors) */",
+                        f"/* Fast memory: {fast_memory_size} bytes ({fast_memory_size / 1024:.2f} KB) */",
+                        f"/* Slow memory: {alloc_plan.total_slow_memory} bytes ({alloc_plan.total_slow_memory / 1024:.2f} KB) */",
+                        f"/* Buffers: {alloc_plan.num_buffers}, Spill points: {spill_count}, Reload points: {reload_count} */",
+                        "",
+                        "/* Fast Memory Pool (SRAM/On-chip) */",
+                        f"#define NNC_FAST_MEMORY_SIZE {fast_memory_size}",
+                        "#define NNC_MEMORY_ALIGNMENT 16",
+                        f"uint8_t _nnc_fast_pool[NNC_FAST_MEMORY_SIZE] "
+                        f"__attribute__((aligned(NNC_MEMORY_ALIGNMENT))) = {{0}};",
+                        "",
+                        "/* Slow Memory Pool (DRAM/External) */",
+                        f"#define NNC_SLOW_MEMORY_SIZE {alloc_plan.total_slow_memory}",
+                        f"uint8_t _nnc_slow_pool[NNC_SLOW_MEMORY_SIZE] "
+                        f"__attribute__((aligned(NNC_MEMORY_ALIGNMENT))) = {{0}};",
+                        "",
+                    ]
+                    return lines
+
+                # Move-only unified plans still need the unified fast pool symbol and
+                # enough headroom for transient pre-move source offsets.
                 max_memory = ctx.metadata.get('max_memory', alloc_plan.total_fast_memory)
                 fast_memory_size = max(alloc_plan.total_fast_memory, max_memory)
                 lines = [
@@ -2097,15 +2119,6 @@ run: model
                     f"__attribute__((aligned(NNC_MEMORY_ALIGNMENT))) = {{0}};",
                     "",
                 ]
-
-                if needs_slow_pool:
-                    lines.extend([
-                        "/* Slow Memory Pool (DRAM/External) */",
-                        f"#define NNC_SLOW_MEMORY_SIZE {alloc_plan.total_slow_memory}",
-                        f"uint8_t _nnc_slow_pool[NNC_SLOW_MEMORY_SIZE] "
-                        f"__attribute__((aligned(NNC_MEMORY_ALIGNMENT))) = {{0}};",
-                        "",
-                    ])
                 return lines
 
         # Fall back to legacy implementation

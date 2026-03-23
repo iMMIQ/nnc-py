@@ -8,6 +8,7 @@ from types import MethodType
 from pathlib import Path
 
 import onnx
+import numpy as np
 import pytest
 from onnx import helper
 
@@ -78,12 +79,15 @@ def _make_ctx(
     inputs: list[str],
     outputs: list[str],
     nodes: list[Node],
+    constants: dict[str, np.ndarray] | None = None,
 ) -> tuple[CompileContext, dict]:
     graph = Graph("compaction-test")
     graph.inputs.extend(inputs)
     graph.outputs.extend(outputs)
     for name, elements in tensor_elements.items():
         graph.add_tensor(_tensor(name, elements))
+    if constants is not None:
+        graph.constants.update(constants)
     for node in nodes:
         graph.add_node(node)
     ctx = CompileContext(graph=graph, target="x86", optimization_level=1)
@@ -94,10 +98,10 @@ def _make_ctx(
 def test_demand_precheck_rejects_insufficient_memory():
     """max_memory < max_node_demand -> clear ValueError upfront."""
     ctx, liveness = _make_ctx(
-        tensor_elements={"x": 16, "a": 16},
-        inputs=["x"],
+        tensor_elements={"x": 16, "y": 16, "a": 16},
+        inputs=["x", "y"],
         outputs=["a"],
-        nodes=[Node(OpType.RELU, "n0", ["x"], ["a"])],
+        nodes=[Node(OpType.ADD, "n0", ["x", "y"], ["a"])],
     )
     allocator = CostAwareAllocator()
     with pytest.raises(ValueError, match="peak node demand"):
@@ -113,8 +117,8 @@ def test_demand_precheck_accepts_sufficient_memory():
         nodes=[Node(OpType.ADD, "n0", ["x", "y"], ["a"])],
     )
     allocator = CostAwareAllocator()
-    plan = allocator.allocate(ctx, liveness, max_memory=192)
-    assert plan.total_fast_memory <= 192
+    plan = allocator.allocate(ctx, liveness, max_memory=128)
+    assert plan.total_fast_memory <= 128
 
 
 def test_demand_precheck_dedupes_duplicate_inputs_per_node():
@@ -124,6 +128,59 @@ def test_demand_precheck_dedupes_duplicate_inputs_per_node():
         inputs=["x"],
         outputs=["y"],
         nodes=[Node(OpType.ADD, "n0", ["x", "x"], ["y"])],
+    )
+    allocator = CostAwareAllocator()
+    plan = allocator.allocate(ctx, liveness, max_memory=64)
+    assert plan.total_fast_memory <= 64
+
+
+def test_demand_precheck_excludes_constants_from_fast_memory_demand():
+    """Constants are loaded outside the fast pool and should not count toward demand."""
+    ctx, liveness = _make_ctx(
+        tensor_elements={"x": 16, "bias": 16, "y": 16},
+        inputs=["x"],
+        outputs=["y"],
+        nodes=[Node(OpType.ADD, "n0", ["x", "bias"], ["y"])],
+        constants={"bias": np.ones((1, 16), dtype=np.float32)},
+    )
+    allocator = CostAwareAllocator()
+    plan = allocator.allocate(ctx, liveness, max_memory=64)
+    assert plan.total_fast_memory <= 64
+
+
+def test_demand_precheck_allows_single_output_inplace_reuse():
+    """Single-output inplace-capable ops should reuse a dying input in the estimate."""
+    ctx, liveness = _make_ctx(
+        tensor_elements={"x": 16, "y": 16, "out": 16},
+        inputs=["x", "y"],
+        outputs=["out"],
+        nodes=[Node(OpType.ADD, "n0", ["x", "y"], ["out"])],
+    )
+    allocator = CostAwareAllocator()
+    plan = allocator.allocate(ctx, liveness, max_memory=128)
+    assert plan.total_fast_memory <= 128
+
+
+def test_demand_precheck_preserves_spill_capable_compile_paths():
+    """Precheck must not reject nodes the allocator can satisfy via reuse plus spill."""
+    ctx, liveness = _make_ctx(
+        tensor_elements={
+            "x_big": 16,
+            "y_small": 16,
+            "z_small": 16,
+            "newcomer": 16,
+            "near_done": 16,
+            "far_done": 16,
+            "out": 16,
+        },
+        inputs=["x_big", "y_small", "z_small"],
+        outputs=["near_done", "out"],
+        nodes=[
+            Node(OpType.RELU, "n2", ["z_small"], ["newcomer"]),
+            Node(OpType.RELU, "n3", ["x_big"], ["near_done"]),
+            Node(OpType.RELU, "n4", ["y_small"], ["far_done"]),
+            Node(OpType.ADD, "n5", ["newcomer", "far_done"], ["out"]),
+        ],
     )
     allocator = CostAwareAllocator()
     plan = allocator.allocate(ctx, liveness, max_memory=128)
@@ -153,6 +210,35 @@ def test_compaction_triggered_on_fragmentation():
     assert plan.total_fast_memory <= 96
     assert plan.move_points
     assert plan.move_bytes == sum(mp.size for mp in plan.move_points)
+
+
+def test_tight_budget_can_succeed_without_compaction_fallback():
+    """A tight aligned budget can still succeed without invoking compaction or slow-memory fallback."""
+    ctx, liveness = _make_ctx(
+        tensor_elements={
+            "x": 1,
+            "y": 1,
+            "z": 1,
+            "u": 5,
+            "a": 6,
+            "b": 4,
+            "out": 4,
+        },
+        inputs=["x", "y", "z"],
+        outputs=["out"],
+        nodes=[
+            Node(OpType.RELU, "n0", ["x"], ["u"]),
+            Node(OpType.RELU, "n1", ["y"], ["a"]),
+            Node(OpType.RELU, "n2", ["z"], ["b"]),
+            Node(OpType.ADD, "n3", ["a", "b"], ["out"]),
+        ],
+    )
+    allocator = CostAwareAllocator()
+    plan = allocator.allocate(ctx, liveness, max_memory=64)
+    assert plan.total_fast_memory <= 64
+    assert plan.move_points == []
+    assert plan.spill_points == []
+    assert plan.reload_points == []
 
 
 def test_compaction_not_triggered_when_unnecessary():
@@ -228,8 +314,8 @@ def test_compaction_post_compaction_offsets_contiguous():
         assert sorted_moves[i].to_offset == expected_offset
 
 
-def test_compaction_refuses_when_non_protected_residents_remain():
-    """Compaction must refuse mixed resident sets instead of creating overlaps."""
+def test_compaction_handles_non_protected_residents_when_eviction_plan_is_unavailable():
+    """Fallback compaction should evict non-protected residents before packing protected tensors."""
     ctx, liveness = _make_ctx(
         tensor_elements={
             "x": 1,
@@ -257,9 +343,59 @@ def test_compaction_refuses_when_non_protected_residents_remain():
         return None
 
     allocator._select_eviction_candidates = MethodType(force_no_eviction_plan, allocator)
+    plan = allocator.allocate(ctx, liveness, max_memory=96)
+    assert plan.total_fast_memory <= 96
+    assert plan.move_points
+    assert any(spill.tensor_name == "c" for spill in plan.spill_points)
+    assert any(reload.tensor_name == "c" for reload in plan.reload_points)
 
-    with pytest.raises(ValueError, match="Cannot allocate"):
-        allocator.allocate(ctx, liveness, max_memory=96)
+
+def test_mixed_move_and_spill_plan_codegen_uses_dual_pool_unified_runtime():
+    """Unified runtime codegen should handle plans that contain both MovePoints and spills."""
+    ctx, liveness = _make_ctx(
+        tensor_elements={
+            "x": 1,
+            "y": 1,
+            "z": 1,
+            "a": 4,
+            "b": 4,
+            "c": 5,
+            "d": 5,
+            "out": 6,
+        },
+        inputs=["x", "y", "z"],
+        outputs=["out"],
+        nodes=[
+            Node(OpType.MATMUL, "n0", ["x"], ["a"]),
+            Node(OpType.MATMUL, "n1", ["y"], ["b"]),
+            Node(OpType.MATMUL, "n2", ["z"], ["c"]),
+            Node(OpType.ADD, "n3", ["a", "b"], ["d"]),
+            Node(OpType.ADD, "n4", ["c", "d"], ["out"]),
+        ],
+    )
+    allocator = CostAwareAllocator()
+
+    def force_no_eviction_plan(self, **kwargs):
+        return None
+
+    allocator._select_eviction_candidates = MethodType(force_no_eviction_plan, allocator)
+    plan = allocator.allocate(ctx, liveness, max_memory=96)
+    ctx.metadata["memory_allocation_plan"] = plan
+    ctx.metadata["max_memory"] = 96
+
+    artifacts = X86Backend().generate(ctx)
+    model_c = next(file.content for file in artifacts.files if file.filename == "model.c")
+    tensors_c = next(file.content for file in artifacts.files if file.filename == "tensors.c")
+
+    assert plan.move_points
+    assert plan.spill_points
+    assert plan.reload_points
+    assert "/* Dual Memory Pools (Fast + Slow for spilled tensors) */" in tensors_c
+    assert "_nnc_fast_pool" in tensors_c
+    assert "_nnc_slow_pool" in tensors_c
+    assert "memmove(" in model_c
+    assert "Reload c from slow to fast memory" in model_c
+    assert "_nnc_slow_pool +" in model_c
 
 
 def test_compaction_bytes_do_not_leak_into_slow_transfer_totals():

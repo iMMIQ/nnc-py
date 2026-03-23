@@ -74,6 +74,9 @@ class CostAwareAllocator(MemoryAllocationStrategy):
 
         tensor_sizes: Dict[str, int] = {}
         for tensor_name in liveness_map:
+            if liveness_map[tensor_name].is_constant:
+                continue
+
             tensor = ctx.graph.get_tensor(tensor_name)
             if tensor is None:
                 continue
@@ -84,20 +87,12 @@ class CostAwareAllocator(MemoryAllocationStrategy):
 
         if capacity != float("inf"):
             max_node_demand = 0
-            for node in nodes:
-                unique_inputs = {
-                    tensor_name for tensor_name in node.inputs if tensor_name in tensor_sizes
-                }
-                unique_outputs = {
-                    tensor_name for tensor_name in node.outputs if tensor_name in tensor_sizes
-                }
-                demand = sum(
-                    self._align(tensor_sizes[tensor_name], self.DEFAULT_ALIGNMENT)
-                    for tensor_name in unique_inputs
-                )
-                demand += sum(
-                    self._align(tensor_sizes[tensor_name], self.DEFAULT_ALIGNMENT)
-                    for tensor_name in unique_outputs
+            for node_idx, node in enumerate(nodes):
+                demand = self._estimate_node_fast_memory_demand(
+                    node=node,
+                    node_idx=node_idx,
+                    tensor_sizes=tensor_sizes,
+                    liveness_map=liveness_map,
                 )
                 max_node_demand = max(max_node_demand, demand)
             if max_node_demand > capacity:
@@ -213,11 +208,14 @@ class CostAwareAllocator(MemoryAllocationStrategy):
             size: int,
             node_idx: int,
             protected: set[str],
+            spill_after_idx: int,
         ) -> Optional[int]:
             nonlocal next_fast_offset, move_bytes_total
 
-            if any(tensor_name not in protected for tensor_name in resident):
-                return None
+            for tensor_name in list(resident):
+                if tensor_name in protected:
+                    continue
+                evict_tensor(tensor_name, node_idx, spill_after_idx)
 
             protected_resident = sorted(
                 (
@@ -227,8 +225,6 @@ class CostAwareAllocator(MemoryAllocationStrategy):
                 ),
                 key=lambda slot: slot.offset,
             )
-            if not protected_resident:
-                return None
 
             cursor = 0
             compacted_layout: list[tuple[_ResidentTensor, int]] = []
@@ -263,6 +259,8 @@ class CostAwareAllocator(MemoryAllocationStrategy):
                 resident[slot.name] = _ResidentTensor(slot.name, new_offset, slot.size)
 
             free_regions[:] = []
+            if capacity != float("inf"):
+                free_regions.append((cursor, capacity - cursor))
             next_fast_offset = cursor
             return try_allocate_fast_region(size)
 
@@ -328,7 +326,7 @@ class CostAwareAllocator(MemoryAllocationStrategy):
                     )
 
                 if not candidates:
-                    offset = try_compact_and_allocate(size, node_idx, protected)
+                    offset = try_compact_and_allocate(size, node_idx, protected, spill_after_idx)
                     if offset is not None:
                         return offset
                     if not can_extend_fast_pool(size):
@@ -349,7 +347,7 @@ class CostAwareAllocator(MemoryAllocationStrategy):
                     max_memory=capacity,
                 )
                 if eviction_plan is None:
-                    offset = try_compact_and_allocate(size, node_idx, protected)
+                    offset = try_compact_and_allocate(size, node_idx, protected, spill_after_idx)
                     if offset is not None:
                         return offset
                     if not can_extend_fast_pool(size):
@@ -369,7 +367,7 @@ class CostAwareAllocator(MemoryAllocationStrategy):
                 if offset is not None:
                     return offset
 
-                offset = try_compact_and_allocate(size, node_idx, protected)
+                offset = try_compact_and_allocate(size, node_idx, protected, spill_after_idx)
                 if offset is not None:
                     return offset
 
@@ -563,6 +561,53 @@ class CostAwareAllocator(MemoryAllocationStrategy):
     def _align(self, offset: int, alignment: int) -> int:
         """Align an offset to the requested boundary."""
         return ((offset + alignment - 1) // alignment) * alignment
+
+    def _estimate_node_fast_memory_demand(
+        self,
+        *,
+        node: Node,
+        node_idx: int,
+        tensor_sizes: Dict[str, int],
+        liveness_map: Dict[str, TensorLiveness],
+    ) -> int:
+        """Estimate a node's real simultaneous fast-memory demand.
+
+        The allocator keeps one resident slot per unique non-constant input and then
+        allocates outputs one by one. For single-output ops that support aliasing, a
+        dying input slot can be reused immediately, so the output does not add to the
+        simultaneous fast-memory requirement.
+        """
+        unique_inputs = {
+            tensor_name for tensor_name in node.inputs if tensor_name in tensor_sizes
+        }
+        unique_outputs = {
+            tensor_name for tensor_name in node.outputs if tensor_name in tensor_sizes
+        }
+
+        demand = sum(
+            self._align(tensor_sizes[tensor_name], self.DEFAULT_ALIGNMENT)
+            for tensor_name in unique_inputs
+        )
+        demand += sum(
+            self._align(tensor_sizes[tensor_name], self.DEFAULT_ALIGNMENT)
+            for tensor_name in unique_outputs
+        )
+
+        if node.op_type not in self.INPLACE_REUSE_OPS or len(unique_outputs) != 1:
+            return demand
+
+        output_name = next(iter(unique_outputs))
+        output_size = tensor_sizes[output_name]
+        reusable_input = any(
+            tensor_sizes[input_name] == output_size
+            and liveness_map[input_name].live_end <= node_idx
+            and not liveness_map[input_name].is_output
+            for input_name in unique_inputs
+        )
+        if reusable_input:
+            demand -= self._align(output_size, self.DEFAULT_ALIGNMENT)
+
+        return demand
 
     def _aligned_pool_size(self, fast_end: int) -> int:
         """Return the aligned fast-pool size needed to cover `fast_end`."""
