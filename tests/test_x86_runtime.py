@@ -1027,6 +1027,73 @@ clean:
         max_diff = self._compare_results(data_output, expected)
         print(f"  conv_relu3x3_s1 max_diff: {max_diff}")
 
+    def test_conv7x7_s2_matches_reference(self):
+        """Test specialized nnc_conv7x7_s2 kernel."""
+        input_data = np.arange(1, 1 + (1 * 3 * 9 * 9), dtype=np.float32).reshape(1, 3, 9, 9)
+        weight_data = (
+            np.arange(1, 1 + (2 * 3 * 7 * 7), dtype=np.float32).reshape(2, 3, 7, 7) / 50.0
+        )
+        bias_data = np.array([0.5, -1.25], dtype=np.float32)
+        expected = _reference_conv_nchw(
+            input_data,
+            weight_data,
+            bias_data,
+            stride_h=2,
+            stride_w=2,
+            pad_h=3,
+            pad_w=3,
+        )
+
+        tensor_input, _ = self._make_tensor(input_data)
+        tensor_weight, _ = self._make_tensor(weight_data)
+        tensor_bias, _ = self._make_tensor(bias_data)
+        tensor_output, data_output = self._make_tensor(np.zeros_like(expected))
+
+        self.lib.nnc_conv7x7_s2(
+            ctypes.byref(tensor_input),
+            ctypes.byref(tensor_weight),
+            ctypes.byref(tensor_bias),
+            ctypes.byref(tensor_output),
+        )
+
+        max_diff = self._compare_results(data_output, expected)
+        print(f"  conv7x7_s2 max_diff: {max_diff}")
+
+    def test_conv_relu7x7_s2_matches_reference(self):
+        """Test specialized nnc_conv_relu7x7_s2 kernel."""
+        input_data = np.arange(1, 1 + (1 * 3 * 9 * 9), dtype=np.float32).reshape(1, 3, 9, 9)
+        weight_data = (
+            np.arange(1, 1 + (2 * 3 * 7 * 7), dtype=np.float32).reshape(2, 3, 7, 7) / 50.0
+        )
+        bias_data = np.array([0.5, -1.25], dtype=np.float32)
+        expected = np.maximum(
+            _reference_conv_nchw(
+                input_data,
+                weight_data,
+                bias_data,
+                stride_h=2,
+                stride_w=2,
+                pad_h=3,
+                pad_w=3,
+            ),
+            0.0,
+        )
+
+        tensor_input, _ = self._make_tensor(input_data)
+        tensor_weight, _ = self._make_tensor(weight_data)
+        tensor_bias, _ = self._make_tensor(bias_data)
+        tensor_output, data_output = self._make_tensor(np.zeros_like(expected))
+
+        self.lib.nnc_conv_relu7x7_s2(
+            ctypes.byref(tensor_input),
+            ctypes.byref(tensor_weight),
+            ctypes.byref(tensor_bias),
+            ctypes.byref(tensor_output),
+        )
+
+        max_diff = self._compare_results(data_output, expected)
+        print(f"  conv_relu7x7_s2 max_diff: {max_diff}")
+
     def test_matmul_2d(self):
         """Test nnc_matmul with 2D matrices."""
         a = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], dtype=np.float32)  # [2, 3]

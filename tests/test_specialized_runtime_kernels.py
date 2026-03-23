@@ -44,6 +44,20 @@ def test_conv_relu1x1_specialized_entrypoint_is_not_generic_wrapper() -> None:
     assert "nnc_conv_relu(" not in body
 
 
+def test_conv7x7_specialized_entrypoint_is_not_generic_wrapper() -> None:
+    source = Path("/home/ayd/code/nnc-py/runtime/x86/ops.c").read_text()
+    body = _extract_function_body(source, "void nnc_conv7x7_s2(")
+
+    assert "nnc_conv(" not in body
+
+
+def test_conv_relu7x7_specialized_entrypoint_is_not_generic_wrapper() -> None:
+    source = Path("/home/ayd/code/nnc-py/runtime/x86/ops.c").read_text()
+    body = _extract_function_body(source, "void nnc_conv_relu7x7_s2(")
+
+    assert "nnc_conv_relu(" not in body
+
+
 def test_gemm_nt_specialized_entrypoint_is_not_generic_wrapper() -> None:
     source = Path("/home/ayd/code/nnc-py/runtime/x86/ops.c").read_text()
     body = _extract_function_body(source, "void nnc_gemm_nt(")

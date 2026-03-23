@@ -1296,6 +1296,156 @@ static void nnc_conv1x1_impl(
     }
 }
 
+static inline double nnc_conv7x7_samepad_stride2_interior_accumulate(
+    const float* batch_input,
+    const float* weight_out,
+    int C_in,
+    int W_in,
+    int64_t input_channel_stride,
+    int64_t weight_channel_stride,
+    int h_out_idx,
+    int w_out_idx,
+    double bias_value
+) {
+    int input_h = (h_out_idx * 2) - 3;
+    int input_w = (w_out_idx * 2) - 3;
+    double sum = bias_value;
+
+    for (int c_in = 0; c_in < C_in; c_in++) {
+        const float* input_channel = batch_input + ((int64_t)c_in * input_channel_stride);
+        const float* input_ptr = input_channel + ((int64_t)input_h * W_in) + input_w;
+        const float* weight_ptr = weight_out + ((int64_t)c_in * weight_channel_stride);
+
+        for (int kh = 0; kh < 7; kh++) {
+            const float* input_row = input_ptr + ((int64_t)kh * W_in);
+            const float* weight_row = weight_ptr + ((int64_t)kh * 7);
+
+            sum += (double)input_row[0] * (double)weight_row[0];
+            sum += (double)input_row[1] * (double)weight_row[1];
+            sum += (double)input_row[2] * (double)weight_row[2];
+            sum += (double)input_row[3] * (double)weight_row[3];
+            sum += (double)input_row[4] * (double)weight_row[4];
+            sum += (double)input_row[5] * (double)weight_row[5];
+            sum += (double)input_row[6] * (double)weight_row[6];
+        }
+    }
+
+    return sum;
+}
+
+static void nnc_conv7x7_s2_impl(
+    Tensor* input,
+    Tensor* weight,
+    Tensor* bias,
+    Tensor* output,
+    int activation_kind,
+    const char* op_name
+) {
+    if (!input || !weight || !output) {
+        fprintf(stderr, "%s: NULL tensor pointer\n", op_name);
+        fflush(stderr);
+        return;
+    }
+    if (!input->data || !weight->data || !output->data) {
+        fprintf(stderr, "%s: NULL data pointer\n", op_name);
+        fflush(stderr);
+        return;
+    }
+    if (!input->shape || !weight->shape || !output->shape) {
+        fprintf(stderr, "%s: NULL shape pointer\n", op_name);
+        fflush(stderr);
+        return;
+    }
+    if (input->ndim != 4 || weight->ndim != 4 || output->ndim != 4) {
+        fprintf(stderr, "%s: expected 4D tensors\n", op_name);
+        fflush(stderr);
+        return;
+    }
+
+    int N = (int)input->shape[0];
+    int C_in = (int)input->shape[1];
+    int H_in = (int)input->shape[2];
+    int W_in = (int)input->shape[3];
+    int C_out = (int)weight->shape[0];
+    int H_out = (int)output->shape[2];
+    int W_out = (int)output->shape[3];
+
+    float* in_data = (float*)input->data;
+    float* weight_data = (float*)weight->data;
+    float* bias_data = bias ? (float*)bias->data : NULL;
+    float* out_data = (float*)output->data;
+
+    int64_t input_batch_stride = (int64_t)C_in * H_in * W_in;
+    int64_t input_channel_stride = (int64_t)H_in * W_in;
+    int64_t weight_out_stride = (int64_t)C_in * 49;
+    int64_t weight_channel_stride = 49;
+    int64_t output_batch_stride = (int64_t)C_out * H_out * W_out;
+    int64_t output_channel_stride = (int64_t)H_out * W_out;
+
+    int interior_h_begin = 2;
+    int interior_w_begin = 2;
+    int interior_h_end = (H_in - 4) / 2;
+    int interior_w_end = (W_in - 4) / 2;
+
+    for (int n = 0; n < N; n++) {
+        float* batch_input = in_data + ((int64_t)n * input_batch_stride);
+        float* batch_output = out_data + ((int64_t)n * output_batch_stride);
+
+        for (int c_out = 0; c_out < C_out; c_out++) {
+            float* output_channel = batch_output + ((int64_t)c_out * output_channel_stride);
+            float* weight_out = weight_data + ((int64_t)c_out * weight_out_stride);
+            double bias_value = bias_data ? (double)bias_data[c_out] : 0.0;
+
+            for (int h_out_idx = 0; h_out_idx < H_out; h_out_idx++) {
+                int is_interior_h = (
+                    h_out_idx >= interior_h_begin && h_out_idx <= interior_h_end
+                );
+                int h_base = (h_out_idx * 2) - 3;
+                float* output_row = output_channel + ((int64_t)h_out_idx * W_out);
+
+                for (int w_out_idx = 0; w_out_idx < W_out; w_out_idx++) {
+                    double sum;
+
+                    if (
+                        is_interior_h &&
+                        w_out_idx >= interior_w_begin &&
+                        w_out_idx <= interior_w_end
+                    ) {
+                        sum = nnc_conv7x7_samepad_stride2_interior_accumulate(
+                            batch_input,
+                            weight_out,
+                            C_in,
+                            W_in,
+                            input_channel_stride,
+                            weight_channel_stride,
+                            h_out_idx,
+                            w_out_idx,
+                            bias_value
+                        );
+                    } else {
+                        sum = nnc_conv_accumulate_point(
+                            batch_input,
+                            weight_out,
+                            C_in,
+                            H_in,
+                            W_in,
+                            7,
+                            7,
+                            input_channel_stride,
+                            weight_channel_stride,
+                            h_base,
+                            (w_out_idx * 2) - 3,
+                            bias_value
+                        );
+                    }
+
+                    output_row[w_out_idx] = nnc_apply_activation((float)sum, activation_kind);
+                }
+            }
+        }
+    }
+}
+
 void nnc_conv(
     Tensor* input, Tensor* weight, Tensor* bias, Tensor* output,
     int kernel_h, int kernel_w,
@@ -1343,7 +1493,14 @@ void nnc_conv3x3_s1(Tensor* input, Tensor* weight, Tensor* bias, Tensor* output)
 }
 
 void nnc_conv7x7_s2(Tensor* input, Tensor* weight, Tensor* bias, Tensor* output) {
-    nnc_conv(input, weight, bias, output, 7, 7, 2, 2, 3, 3);
+    nnc_conv7x7_s2_impl(
+        input,
+        weight,
+        bias,
+        output,
+        NNC_ACTIVATION_NONE,
+        "nnc_conv7x7_s2"
+    );
 }
 
 /* ============================================================================
@@ -3026,7 +3183,14 @@ void nnc_conv_relu3x3_s1(Tensor* input, Tensor* weight, Tensor* bias, Tensor* ou
 }
 
 void nnc_conv_relu7x7_s2(Tensor* input, Tensor* weight, Tensor* bias, Tensor* output) {
-    nnc_conv_relu(input, weight, bias, output, 7, 7, 2, 2, 3, 3);
+    nnc_conv7x7_s2_impl(
+        input,
+        weight,
+        bias,
+        output,
+        NNC_ACTIVATION_RELU,
+        "nnc_conv_relu7x7_s2"
+    );
 }
 
 void nnc_conv_sigmoid(
