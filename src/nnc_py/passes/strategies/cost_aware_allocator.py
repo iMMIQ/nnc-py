@@ -12,6 +12,7 @@ from nnc_py.passes.memory_strategy import (
     AllocationStrategy,
     MemoryAllocationPlan,
     MemoryAllocationStrategy,
+    MovePoint,
     ReloadPoint,
     SpillPoint,
     TensorAllocation,
@@ -120,6 +121,8 @@ class CostAwareAllocator(MemoryAllocationStrategy):
         next_slow_offset = 0
         peak_fast_end = 0
         peak_fast_footprint = 0
+        move_points: list[MovePoint] = []
+        move_bytes_total = 0
 
         def current_fast_footprint() -> int:
             if not resident:
@@ -206,6 +209,63 @@ class CostAwareAllocator(MemoryAllocationStrategy):
             peak_fast_end = max(peak_fast_end, next_fast_offset)
             return offset
 
+        def try_compact_and_allocate(
+            size: int,
+            node_idx: int,
+            protected: set[str],
+        ) -> Optional[int]:
+            nonlocal next_fast_offset, move_bytes_total
+
+            if any(tensor_name not in protected for tensor_name in resident):
+                return None
+
+            protected_resident = sorted(
+                (
+                    resident[tensor_name]
+                    for tensor_name in protected
+                    if tensor_name in resident
+                ),
+                key=lambda slot: slot.offset,
+            )
+            if not protected_resident:
+                return None
+
+            cursor = 0
+            compacted_layout: list[tuple[_ResidentTensor, int]] = []
+            total_protected = 0
+            for slot in protected_resident:
+                new_offset = align_offset(cursor)
+                compacted_layout.append((slot, new_offset))
+                total_protected = new_offset + slot.size
+                cursor = total_protected
+
+            if not self._fits_fast_memory_budget(
+                total_protected + align_offset(size),
+                capacity,
+            ):
+                return None
+
+            for slot, new_offset in compacted_layout:
+                assert new_offset <= slot.offset
+                if new_offset == slot.offset:
+                    continue
+
+                move_points.append(
+                    MovePoint(
+                        tensor_name=slot.name,
+                        at_node_idx=node_idx,
+                        from_offset=slot.offset,
+                        to_offset=new_offset,
+                        size=slot.size,
+                    )
+                )
+                move_bytes_total += slot.size
+                resident[slot.name] = _ResidentTensor(slot.name, new_offset, slot.size)
+
+            free_regions[:] = []
+            next_fast_offset = cursor
+            return try_allocate_fast_region(size)
+
         def evict_tensor(tensor_name: str, node_idx: int, spill_after_idx: int) -> None:
             slot = resident.get(tensor_name)
             if slot is None:
@@ -268,6 +328,9 @@ class CostAwareAllocator(MemoryAllocationStrategy):
                     )
 
                 if not candidates:
+                    offset = try_compact_and_allocate(size, node_idx, protected)
+                    if offset is not None:
+                        return offset
                     if not can_extend_fast_pool(size):
                         raise ValueError(
                             f"Cannot allocate {size} bytes at node {nodes[node_idx].name}: "
@@ -286,6 +349,9 @@ class CostAwareAllocator(MemoryAllocationStrategy):
                     max_memory=capacity,
                 )
                 if eviction_plan is None:
+                    offset = try_compact_and_allocate(size, node_idx, protected)
+                    if offset is not None:
+                        return offset
                     if not can_extend_fast_pool(size):
                         raise ValueError(
                             f"Cannot allocate {size} bytes at node {nodes[node_idx].name}: "
@@ -300,6 +366,10 @@ class CostAwareAllocator(MemoryAllocationStrategy):
                     evict_tensor(candidate["tensor_name"], node_idx, spill_after_idx)
 
                 offset = try_allocate_fast_region(size)
+                if offset is not None:
+                    return offset
+
+                offset = try_compact_and_allocate(size, node_idx, protected)
                 if offset is not None:
                     return offset
 
@@ -485,6 +555,8 @@ class CostAwareAllocator(MemoryAllocationStrategy):
             spill_bytes=self._spill_bytes,
             reload_bytes=self._reload_bytes,
             total_transfer_bytes=self._spill_bytes + self._reload_bytes,
+            move_points=move_points,
+            move_bytes=move_bytes_total,
             node_memory_usage=node_memory_usage,
         )
 
