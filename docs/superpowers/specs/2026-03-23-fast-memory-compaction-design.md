@@ -61,17 +61,23 @@ In `CostAwareAllocator.make_space`, the current failure path raises `ValueError`
 4. cursor = 0
 5. for each protected tensor t (low-to-high offset order):
      new_offset = align(cursor, 16)
+     assert new_offset <= resident[t].offset   # memmove safety invariant
      if new_offset != resident[t].offset:
          emit MovePoint(t, node_idx, old_offset, new_offset, t.size)
+         move_bytes += t.size
          update resident[t].offset = new_offset
-         update tensor_allocations[t].offset = new_offset
      cursor = new_offset + t.size
-6. rebuild free_regions = single region [cursor, capacity)
+6. free_regions.clear(); free_regions.append((cursor, capacity - cursor))
 7. next_fast_offset = cursor
+   # peak_fast_end is NOT modified — it is a historical high-water mark
 8. return try_allocate_fast_region(size)
 ```
 
-Processing order (low-to-high offset) ensures `memmove` safety: each tensor moves to a lower-or-equal address, so it never overwrites data that hasn't been moved yet.
+**memmove safety**: Processing order is low-to-high original offset. The cursor starts at 0 and advances by exactly `align(size)` per tensor. Since original offsets were non-overlapping and at least that far apart (due to alignment gaps between them), `new_offset <= old_offset` always holds. Each tensor moves to a lower-or-equal address, so it never overwrites data that hasn't been moved yet. The debug assertion in step 5 guards this invariant.
+
+**`resident` vs `tensor_allocations` updates**: Step 5 updates `resident[t].offset` which is the authoritative source — the post-loop finalization pass (lines 388-418 in the existing allocator) reads from `resident` to produce the final `tensor_allocations` entries. The `tensor_allocations` update during compaction is not strictly necessary but keeps mid-loop reads consistent; finalization will overwrite it regardless.
+
+**`peak_fast_end` invariant**: Compaction must NOT modify `peak_fast_end`. This variable tracks the historical maximum extent of the fast pool and is used in the final `buffer_size` computation. Resetting it would produce a too-small buffer.
 
 ### Pre-check: Node Demand Validation
 
@@ -91,7 +97,7 @@ if max_demand > capacity:
     )
 ```
 
-This gives users a clear error message upfront instead of a confusing failure mid-allocation. The check is conservative (does not account for inplace reuse), so real demand may be lower.
+This gives users a clear error message upfront instead of a confusing failure mid-allocation. The check is conservative: it does not account for inplace reuse, and if a tensor name appears in both `node.inputs` and `node.outputs` it is counted twice. Real demand may be lower.
 
 ### Codegen Changes
 
@@ -103,6 +109,8 @@ In `x86_backend.py`, the per-node execution order becomes:
 3. Execute operator
 4. SpillPoints after this node
 ```
+
+MovePoints must precede ReloadPoints because the allocator computes reload target offsets *after* compaction frees contiguous space. Reordering would place reloaded data at offsets that assume compaction already happened.
 
 Generated C code for each MovePoint:
 
