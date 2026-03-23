@@ -79,8 +79,9 @@ class PassManager:
         from nnc_py.passes.identity_elimination import IdentityEliminationPass
         from nnc_py.passes.liveness import LivenessAnalysisPass
         from nnc_py.passes.memory_planning import MemoryPlanningPassV2
-        from nnc_py.passes.spill import SpillAnalysisPass
         from nnc_py.passes.pattern_fusion import PatternFusionPass
+        from nnc_py.passes.prepack_lowering import PrepackLoweringPass
+        from nnc_py.passes.spill import SpillAnalysisPass
 
         # O0: Essential passes only (liveness + memory planning)
         # These are needed for code generation even without optimization
@@ -113,6 +114,7 @@ class PassManager:
                 IdentityEliminationPass(),
                 DeadCodeEliminationPass(),
                 PatternFusionPass(),      # NEW: Pattern-based fusion
+                PrepackLoweringPass(),    # Compile-time lowering and weight prepack
                 DominatorFusionPass(),     # NEW: Dominator-based fusion
                 LivenessAnalysisPass(),
                 MemoryPlanningPassV2(),

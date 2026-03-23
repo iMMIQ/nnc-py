@@ -71,6 +71,7 @@ class CEmitter:
         self.write_line(f"/* {node.op_type.value}: {node.name} */")
         self.write_line(f"void {func_name}(void) {{")
         self.indent += 1
+        self._emit_lowering_comment(node)
 
         # Emit operator call
         self._emit_operator_call(ctx, node)
@@ -78,6 +79,29 @@ class CEmitter:
         self.indent -= 1
         self.write_line("}")
         self.write_line()
+
+    def _emit_lowering_comment(self, node: Node) -> None:
+        """Emit lowering metadata as a comment for generated code inspection."""
+        lowering = node.metadata.get("lowering")
+        if not isinstance(lowering, dict) or not lowering:
+            return
+
+        ordered_keys = [
+            "kernel_family",
+            "kernel_kind",
+            "weight_pack",
+        ]
+        parts = []
+        for key in ordered_keys:
+            if key in lowering:
+                parts.append(f"{key}={lowering[key]}")
+
+        for key in sorted(lowering):
+            if key not in ordered_keys:
+                parts.append(f"{key}={lowering[key]}")
+
+        if parts:
+            self.write_line(f"/* lowering: {', '.join(parts)} */")
 
     def _emit_operator_call(self, ctx: CompileContext, node: Node) -> None:
         """Emit operator function call."""
