@@ -17,8 +17,14 @@ _WEIGHTED_OP_FAMILIES = {"conv2d", "gemm", "matmul"}
 class GenericBlockedLayout:
     """Target-agnostic blocked layout choice for one tensor role."""
 
-    name: str
+    kind: GenericBlockedLayoutKind
     blocked_axes: AxisNames
+
+    @property
+    def name(self) -> str:
+        """Compatibility view for tests and metadata consumers expecting a name."""
+
+        return self.kind.value
 
 
 @dataclass(frozen=True)
@@ -29,6 +35,8 @@ class LayoutPlan:
     op_family: str
     input_layout: GenericBlockedLayout
     weight_layout: GenericBlockedLayout | None = None
+    # Reserved placeholder for a later backend-mapping stage. This pass never
+    # assigns a target-physical layout in phase 1, so the field remains None.
     target_physical_layout: str | None = None
 
 
@@ -44,7 +52,11 @@ class LayoutPlanningPass(PassBase):
 
 
 def build_generic_blocked_layouts(ctx: CompileContext) -> dict[str, LayoutPlan]:
-    """Choose generic blocked layouts for supported scheduled nodes."""
+    """Choose generic blocked layouts for supported scheduled nodes.
+
+    This pass only selects target-agnostic blocked layouts. Target-physical
+    mapping is intentionally deferred, and `target_physical_layout` stays None.
+    """
 
     schedule_candidates: dict[str, ScheduleCandidate] = ctx.metadata.get(
         "schedule_candidates", {}
@@ -53,13 +65,13 @@ def build_generic_blocked_layouts(ctx: CompileContext) -> dict[str, LayoutPlan]:
 
     for node_name, candidate in schedule_candidates.items():
         input_layout = GenericBlockedLayout(
-            name=GenericBlockedLayoutKind.BLOCKED_ACTIVATION.value,
+            kind=GenericBlockedLayoutKind.BLOCKED_ACTIVATION,
             blocked_axes=("C",),
         )
         weight_layout = None
         if candidate.op_family in _WEIGHTED_OP_FAMILIES:
             weight_layout = GenericBlockedLayout(
-                name=GenericBlockedLayoutKind.BLOCKED_WEIGHT.value,
+                kind=GenericBlockedLayoutKind.BLOCKED_WEIGHT,
                 blocked_axes=("K", "C"),
             )
 

@@ -2,7 +2,7 @@ from nnc_py.ir.context import CompileContext
 from nnc_py.ir.graph import Graph
 from nnc_py.ir.node import Node, OpType
 from nnc_py.ir.tensor import TensorShape, TensorType
-from nnc_py.ir.types import DataType, MemoryLayout
+from nnc_py.ir.types import DataType, GenericBlockedLayoutKind, MemoryLayout
 from nnc_py.passes import LayoutPlanningPass, ScheduleCandidate
 
 
@@ -106,6 +106,10 @@ def test_layout_planning_assigns_generic_blocked_layout_to_conv_activation_and_w
     plan = ctx.metadata["layout_plans"]["conv0"]
     assert plan.input_layout.name == "blocked_activation"
     assert plan.weight_layout.name == "blocked_weight"
+    assert plan.input_layout.kind is GenericBlockedLayoutKind.BLOCKED_ACTIVATION
+    assert plan.input_layout.blocked_axes == ("C",)
+    assert plan.weight_layout.kind is GenericBlockedLayoutKind.BLOCKED_WEIGHT
+    assert plan.weight_layout.blocked_axes == ("K", "C")
     assert plan.target_physical_layout is None
 
 
@@ -117,5 +121,7 @@ def test_layout_planning_uses_activation_blocking_for_supported_non_weight_ops()
 
     plan = ctx.metadata["layout_plans"]["pool0"]
     assert plan.input_layout.name == "blocked_activation"
+    assert plan.input_layout.kind is GenericBlockedLayoutKind.BLOCKED_ACTIVATION
+    assert plan.input_layout.blocked_axes == ("C",)
     assert plan.weight_layout is None
     assert plan.target_physical_layout is None
