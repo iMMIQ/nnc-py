@@ -24,3 +24,10 @@ class MemoryLayout(Enum):
     NCHW = "nchw"
     NHWC = "nhwc"
     OIHW = "oihw"  # Weight layout for convolutions
+
+
+class GenericBlockedLayoutKind(Enum):
+    """Target-agnostic blocked layout classes used during lowering."""
+
+    BLOCKED_ACTIVATION = "blocked_activation"
+    BLOCKED_WEIGHT = "blocked_weight"

@@ -26,6 +26,7 @@ from nnc_py.passes.dead_code_elimination import DeadCodeEliminationPass
 from nnc_py.passes.identity_elimination import IdentityEliminationPass
 from nnc_py.passes.pattern_fusion import PatternFusionPass
 from nnc_py.passes.prepack_lowering import PrepackLoweringPass
+from nnc_py.passes.layout_planning import LayoutPlanningPass, LayoutPlan
 from nnc_py.passes.schedule_analysis import ScheduleAnalysisPass, ScheduleCandidate
 from nnc_py.passes.dominator_fusion import DominatorFusionPass
 from nnc_py.passes.fusion_groups import FusionGroup, GroupArena
@@ -67,6 +68,8 @@ __all__ = [
     "IdentityEliminationPass",
     "PatternFusionPass",
     "PrepackLoweringPass",
+    "LayoutPlanningPass",
+    "LayoutPlan",
     "ScheduleAnalysisPass",
     "ScheduleCandidate",
     "DominatorFusionPass",
