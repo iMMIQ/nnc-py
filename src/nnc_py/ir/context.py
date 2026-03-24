@@ -1,9 +1,12 @@
 """Compilation context for passing information through the pipeline."""
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from nnc_py.ir.graph import Graph
+
+if TYPE_CHECKING:
+    from nnc_py.ir.execution_plan import NodeExecutionPlan
 
 
 @dataclass
@@ -30,3 +33,16 @@ class CompileContext:
             self.node_symbols = {}
         if self.metadata is None:
             self.metadata = {}
+
+    @property
+    def node_execution_plans(self) -> dict[str, "NodeExecutionPlan"]:
+        """Typed access to node execution plans stored in metadata."""
+
+        from nnc_py.ir.execution_plan import get_node_execution_plans
+
+        return get_node_execution_plans(self)
+
+    def get_node_execution_plan(self, node_name: str) -> "NodeExecutionPlan | None":
+        """Return a single node execution plan by name."""
+
+        return self.node_execution_plans.get(node_name)

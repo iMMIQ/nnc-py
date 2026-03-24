@@ -2,6 +2,9 @@
 
 from enum import Enum
 
+AxisName = str
+AxisNames = tuple[str, ...]
+
 
 class DataType(Enum):
     """Data type enumeration."""
