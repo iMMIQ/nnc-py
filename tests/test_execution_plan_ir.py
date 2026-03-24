@@ -11,5 +11,7 @@ def test_execution_plan_records_tile_and_layout_metadata():
     )
 
     assert plan.node_name == "conv0"
+    assert plan.op_family == "conv2d"
+    assert plan.tile_axes == ("h", "w")
     assert plan.layout_class is LayoutClass.BLOCKED_ACTIVATION
-    assert MemoryRegionKind.SCRATCH in plan.memory_regions
+    assert plan.memory_regions == (MemoryRegionKind.TILE, MemoryRegionKind.SCRATCH)
