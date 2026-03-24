@@ -139,6 +139,59 @@ def _reference_gemm(
     return result.astype(np.float32, copy=False)
 
 
+def _reference_maxpool2d_nchw(
+    input_data: np.ndarray,
+    *,
+    kernel_h: int,
+    kernel_w: int,
+    stride_h: int,
+    stride_w: int,
+    pad_h: int,
+    pad_w: int,
+) -> np.ndarray:
+    n, c, h_in, w_in = input_data.shape
+    h_out = ((h_in + 2 * pad_h - kernel_h) // stride_h) + 1
+    w_out = ((w_in + 2 * pad_w - kernel_w) // stride_w) + 1
+    output = np.full((n, c, h_out, w_out), np.finfo(np.float32).min, dtype=np.float32)
+
+    for batch in range(n):
+        for channel in range(c):
+            for h_out_idx in range(h_out):
+                h_start_raw = h_out_idx * stride_h - pad_h
+                h_end_raw = h_start_raw + kernel_h
+                h_start = max(0, h_start_raw)
+                h_end = min(h_in, h_end_raw)
+                for w_out_idx in range(w_out):
+                    w_start_raw = w_out_idx * stride_w - pad_w
+                    w_end_raw = w_start_raw + kernel_w
+                    w_start = max(0, w_start_raw)
+                    w_end = min(w_in, w_end_raw)
+                    if h_start >= h_end or w_start >= w_end:
+                        continue
+                    output[batch, channel, h_out_idx, w_out_idx] = np.max(
+                        input_data[batch, channel, h_start:h_end, w_start:w_end]
+                    )
+
+    return output
+
+
+def test_reference_maxpool2d_handles_empty_windows():
+    input_data = np.arange(4, dtype=np.float32).reshape(1, 1, 2, 2)
+
+    result = _reference_maxpool2d_nchw(
+        input_data,
+        kernel_h=1,
+        kernel_w=1,
+        stride_h=1,
+        stride_w=1,
+        pad_h=4,
+        pad_w=4,
+    )
+
+    assert result.shape == (1, 1, 10, 10)
+    assert result[0, 0, 0, 0] == np.finfo(np.float32).min
+
+
 def test_conv_debug_logging_is_disabled_by_default(tmp_path):
     exe_path = _build_conv_logging_probe(tmp_path)
 
@@ -310,6 +363,19 @@ clean:
         # nnc_softmax(Tensor* input, Tensor* output, int axis)
         self.lib.nnc_softmax.argtypes = [ctypes.POINTER(Tensor), ctypes.POINTER(Tensor), ctypes.c_int]
         self.lib.nnc_softmax.restype = None
+
+        # nnc_maxpool2d(Tensor* input, Tensor* output, ...)
+        self.lib.nnc_maxpool2d.argtypes = [
+            ctypes.POINTER(Tensor),
+            ctypes.POINTER(Tensor),
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+        ]
+        self.lib.nnc_maxpool2d.restype = None
 
         # nnc_matmul(Tensor* a, Tensor* b, Tensor* output)
         self.lib.nnc_matmul.argtypes = [ctypes.POINTER(Tensor), ctypes.POINTER(Tensor), ctypes.POINTER(Tensor)]
@@ -543,6 +609,44 @@ clean:
 
         max_diff = self._compare_results(data_out, expected, tol=1e-4)
         print(f"  softmax max_diff: {max_diff}")
+
+    def test_maxpool2d_matches_reference(self):
+        """Test nnc_maxpool2d against a numpy reference."""
+        input_data = np.array(
+            [
+                [
+                    [[1.0, -2.0, 3.0, 0.5], [2.5, 0.0, -1.0, 4.0], [-3.0, 2.0, 1.0, -0.5], [1.5, -1.5, 2.5, 3.0]],
+                    [[-1.0, 0.5, 2.0, -2.5], [3.0, -1.5, 0.25, 1.5], [1.25, 2.5, -3.0, 0.5], [-2.0, 1.0, 1.5, -1.0]],
+                ]
+            ],
+            dtype=np.float32,
+        )
+        expected = _reference_maxpool2d_nchw(
+            input_data,
+            kernel_h=3,
+            kernel_w=3,
+            stride_h=2,
+            stride_w=2,
+            pad_h=1,
+            pad_w=1,
+        )
+
+        tensor_input, _ = self._make_tensor(input_data)
+        tensor_output, data_output = self._make_tensor(np.zeros_like(expected))
+
+        self.lib.nnc_maxpool2d(
+            ctypes.byref(tensor_input),
+            ctypes.byref(tensor_output),
+            3,
+            3,
+            2,
+            2,
+            1,
+            1,
+        )
+
+        max_diff = self._compare_results(data_output, expected)
+        print(f"  maxpool2d max_diff: {max_diff}")
 
     def test_conv_no_padding_matches_reference(self):
         """Test nnc_conv fast path for no-padding 3x3 convolution."""

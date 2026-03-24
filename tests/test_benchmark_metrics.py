@@ -1,6 +1,10 @@
 import pytest
 
-from benchmarks.metrics import collect_artifact_metrics, extract_memory_pool_sizes
+from benchmarks.metrics import (
+    collect_artifact_metrics,
+    extract_memory_pool_sizes,
+    has_memory_layout_defines,
+)
 
 
 def test_extract_memory_pool_sizes(tmp_path):
@@ -54,6 +58,56 @@ def test_collect_artifact_metrics_supports_single_pool_layout(tmp_path):
     assert metrics["constants_bytes"] == 4
     assert metrics["binary_size_bytes"] == 6
     assert metrics["total_static_bytes"] == 516
+
+
+def test_benchmark_metrics_reads_tile_and_scratch_pool_sizes(tmp_path):
+    build_dir = tmp_path / "build"
+    build_dir.mkdir()
+    (build_dir / "tensors.c").write_text(
+        "#define NNC_FAST_MEMORY_SIZE 524288\n"
+        "#define NNC_TILE_MEMORY_SIZE 262144\n"
+        "#define NNC_SCRATCH_MEMORY_SIZE 131072\n"
+    )
+    exe = build_dir / "resnet18_bench"
+    exe.write_bytes(b"binary")
+
+    metrics = collect_artifact_metrics(build_dir, exe)
+    assert metrics["fast_memory_bytes"] == 524288
+    assert metrics["tile_memory_bytes"] == 262144
+    assert metrics["scratch_memory_bytes"] == 131072
+    assert metrics["total_static_bytes"] == 524288
+
+
+def test_benchmark_metrics_collects_generic_logical_region_sizes(tmp_path):
+    build_dir = tmp_path / "build"
+    build_dir.mkdir()
+    (build_dir / "tensors.c").write_text(
+        "#define NNC_FAST_MEMORY_SIZE 524288\n"
+        "#define NNC_TILE_MEMORY_SIZE 262144\n"
+        "#define NNC_SCRATCH_MEMORY_SIZE 131072\n"
+        "#define NNC_PERSISTENT_MEMORY_SIZE 65536\n"
+    )
+    exe = build_dir / "resnet18_bench"
+    exe.write_bytes(b"binary")
+
+    metrics = collect_artifact_metrics(build_dir, exe)
+    assert metrics["tile_memory_bytes"] == 262144
+    assert metrics["scratch_memory_bytes"] == 131072
+    assert metrics["logical_region_bytes"] == {
+        "tile": 262144,
+        "scratch": 131072,
+        "persistent": 65536,
+    }
+
+
+def test_has_memory_layout_defines_accepts_tiled_region_metadata(tmp_path):
+    tensors_c = tmp_path / "tensors.c"
+    tensors_c.write_text(
+        "#define NNC_FAST_MEMORY_SIZE 524288\n"
+        "#define NNC_TILE_MEMORY_SIZE 262144\n"
+    )
+
+    assert has_memory_layout_defines(tensors_c) is True
 
 
 def test_extract_memory_pool_sizes_missing_tensors(tmp_path):

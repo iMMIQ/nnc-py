@@ -3,6 +3,10 @@ from pathlib import Path
 
 
 _MEMORY_DEFINE_RE = r"#define\s+{name}\s+\(?([0-9][0-9_]*)\)?[uUlL]*"
+_LOGICAL_REGION_DEFINE_RE = re.compile(
+    r"#define\s+NNC_([A-Z][A-Z0-9_]*)_MEMORY_SIZE\s+\(?([0-9][0-9_]*)\)?[uUlL]*"
+)
+_RESERVED_REGION_NAMES = {"FAST", "SLOW"}
 
 
 def _extract_defined_size(content: str, name: str) -> int:
@@ -14,11 +18,20 @@ def _extract_defined_size(content: str, name: str) -> int:
     return int(numeric) if numeric else 0
 
 
+def _extract_logical_region_sizes(content: str) -> dict[str, int]:
+    logical_region_bytes: dict[str, int] = {}
+    for region_name, raw_size in _LOGICAL_REGION_DEFINE_RE.findall(content):
+        if region_name in _RESERVED_REGION_NAMES:
+            continue
+        logical_region_bytes[region_name.lower()] = int(raw_size.replace("_", ""))
+    return logical_region_bytes
+
+
 def has_memory_layout_defines(tensors_c_path: Path) -> bool:
     if not tensors_c_path.exists():
         return False
     content = tensors_c_path.read_text()
-    return any(
+    return bool(_LOGICAL_REGION_DEFINE_RE.search(content)) or any(
         define in content
         for define in (
             "NNC_MEMORY_SIZE",
@@ -33,6 +46,7 @@ def extract_memory_pool_sizes(tensors_c_path: Path) -> dict[str, int]:
     single_pool_bytes = _extract_defined_size(content, "NNC_MEMORY_SIZE")
     fast_memory_bytes = _extract_defined_size(content, "NNC_FAST_MEMORY_SIZE")
     slow_memory_bytes = _extract_defined_size(content, "NNC_SLOW_MEMORY_SIZE")
+    logical_region_bytes = _extract_logical_region_sizes(content)
 
     if single_pool_bytes and not fast_memory_bytes and not slow_memory_bytes:
         fast_memory_bytes = single_pool_bytes
@@ -40,6 +54,9 @@ def extract_memory_pool_sizes(tensors_c_path: Path) -> dict[str, int]:
     return {
         "fast_memory_bytes": fast_memory_bytes,
         "slow_memory_bytes": slow_memory_bytes,
+        "tile_memory_bytes": logical_region_bytes.get("tile", 0),
+        "scratch_memory_bytes": logical_region_bytes.get("scratch", 0),
+        "logical_region_bytes": logical_region_bytes,
     }
 
 

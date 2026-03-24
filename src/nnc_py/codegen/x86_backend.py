@@ -97,6 +97,7 @@ class X86Backend(BackendBase):
 
         # Check for new MemoryAllocationPlan
         alloc_plan = get_memory_allocation_plan(ctx)
+        tile_aware_runtime_plan = self._get_tile_aware_runtime_plan(ctx, alloc_plan)
 
         # Check for legacy spill plan
         spill_plan = get_spill_plan(ctx)
@@ -110,7 +111,9 @@ class X86Backend(BackendBase):
             source = self._generate_source_with_spill(ctx, spill_plan)
         else:
             # No overflow, use standard emitter
-            emitter = CEmitter()
+            emitter = CEmitter(
+                tile_aware_wrapper_nodes=tile_aware_runtime_plan.get("wrapper_nodes", {})
+            )
             source = emitter.emit(ctx)
 
         # Add debug macros if in debug mode
@@ -119,6 +122,318 @@ class X86Backend(BackendBase):
         # Inject debug code if enabled
         source = self._inject_debug_into_nnc_run(source, ctx)
         return self._append_entry_point_alias(source, ctx)
+
+    def _get_tile_aware_runtime_plan(
+        self,
+        ctx: CompileContext,
+        alloc_plan: "MemoryAllocationPlan | None",
+    ) -> dict[str, Any]:
+        """Return a conservative tile-aware runtime plan when the graph is safely supported."""
+        if alloc_plan is None:
+            return {}
+        if alloc_plan.strategy_name != "tile_regions_v3":
+            return {}
+        if not alloc_plan.logical_regions:
+            return {}
+
+        execution_plans = ctx.metadata.get("node_execution_plans")
+        if not isinstance(execution_plans, dict) or not execution_plans:
+            return {}
+
+        region_sizes = ctx.metadata.get("node_execution_plan_region_sizes")
+        if not isinstance(region_sizes, dict):
+            return {}
+
+        execution_groups = self._collect_tile_aware_execution_groups(ctx, execution_plans)
+        if not execution_groups:
+            return {}
+
+        tensor_bindings: dict[str, dict[str, Any]] = {}
+        wrapper_nodes: dict[str, dict[str, Any]] = {}
+        logical_region_names = ", ".join(sorted(alloc_plan.logical_regions))
+
+        for execution_group in execution_groups:
+            required_fast_bytes = max(
+                (
+                    self._tile_aware_tensor_size_bytes(ctx, tensor_name)
+                    for tensor_name in execution_group["fast_tensors"]
+                ),
+                default=0,
+            )
+            selected_region = self._select_tile_aware_region(alloc_plan, required_fast_bytes)
+            if selected_region is None:
+                return {}
+
+            group_label = " -> ".join(execution_group["node_names"])
+            for node_name in execution_group["node_names"]:
+                plan = execution_plans.get(node_name)
+                wrapper_nodes[node_name] = {
+                    "comment": self._build_tile_aware_wrapper_comment(
+                        group_label=group_label,
+                        logical_region_names=logical_region_names,
+                        plan=plan,
+                    )
+                }
+
+            for tensor_name in execution_group["external_inputs"]:
+                tensor_bindings.setdefault(
+                    tensor_name,
+                    self._make_tile_aware_external_binding(ctx, tensor_name),
+                )
+            for tensor_name in execution_group["static_tensors"]:
+                tensor_bindings[tensor_name] = self._make_tile_aware_static_binding(ctx, tensor_name)
+            for tensor_name in execution_group["fast_tensors"]:
+                tensor_bindings[tensor_name] = {
+                    "kind": "fast_pool",
+                    "offset": selected_region.offset,
+                    "region": selected_region.name,
+                }
+
+        for tensor_name in ctx.graph.tensors:
+            if tensor_name in ctx.graph.constants:
+                continue
+            tensor_bindings.setdefault(
+                tensor_name,
+                self._make_tile_aware_external_binding(ctx, tensor_name),
+            )
+
+        return {
+            "wrapper_nodes": wrapper_nodes,
+            "tensor_bindings": tensor_bindings,
+        }
+
+    def _build_tile_aware_wrapper_comment(
+        self,
+        *,
+        group_label: str,
+        logical_region_names: str,
+        plan: Any | None,
+    ) -> str:
+        """Describe the late physical-layout mapping intent without materializing it."""
+        generic_layout = getattr(getattr(plan, "layout_class", None), "value", "unknown")
+        target_physical_layout = getattr(plan, "target_physical_layout", None)
+        return (
+            f"tile-aware wrapper: execution_group={group_label}, "
+            f"logical_regions={logical_region_names}, "
+            f"generic_blocked_layout={generic_layout}, "
+            f"target_physical_layout={target_physical_layout}, "
+            "late_physical_mapping=deferred"
+        )
+
+    def _collect_tile_aware_execution_groups(
+        self,
+        ctx: CompileContext,
+        execution_plans: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        supported_families = {"conv2d", "maxpool"}
+        execution_groups: list[dict[str, Any]] = []
+        visited_node_names: set[str] = set()
+
+        for node in ctx.graph.topological_sort():
+            if not node.is_computational():
+                continue
+            if node.name in visited_node_names:
+                continue
+
+            plan = execution_plans.get(node.name)
+            if plan is None or getattr(plan, "op_family", None) not in supported_families:
+                continue
+            if node.name not in ctx.metadata.get("node_execution_plan_region_sizes", {}):
+                continue
+            if len(node.outputs) != 1:
+                continue
+
+            group_nodes = [node]
+            flow_tensor_name = node.outputs[0]
+            while True:
+                successor = self._get_tile_compatible_successor(
+                    ctx,
+                    flow_tensor_name,
+                    execution_plans,
+                    visited_node_names,
+                )
+                if successor is None:
+                    break
+                group_nodes.append(successor)
+                flow_tensor_name = successor.outputs[0]
+
+            group_node_names = {group_node.name for group_node in group_nodes}
+            produced_tensor_names = {
+                tensor_name
+                for group_node in group_nodes
+                for tensor_name in group_node.outputs
+            }
+            internal_tensor_names = {
+                tensor_name
+                for tensor_name in produced_tensor_names
+                if any(
+                    consumer.name in group_node_names
+                    for consumer in ctx.graph.get_consumers(tensor_name)
+                )
+            }
+
+            if any(
+                any(
+                    consumer.name not in group_node_names
+                    for consumer in ctx.graph.get_consumers(tensor_name)
+                )
+                for tensor_name in internal_tensor_names
+            ):
+                continue
+
+            external_inputs: list[str] = []
+            for group_node in group_nodes:
+                for input_name in group_node.inputs:
+                    if input_name in produced_tensor_names or input_name in ctx.graph.constants:
+                        continue
+                    if input_name not in external_inputs:
+                        external_inputs.append(input_name)
+
+            fast_tensors = list(internal_tensor_names)
+            static_tensors: list[str] = []
+            for tensor_name in group_nodes[-1].outputs:
+                outside_consumers = [
+                    consumer
+                    for consumer in ctx.graph.get_consumers(tensor_name)
+                    if consumer.name not in group_node_names
+                ]
+                if outside_consumers:
+                    static_tensors.append(tensor_name)
+                    continue
+                if tensor_name in ctx.graph.outputs or not ctx.graph.get_consumers(tensor_name):
+                    fast_tensors.append(tensor_name)
+                    continue
+                static_tensors.append(tensor_name)
+
+            execution_groups.append(
+                {
+                    "node_names": [group_node.name for group_node in group_nodes],
+                    "external_inputs": external_inputs,
+                    "fast_tensors": list(dict.fromkeys(fast_tensors)),
+                    "static_tensors": list(dict.fromkeys(static_tensors)),
+                }
+            )
+            visited_node_names.update(group_node_names)
+
+        return execution_groups
+
+    def _get_tile_compatible_successor(
+        self,
+        ctx: CompileContext,
+        flow_tensor_name: str,
+        execution_plans: dict[str, Any],
+        visited_node_names: set[str],
+    ) -> Node | None:
+        consumers = [
+            consumer
+            for consumer in ctx.graph.get_consumers(flow_tensor_name)
+            if consumer.is_computational()
+        ]
+        if len(consumers) != 1:
+            return None
+
+        consumer = consumers[0]
+        if consumer.name in visited_node_names or consumer.name in execution_plans:
+            return None
+        if len(consumer.outputs) != 1:
+            return None
+
+        if consumer.op_type == OpType.RELU:
+            if tuple(consumer.inputs) != (flow_tensor_name,):
+                return None
+            if not self._tile_aware_tensors_match(ctx, flow_tensor_name, consumer.outputs[0]):
+                return None
+            return consumer
+
+        if consumer.op_type in {OpType.ADD, OpType.FUSED_ADD_RELU}:
+            if len(consumer.inputs) != 2 or flow_tensor_name not in consumer.inputs:
+                return None
+            other_input_name = next(
+                input_name for input_name in consumer.inputs if input_name != flow_tensor_name
+            )
+            if not self._tile_aware_tensors_match(ctx, flow_tensor_name, consumer.outputs[0]):
+                return None
+            if not self._tile_aware_tensors_match(ctx, flow_tensor_name, other_input_name):
+                return None
+            return consumer
+
+        return None
+
+    def _tile_aware_tensors_match(
+        self,
+        ctx: CompileContext,
+        lhs_tensor_name: str,
+        rhs_tensor_name: str,
+    ) -> bool:
+        lhs_tensor = ctx.graph.tensors.get(lhs_tensor_name)
+        rhs_tensor = ctx.graph.tensors.get(rhs_tensor_name)
+        if lhs_tensor is None or rhs_tensor is None:
+            return False
+        if lhs_tensor.dtype != rhs_tensor.dtype:
+            return False
+        return lhs_tensor.byte_size() == rhs_tensor.byte_size()
+
+    def _tile_aware_tensor_size_bytes(self, ctx: CompileContext, tensor_name: str) -> int:
+        tensor = ctx.graph.tensors.get(tensor_name)
+        if tensor is None:
+            return 0
+        return max(0, tensor.byte_size())
+
+    def _select_tile_aware_region(
+        self,
+        alloc_plan: "MemoryAllocationPlan",
+        required_size_bytes: int,
+    ) -> Any | None:
+        for region in sorted(
+            alloc_plan.logical_regions.values(),
+            key=lambda logical_region: (logical_region.offset, logical_region.name),
+        ):
+            if region.size_bytes >= required_size_bytes:
+                return region
+        return None
+
+    def _make_tile_aware_external_binding(
+        self,
+        ctx: CompileContext,
+        tensor_name: str,
+    ) -> dict[str, Any]:
+        symbol = ctx.tensor_symbols.get(tensor_name, tensor_name)
+        if tensor_name in ctx.graph.inputs:
+            return {
+                "kind": "input_staging",
+                "symbol": f"_nnc_input_buffer_{symbol}",
+            }
+        return self._make_tile_aware_static_binding(ctx, tensor_name)
+
+    def _make_tile_aware_static_binding(
+        self,
+        ctx: CompileContext,
+        tensor_name: str,
+    ) -> dict[str, Any]:
+        symbol = ctx.tensor_symbols.get(tensor_name, tensor_name)
+        return {
+            "kind": "static_buffer",
+            "symbol": f"_nnc_tensor_buffer_{symbol}",
+        }
+
+    def _build_linear_tensor_fallback(
+        self,
+        ctx: CompileContext,
+    ) -> tuple[dict[str, tuple[str, int]], int]:
+        """Build a conservative sequential placement for non-constant tensors."""
+        tensor_offsets: dict[str, tuple[str, int]] = {}
+        current_offset = 0
+        alignment = 16
+
+        for tensor_name, tensor in ctx.graph.tensors.items():
+            if tensor_name in ctx.graph.constants:
+                continue
+            aligned_offset = ((current_offset + alignment - 1) // alignment) * alignment
+            tensor_offsets[tensor_name] = ("fast", aligned_offset)
+            current_offset = aligned_offset + tensor.byte_size()
+
+        total_size = ((current_offset + alignment - 1) // alignment) * alignment
+        return tensor_offsets, total_size
 
     def _append_entry_point_alias(self, source_code: str, ctx: CompileContext) -> str:
         """Append a public wrapper when the requested entry point is not nnc_run."""
@@ -1950,16 +2265,28 @@ run: model
         # Check for new memory allocation plan
         from nnc_py.passes.memory_planning import get_memory_allocation_plan
         alloc_plan = get_memory_allocation_plan(ctx)
+        tile_aware_runtime_plan = self._get_tile_aware_runtime_plan(ctx, alloc_plan)
+        tile_aware_tensor_bindings = tile_aware_runtime_plan.get("tensor_bindings", {})
+        fallback_to_linear_storage = (
+            alloc_plan is not None
+            and alloc_plan.strategy_name == "tile_regions_v3"
+            and not tile_aware_runtime_plan
+        )
 
         has_slow_memory_tensors = False
+        has_logical_regions = False
         if alloc_plan is not None:
             has_slow_memory_tensors = any(
                 alloc.is_spilled for alloc in alloc_plan.tensor_allocations.values()
             )
+            has_logical_regions = bool(alloc_plan.logical_regions) and bool(tile_aware_runtime_plan)
         has_spill = alloc_plan is not None and alloc_plan.has_spill
         has_moves = alloc_plan is not None and bool(alloc_plan.move_points)
         uses_unified_runtime = alloc_plan is not None and (
             has_spill or has_slow_memory_tensors or has_moves
+        )
+        uses_fast_pool_symbol = alloc_plan is not None and (
+            has_spill or has_slow_memory_tensors or has_moves or has_logical_regions
         )
 
         # Generate slow pool if we have spill points OR slow memory tensors
@@ -1974,7 +2301,7 @@ run: model
             lines.append("")
 
         # Determine which pool names to use
-        if uses_unified_runtime:
+        if uses_fast_pool_symbol:
             fast_pool_name = "_nnc_fast_pool"
             slow_pool_name = "_nnc_slow_pool" if needs_slow_pool else None
         else:
@@ -1985,7 +2312,9 @@ run: model
         tensor_offsets = {}
         spilled_tensors = set()
 
-        if alloc_plan is not None:
+        if fallback_to_linear_storage:
+            tensor_offsets, _ = self._build_linear_tensor_fallback(ctx)
+        elif alloc_plan is not None:
             # Use new MemoryAllocationPlan
             for tensor_name, alloc in alloc_plan.tensor_allocations.items():
                 if alloc.is_spilled:
@@ -2012,6 +2341,7 @@ run: model
                 tensor_offsets[tensor_name] = (pool_type, mem_info.pool_offset)
 
         # Define all non-constant tensors
+        emitted_tile_aware_buffers: set[str] = set()
         for tensor_name, tensor in ctx.graph.tensors.items():
             if tensor_name in ctx.graph.constants:
                 continue
@@ -2022,7 +2352,27 @@ run: model
             shape_init = ", ".join(str(d) if isinstance(d, (int, float)) else "-1" for d in shape_list)
 
             data_init = "NULL"
-            if tensor_name in tensor_offsets:
+            if tensor_name in tile_aware_tensor_bindings:
+                binding = tile_aware_tensor_bindings[tensor_name]
+                if binding["kind"] in {"input_staging", "static_buffer"}:
+                    buffer_name = binding["symbol"]
+                    if buffer_name not in emitted_tile_aware_buffers:
+                        buffer_label = (
+                            "Input staging buffer"
+                            if binding["kind"] == "input_staging"
+                            else "Tile-aware tensor buffer"
+                        )
+                        lines.append(f"/* {buffer_label}: {tensor_name} */")
+                        lines.append(
+                            f"uint8_t {buffer_name}[{tensor.byte_size()}] "
+                            f"__attribute__((aligned(NNC_MEMORY_ALIGNMENT))) = {{0}};"
+                        )
+                        lines.append("")
+                        emitted_tile_aware_buffers.add(buffer_name)
+                    data_init = buffer_name
+                elif binding["kind"] == "fast_pool":
+                    data_init = f"{fast_pool_name} + {binding['offset']}"
+            elif tensor_name in tensor_offsets:
                 pool_type, offset = tensor_offsets[tensor_name]
                 if uses_unified_runtime and tensor_name in ctx.graph.inputs:
                     input_buffer_name = f"_nnc_input_buffer_{var_name}"
@@ -2039,6 +2389,18 @@ run: model
                     else:
                         pool_to_use = fast_pool_name
                     data_init = f"{pool_to_use} + {offset}" if pool_to_use else "NULL"
+
+            if data_init == "NULL":
+                detached_buffer_name = f"_nnc_tensor_buffer_{var_name}"
+                if detached_buffer_name not in emitted_tile_aware_buffers:
+                    lines.append(f"/* Detached tensor buffer: {tensor_name} */")
+                    lines.append(
+                        f"uint8_t {detached_buffer_name}[{tensor.byte_size()}] "
+                        f"__attribute__((aligned(NNC_MEMORY_ALIGNMENT))) = {{0}};"
+                    )
+                    lines.append("")
+                    emitted_tile_aware_buffers.add(detached_buffer_name)
+                data_init = detached_buffer_name
 
             lines.append(f"/* Tensor: {tensor_name} */")
             lines.append(f"static int64_t {var_name}_shape[] = {{{shape_init}}};")
@@ -2065,11 +2427,26 @@ run: model
 
         # Check for new memory allocation plan first
         alloc_plan = get_memory_allocation_plan(ctx)
+        tile_aware_runtime_plan = self._get_tile_aware_runtime_plan(ctx, alloc_plan)
 
         if alloc_plan is not None:
+            if alloc_plan.strategy_name == "tile_regions_v3" and not tile_aware_runtime_plan:
+                _, fallback_total_size = self._build_linear_tensor_fallback(ctx)
+                lines = [
+                    "/* Static Memory Pool */",
+                    f"/* Fallback size: {fallback_total_size} bytes ({fallback_total_size / 1024:.2f} KB) */",
+                    "#define NNC_MEMORY_ALIGNMENT 16",
+                    f"#define NNC_MEMORY_SIZE {fallback_total_size}",
+                    "static uint8_t _nnc_memory_pool[NNC_MEMORY_SIZE] "
+                    "__attribute__((aligned(NNC_MEMORY_ALIGNMENT))) = {0};",
+                    "",
+                ]
+                return lines
+
             has_slow_memory_tensors = any(
                 alloc.is_spilled for alloc in alloc_plan.tensor_allocations.values()
             )
+            has_logical_regions = bool(alloc_plan.logical_regions) and bool(tile_aware_runtime_plan)
             move_count = len(alloc_plan.move_points)
             spill_count = alloc_plan.spill_count
             reload_count = alloc_plan.reload_count
@@ -2078,9 +2455,11 @@ run: model
                 alloc_plan.has_spill
                 or has_slow_memory_tensors
                 or bool(alloc_plan.move_points)
+                or has_logical_regions
             )
 
             if uses_unified_runtime:
+                region_lines = self._generate_logical_region_lines(alloc_plan)
                 if needs_slow_pool:
                     fast_memory_size = alloc_plan.total_fast_memory
                     lines = [
@@ -2092,6 +2471,9 @@ run: model
                         "/* Fast Memory Pool (SRAM/On-chip) */",
                         f"#define NNC_FAST_MEMORY_SIZE {fast_memory_size}",
                         "#define NNC_MEMORY_ALIGNMENT 16",
+                    ]
+                    lines.extend(region_lines)
+                    lines.extend([
                         f"uint8_t _nnc_fast_pool[NNC_FAST_MEMORY_SIZE] "
                         f"__attribute__((aligned(NNC_MEMORY_ALIGNMENT))) = {{0}};",
                         "",
@@ -2100,7 +2482,7 @@ run: model
                         f"uint8_t _nnc_slow_pool[NNC_SLOW_MEMORY_SIZE] "
                         f"__attribute__((aligned(NNC_MEMORY_ALIGNMENT))) = {{0}};",
                         "",
-                    ]
+                    ])
                     return lines
 
                 # Move-only unified plans still need the unified fast pool symbol and
@@ -2115,10 +2497,14 @@ run: model
                     "/* Fast Memory Pool (SRAM/On-chip) */",
                     f"#define NNC_FAST_MEMORY_SIZE {fast_memory_size}",
                     "#define NNC_MEMORY_ALIGNMENT 16",
-                    f"uint8_t _nnc_fast_pool[NNC_FAST_MEMORY_SIZE] "
-                    f"__attribute__((aligned(NNC_MEMORY_ALIGNMENT))) = {{0}};",
                     "",
                 ]
+                lines.extend(region_lines)
+                lines.append(
+                    f"uint8_t _nnc_fast_pool[NNC_FAST_MEMORY_SIZE] "
+                    f"__attribute__((aligned(NNC_MEMORY_ALIGNMENT))) = {{0}};"
+                )
+                lines.append("")
                 return lines
 
         # Fall back to legacy implementation
@@ -2150,6 +2536,7 @@ run: model
                 "",
             ]
             return lines
+
         else:
             # Single memory pool (no overflow)
             if plan is None:
@@ -2174,6 +2561,29 @@ run: model
                 "",
             ]
             return lines
+
+    def _generate_logical_region_lines(
+        self,
+        alloc_plan: "MemoryAllocationPlan",
+    ) -> List[str]:
+        """Emit logical region metadata for tile-aware fast-memory layouts."""
+        if not alloc_plan.logical_regions:
+            return []
+
+        lines = [
+            "/* Tile-aware fast-memory regions (phase 1 metadata only) */",
+        ]
+        for region in sorted(
+            alloc_plan.logical_regions.values(),
+            key=lambda logical_region: (logical_region.offset, logical_region.name),
+        ):
+            macro_name = region.name.upper()
+            lines.append(
+                f"/* Region {region.name}: offset {region.offset} bytes, size {region.size_bytes} bytes */"
+            )
+            lines.append(f"#define NNC_{macro_name}_MEMORY_SIZE {region.size_bytes}")
+        lines.append("")
+        return lines
 
     def _map_dtype_to_enum(self, dtype: "DataType") -> str:
         """Map IR dtype to NNC dtype enum."""

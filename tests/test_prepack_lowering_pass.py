@@ -105,4 +105,10 @@ def test_prepack_lowering_pass_attaches_conv_kernel_hint():
     node = graph.get_node("conv")
     assert node.metadata["lowering"]["kernel_family"] == "conv2d"
     assert node.metadata["lowering"]["kernel_kind"] == "spatial_3x3"
+    assert node.metadata["lowering"]["kernel_shape"] == (3, 3)
+    assert node.metadata["lowering"]["strides"] == (1, 1)
+    assert node.metadata["lowering"]["pads"] == (1, 1, 1, 1)
+    assert node.metadata["lowering"]["group"] == 1
+    assert node.metadata["lowering"]["weight_is_constant"] is True
     assert node.metadata["lowering"]["weight_pack"] == "oihw_constant"
+    assert "node_execution_plans" not in ctx.metadata

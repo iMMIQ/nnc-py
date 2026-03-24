@@ -35,3 +35,15 @@ def test_o2_no_dominator_fusion():
     for pass_obj in o2_passes:
         assert pass_obj.__class__.__name__ != "DominatorFusionPass", \
             "DominatorFusionPass should not be in O2 passes"
+
+
+def test_o3_pass_order_includes_schedule_layout_and_tiled_lowering_before_v3():
+    names = [pass_obj.__class__.__name__ for pass_obj in PassManager.get_default_passes(3)]
+
+    assert "ScheduleAnalysisPass" in names
+    assert "LayoutPlanningPass" in names
+    assert "TiledLoweringPass" in names
+    assert "MemoryPlanningPassV3" in names
+    assert names.index("ScheduleAnalysisPass") < names.index("LayoutPlanningPass")
+    assert names.index("LayoutPlanningPass") < names.index("TiledLoweringPass")
+    assert names.index("TiledLoweringPass") < names.index("MemoryPlanningPassV3")

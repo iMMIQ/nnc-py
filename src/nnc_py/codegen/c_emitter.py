@@ -1,6 +1,7 @@
 """C code emitter for generating C11 code."""
 
 from io import StringIO
+from typing import Any
 
 from nnc_py.ir.context import CompileContext
 from nnc_py.ir.node import Node, OpType
@@ -13,9 +14,10 @@ class CEmitter:
     indent: int
     output: StringIO
 
-    def __init__(self) -> None:
+    def __init__(self, tile_aware_wrapper_nodes: dict[str, dict[str, Any]] | None = None) -> None:
         self.indent = 0
         self.output = StringIO()
+        self.tile_aware_wrapper_nodes = tile_aware_wrapper_nodes or {}
 
     def emit(self, ctx: CompileContext) -> str:
         """Emit complete C code."""
@@ -63,9 +65,14 @@ class CEmitter:
     def _emit_node_function(self, ctx: CompileContext, node: Node) -> None:
         """Emit function for a single node."""
         func_name = ctx.node_symbols.get(node.name, node.name)
+        wrapper_metadata = self.tile_aware_wrapper_nodes.get(node.name)
 
         # Skip Constant nodes - they're already defined in constants.c
         if node.op_type == OpType.CONSTANT:
+            return
+
+        if wrapper_metadata is not None:
+            self._emit_tile_aware_node_function(ctx, node, func_name, wrapper_metadata)
             return
 
         self.write_line(f"/* {node.op_type.value}: {node.name} */")
@@ -76,6 +83,34 @@ class CEmitter:
         # Emit operator call
         self._emit_operator_call(ctx, node)
 
+        self.indent -= 1
+        self.write_line("}")
+        self.write_line()
+
+    def _emit_tile_aware_node_function(
+        self,
+        ctx: CompileContext,
+        node: Node,
+        func_name: str,
+        wrapper_metadata: dict[str, Any],
+    ) -> None:
+        """Emit a conservative tile-aware wrapper around a supported node body."""
+        body_name = f"{func_name}_body"
+        wrapper_comment = wrapper_metadata.get("comment", "tile-aware wrapper")
+
+        self.write_line(f"/* {node.op_type.value}: {node.name} */")
+        self.write_line(f"static void {body_name}(void) {{")
+        self.indent += 1
+        self._emit_lowering_comment(node)
+        self._emit_operator_call(ctx, node)
+        self.indent -= 1
+        self.write_line("}")
+        self.write_line()
+
+        self.write_line(f"void {func_name}(void) {{")
+        self.indent += 1
+        self.write_line(f"/* {wrapper_comment} */")
+        self.write_line(f"{body_name}();")
         self.indent -= 1
         self.write_line("}")
         self.write_line()
@@ -785,6 +820,7 @@ class CEmitter:
         self.write_line("/* Main inference entry point */")
         self.write_line("void nnc_run(void) {")
         self.indent += 1
+        self._emit_tile_wrapper_hook(ctx)
 
         # Call each node function in topological order (skip Constant nodes)
         for node in ctx.graph.topological_sort():
@@ -795,6 +831,13 @@ class CEmitter:
 
         self.indent -= 1
         self.write_line("}")
+
+    def _emit_tile_wrapper_hook(self, ctx: CompileContext) -> None:
+        """Emit a comment when tile-aware wrappers are active."""
+        if self.tile_aware_wrapper_nodes:
+            self.write_line(
+                "/* Tile-aware execution path is enabled for supported nodes. */"
+            )
 
     def write_line(self, text: str = "") -> None:
         """Write a line with proper indentation."""

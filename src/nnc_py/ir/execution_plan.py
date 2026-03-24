@@ -61,6 +61,7 @@ class NodeExecutionPlan:
     op_family: str
     tile_axes: AxisNames = ()
     layout_class: LayoutClass = LayoutClass.PLAIN
+    target_physical_layout: str | None = None
     memory_regions: tuple[MemoryRegionKind, ...] = ()
     input_accesses: tuple[TensorAccessPlan, ...] = ()
     output_accesses: tuple[TensorAccessPlan, ...] = ()

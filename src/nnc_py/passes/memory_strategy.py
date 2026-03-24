@@ -68,6 +68,15 @@ class MovePoint:
     size: int
 
 
+@dataclass(frozen=True)
+class LogicalMemoryRegion:
+    """Aggregate size requirement for one logical execution-time memory region."""
+
+    name: str
+    size_bytes: int
+    offset: int = 0
+
+
 @dataclass
 class MemoryAllocationPlan:
     """Unified memory allocation plan result.
@@ -99,6 +108,7 @@ class MemoryAllocationPlan:
 
     # Timing/liveness info for each node (optional, for debugging)
     node_memory_usage: List[int] = field(default_factory=list)
+    logical_regions: Dict[str, LogicalMemoryRegion] = field(default_factory=dict)
 
     @property
     def has_spill(self) -> bool:

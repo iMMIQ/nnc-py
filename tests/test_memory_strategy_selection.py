@@ -11,7 +11,11 @@ from nnc_py.frontend.onnx_loader import ONNXFrontend
 from nnc_py.ir.context import CompileContext
 from nnc_py.passes.base import PassManager
 from nnc_py.passes.liveness import LivenessAnalysisPass
-from nnc_py.passes.memory_planning import MemoryPlanningPassV2, get_memory_allocation_plan
+from nnc_py.passes.memory_planning import (
+    MemoryPlanningPassV2,
+    MemoryPlanningPassV3,
+    get_memory_allocation_plan,
+)
 from nnc_py.passes.memory_strategy import AllocationStrategy, StrategyRegistry, get_memory_strategy
 
 
@@ -91,6 +95,34 @@ def test_o1_planning_path_produces_cost_aware_plan_identity(tmp_path):
 
     LivenessAnalysisPass().run(ctx)
     MemoryPlanningPassV2().run(ctx)
+    plan = get_memory_allocation_plan(ctx)
+
+    assert plan is not None
+    assert plan.strategy_name == "cost_aware"
+
+
+def test_memory_planning_v3_falls_back_to_cost_aware_without_tiled_metadata(tmp_path):
+    input_info = helper.make_tensor_value_info("input", TensorProto.FLOAT, [1, 4])
+    output_info = helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 4])
+    graph = helper.make_graph(
+        [
+            helper.make_node("Relu", ["input"], ["hidden"]),
+            helper.make_node("Sigmoid", ["hidden"], ["output"]),
+        ],
+        "chain",
+        [input_info],
+        [output_info],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_operatorsetid("", 13)])
+    path = tmp_path / "chain_v3.onnx"
+    onnx.save(model, path)
+
+    frontend = ONNXFrontend()
+    ir_graph = frontend.load(str(path))
+    ctx = CompileContext(graph=ir_graph, target="x86", optimization_level=3)
+
+    LivenessAnalysisPass().run(ctx)
+    MemoryPlanningPassV3().run(ctx)
     plan = get_memory_allocation_plan(ctx)
 
     assert plan is not None

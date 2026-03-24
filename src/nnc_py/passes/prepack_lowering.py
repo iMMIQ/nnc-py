@@ -46,40 +46,36 @@ class PrepackLoweringPass(PassBase):
         }
 
     def _annotate_conv_lowering(self, ctx: CompileContext, node: Node) -> None:
-        kernel_shape = list(node.attrs.get("kernel_shape", [1, 1]))
-        strides = list(node.attrs.get("strides", [1, 1]))
-        pads = list(node.attrs.get("pads", [0, 0, 0, 0]))
+        kernel_shape = _normalize_hw(node.attrs.get("kernel_shape", [1, 1]), fill=1)
+        strides = _normalize_hw(node.attrs.get("strides", [1, 1]), fill=1)
+        pads = _normalize_pads(node.attrs.get("pads", [0, 0, 0, 0]))
         group = int(node.attrs.get("group", 1))
         weight_name = node.inputs[1] if len(node.inputs) >= 2 else None
+        weight_is_constant = weight_name in ctx.graph.constants if weight_name else False
 
         kernel_kind = "generic"
-        if len(kernel_shape) >= 2:
-            kh, kw = int(kernel_shape[0]), int(kernel_shape[1])
-            sh = int(strides[0]) if strides else 1
-            sw = int(strides[1]) if len(strides) > 1 else sh
-            if len(pads) >= 4:
-                pad_h = int(pads[0])
-                pad_w = int(pads[1])
-            elif len(pads) >= 2:
-                pad_h = int(pads[0])
-                pad_w = int(pads[1])
-            else:
-                pad_h = 0
-                pad_w = 0
-            if kh == 1 and kw == 1:
-                kernel_kind = "pointwise_1x1"
-            elif kh == 3 and kw == 3 and sh == 1 and sw == 1 and group == 1 and pad_h == 1 and pad_w == 1:
-                kernel_kind = "spatial_3x3"
-            elif kh == 7 and kw == 7 and sh == 2 and sw == 2 and pad_h == 3 and pad_w == 3:
-                kernel_kind = "stem_7x7_s2"
-            elif group > 1:
-                kernel_kind = "grouped"
+        kh, kw = kernel_shape
+        sh, sw = strides
+        pad_h, pad_w = pads[0], pads[1]
+        if kh == 1 and kw == 1:
+            kernel_kind = "pointwise_1x1"
+        elif kh == 3 and kw == 3 and sh == 1 and sw == 1 and group == 1 and pad_h == 1 and pad_w == 1:
+            kernel_kind = "spatial_3x3"
+        elif kh == 7 and kw == 7 and sh == 2 and sw == 2 and pad_h == 3 and pad_w == 3:
+            kernel_kind = "stem_7x7_s2"
+        elif group > 1:
+            kernel_kind = "grouped"
 
         lowering = self._get_or_create_lowering(node)
         lowering["kernel_family"] = "conv2d"
         lowering["kernel_kind"] = kernel_kind
+        lowering["kernel_shape"] = kernel_shape
+        lowering["strides"] = strides
+        lowering["pads"] = pads
+        lowering["group"] = group
+        lowering["weight_is_constant"] = weight_is_constant
         lowering["weight_pack"] = (
-            "oihw_constant" if weight_name in ctx.graph.constants else "oihw_runtime"
+            "oihw_constant" if weight_is_constant else "oihw_runtime"
         )
 
     def _annotate_and_prepack_gemm(self, ctx: CompileContext, node: Node) -> bool:
@@ -129,3 +125,25 @@ class PrepackLoweringPass(PassBase):
         lowering = {}
         node.metadata["lowering"] = lowering
         return lowering
+
+
+def _normalize_hw(value: object, *, fill: int) -> tuple[int, int]:
+    if isinstance(value, (list, tuple)) and len(value) >= 2:
+        return int(value[0]), int(value[1])
+    if isinstance(value, (list, tuple)) and len(value) == 1:
+        dim = int(value[0])
+        return dim, dim
+    return fill, fill
+
+
+def _normalize_pads(value: object) -> tuple[int, int, int, int]:
+    if isinstance(value, (list, tuple)) and len(value) >= 4:
+        return tuple(int(dim) for dim in value[:4])
+    if isinstance(value, (list, tuple)) and len(value) >= 2:
+        pad_h = int(value[0])
+        pad_w = int(value[1])
+        return pad_h, pad_w, pad_h, pad_w
+    if isinstance(value, (list, tuple)) and len(value) == 1:
+        pad = int(value[0])
+        return pad, pad, pad, pad
+    return 0, 0, 0, 0

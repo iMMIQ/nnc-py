@@ -457,7 +457,221 @@ git add tests/test_tiled_runtime_correctness.py tests/test_x86_runtime.py
 git commit -m "test: verify tiled lowering against onnxruntime"
 ```
 
-## Task 8: Prove `resnet18` Fast-Memory Reduction Path
+## Plan Revision Note
+
+While executing Tasks 4-7, a real blocker showed up in the current codebase:
+
+- `Compiler(target="x86", opt_level=3).compile(..., max_memory="1M")` still fails on `resnet18`
+- the failure is currently `max_memory (1048576) < peak node demand (4014080)`
+- this happens because the real compile path still does not produce tile-region sizing metadata, so `MemoryPlanningPassV3` correctly falls back to the existing whole-tensor / cost-aware path
+- phase-1 codegen also only emits tile-aware region metadata and comments today; it does not yet execute a true tile-aware runtime path for supported operators
+
+Because of that, the original `resnet18` 1 MB proof task was premature. The remaining work is reordered below so the implementation first produces real tile-region sizing in the compile path, then connects that path to supported code generation / execution, and only then locks the `resnet18` memory-budget objective.
+
+## Task 8: Thread Real Tile-Region Sizing Through The Compile Path
+
+**Files:**
+- Modify: `src/nnc_py/passes/tiled_lowering.py`
+- Modify: `src/nnc_py/passes/memory_planning.py`
+- Modify: `tests/test_tiled_lowering_pass.py`
+- Modify: `tests/test_memory_planning_v3.py`
+- Create: `tests/test_tiled_region_sizing.py`
+
+- [ ] **Step 1: Write the failing tests**
+
+```python
+def test_tiled_lowering_records_region_size_hints_for_conv_plan():
+    ctx = make_conv_context()
+    seed_schedule_and_layout(ctx, node_name="conv0", op_family="conv2d")
+
+    TiledLoweringPass().run(ctx)
+
+    region_sizes = ctx.metadata["node_execution_plan_region_sizes"]["conv0"]
+    assert region_sizes["tensor_bytes"]["input"] > 0
+    assert region_sizes["tensor_bytes"]["output"] > 0
+    assert region_sizes["region_bytes"]["scratch"] >= 0
+```
+
+```python
+def test_memory_planning_v3_uses_real_region_hints_from_tiled_lowering():
+    ctx = make_tiled_conv_context()
+    attach_phase1_execution_plan(ctx, input_tile_bytes=262144, output_tile_bytes=131072)
+
+    MemoryPlanningPassV3().run(ctx)
+
+    plan = ctx.metadata["memory_allocation_plan"]
+    assert plan.strategy_name == "tile_regions_v3"
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `pytest tests/test_tiled_region_sizing.py tests/test_tiled_lowering_pass.py tests/test_memory_planning_v3.py -q`
+Expected: FAIL because the real compile path does not populate `node_execution_plan_region_sizes` yet.
+
+- [ ] **Step 3: Write the minimal implementation**
+
+Teach `TiledLoweringPass` to emit conservative phase-1 region-size metadata for supported plans:
+- tile input/output sizes derived from logical tile extents and tensor dtype
+- scratch size derived from lowering facts needed for conv/pool phase 1
+- metadata stored in `ctx.metadata["node_execution_plan_region_sizes"]`
+
+Keep the implementation conservative:
+- do not enable unsupported codegen paths here
+- keep `MemoryPlanningPassV3` gated unless metadata is complete
+- prefer explicit per-node size hints over hidden inference in codegen
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `pytest tests/test_tiled_region_sizing.py tests/test_tiled_lowering_pass.py tests/test_memory_planning_v3.py -q`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/nnc_py/passes/tiled_lowering.py src/nnc_py/passes/memory_planning.py tests/test_tiled_lowering_pass.py tests/test_memory_planning_v3.py tests/test_tiled_region_sizing.py
+git commit -m "feat: thread tile region sizing through lowering"
+```
+
+## Task 9: Connect Tile-Aware Execution To Supported Codegen Paths
+
+**Files:**
+- Modify: `src/nnc_py/codegen/x86_backend.py`
+- Modify: `src/nnc_py/codegen/c_emitter.py`
+- Modify: `tests/test_codegen_tiled_layout.py`
+- Modify: `tests/test_tiled_runtime_correctness.py`
+
+- [ ] **Step 1: Write the failing tests**
+
+```python
+def test_codegen_emits_supported_tile_wrapper_for_phase1_conv():
+    code = compile_model_with_real_tiled_plan()
+    assert "tile-aware" in code["model.c"]
+```
+
+```python
+def test_tiled_conv_runtime_path_matches_onnxruntime_reference():
+    result = run_tiled_model_against_reference("conv")
+    assert result.max_abs_diff == 0.0
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `pytest tests/test_codegen_tiled_layout.py tests/test_tiled_runtime_correctness.py -q -k "tile_wrapper or tiled_conv_runtime"`
+Expected: FAIL because the compile path does not yet execute supported nodes through tile-aware wrappers.
+
+- [ ] **Step 3: Write the minimal implementation**
+
+Add the smallest supported execution handoff for phase 1:
+- only enable when compile metadata proves a supported tile-aware plan exists
+- keep unsupported graphs on the existing untiled path
+- start with conv / maxpool and the already-tested tile-compatible handoff cases
+- preserve debug-mode tensor dumps so ONNX Runtime comparison remains usable
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `pytest tests/test_codegen_tiled_layout.py tests/test_tiled_runtime_correctness.py -q -k "tile_wrapper or tiled_conv_runtime or tiled_maxpool"`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/nnc_py/codegen/x86_backend.py src/nnc_py/codegen/c_emitter.py tests/test_codegen_tiled_layout.py tests/test_tiled_runtime_correctness.py
+git commit -m "feat: connect supported tile-aware execution path"
+```
+
+## Plan Revision Note 2
+
+After the revised Tasks 8-9 were implemented, the `resnet18` proof step was exercised directly with:
+
+- `Compiler(target="x86", opt_level=3).compile(..., max_memory="1M")`
+
+The current pipeline still fails with:
+
+- `max_memory (1048576) < peak node demand (4014080)`
+
+That confirms another remaining gap between the current phase-1 implementation and the original acceptance gate:
+
+- single supported nodes can now carry real tile-region sizing metadata
+- a narrow single-node tile-aware execution path now exists
+- but whole-model graphs like `resnet18` still do not propagate tile-aware execution/storage across multiple scheduled nodes
+
+Because of that, the `resnet18` 1 MB proof task is still premature. The plan is reordered again below so the implementation first supports multi-node tile-aware execution/storage propagation, and only then locks the whole-model `1 MB` objective.
+
+## Plan Revision Note 3
+
+After probing `resnet18` with the revised Tasks 8-9 in place, the remaining blocker became more specific:
+
+- the graph now produces `node_execution_plans` and `node_execution_plan_region_sizes` for tiled `Conv` / `MaxPool` nodes
+- but `MemoryPlanningPassV3` still falls back to `cost_aware`
+- the direct cause is that `resnet18` still has many computational nodes with no tiled execution plan at all
+- the uncovered set is dominated by residual-path `Add`, many `Relu`, and the tail `Gemm`
+
+That means the previous “small multi-node `Conv -> MaxPool` group” task is still too narrow to unlock the real whole-model goal. The next task must first widen tiled execution/storage propagation to the phase-1 tile-compatible handoff path used throughout `resnet18`:
+
+- `Conv -> Add -> Relu`
+- residual `Add` handoff
+- tail `Gemm` fallback / supported path as needed for full computational-node coverage
+
+Only after that is it meaningful to re-run the `resnet18` 1 MB proof.
+
+## Task 10: Support Tile-Compatible Execution Groups Needed By `resnet18`
+
+**Files:**
+- Modify: `src/nnc_py/codegen/x86_backend.py`
+- Modify: `src/nnc_py/codegen/c_emitter.py`
+- Modify: `src/nnc_py/passes/memory_planning.py`
+- Modify: `tests/test_codegen_tiled_layout.py`
+- Modify: `tests/test_tiled_runtime_correctness.py`
+- Create: `tests/test_tiled_execution_groups.py`
+
+- [ ] **Step 1: Write the failing tests**
+
+```python
+def test_codegen_supports_conv_add_relu_tiled_group_without_null_tensor_bindings():
+    code = compile_model_with_real_tiled_plan("conv_add_relu")
+    assert ".data = NULL" not in code["tensors.c"]
+    assert "tile-aware wrapper" in code["model.c"]
+```
+
+```python
+def test_tiled_conv_add_relu_runtime_path_matches_onnxruntime_reference():
+    result = run_tiled_model_against_reference("conv_add_relu")
+    assert result.max_abs_diff == 0.0
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `pytest tests/test_codegen_tiled_layout.py tests/test_tiled_runtime_correctness.py tests/test_tiled_execution_groups.py -q -k "conv_add_relu or tiled_group or residual_add"`
+Expected: FAIL because the current tile-aware execution path is intentionally limited to a very narrow single-node safe subset.
+
+- [ ] **Step 3: Write the minimal implementation**
+
+Extend the current safe tile-aware path just enough for phase 1 whole-model progress:
+- allow phase-1 tile-compatible groups used by `resnet18`, especially `Conv -> Add -> Relu`
+- support residual `Add` handoff where producer/skip tensors are already in the supported tiled storage path
+- keep unsupported graphs on the existing fallback path
+- propagate self-consistent tensor storage/binding across the supported tiled group
+- preserve debug-mode tensor dumps and ONNX Runtime comparison usability
+
+Keep the implementation conservative:
+- no full general scheduler here
+- no broad graph-wide tile executor
+- only widen the currently safe subset to the specific residual / activation group shapes needed next
+- if the tail `Gemm` still blocks full computational-node coverage, either add the smallest supported path for it or make the remaining blocker explicit in tests/docs
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `pytest tests/test_codegen_tiled_layout.py tests/test_tiled_runtime_correctness.py tests/test_tiled_execution_groups.py -q -k "conv_add_relu or tiled_group or residual_add"`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/nnc_py/codegen/x86_backend.py src/nnc_py/codegen/c_emitter.py src/nnc_py/passes/memory_planning.py tests/test_codegen_tiled_layout.py tests/test_tiled_runtime_correctness.py tests/test_tiled_execution_groups.py
+git commit -m "feat: support small tile-aware execution groups"
+```
+
+## Task 11: Prove `resnet18` Fast-Memory Reduction Path
 
 **Files:**
 - Modify: `tests/test_benchmark_metrics.py`
@@ -481,11 +695,11 @@ def test_resnet18_o3_tiled_codegen_builds_under_memory_budget():
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `pytest tests/test_resnet18_tiled_memory_budget.py -q`
-Expected: FAIL because the current whole-tensor path bottoms out around 4 MB.
+Expected: FAIL until real tile-region sizing and supported tile-aware execution are both threaded through the `resnet18` path.
 
 - [ ] **Step 3: Write the minimal implementation**
 
-Thread the tiled pipeline through the real `resnet18` compile path and expose measurable artifact metrics.
+Thread the now-supported tiled pipeline through the real `resnet18` compile path and expose measurable artifact metrics.
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -499,7 +713,7 @@ git add tests/test_resnet18_tiled_memory_budget.py tests/test_snapshots_resnet18
 git commit -m "test: lock resnet18 tiled fast-memory budget"
 ```
 
-## Task 9: Add Late Target-Physical Layout Mapping Hooks
+## Task 12: Add Late Target-Physical Layout Mapping Hooks
 
 **Files:**
 - Modify: `src/nnc_py/codegen/x86_backend.py`
@@ -542,7 +756,7 @@ git add src/nnc_py/codegen/x86_backend.py src/nnc_py/ir/execution_plan.py tests/
 git commit -m "feat: add late target physical layout mapping hooks"
 ```
 
-## Task 10: Final Verification And Documentation Sync
+## Task 13: Final Verification And Documentation Sync
 
 **Files:**
 - Modify: `docs/superpowers/specs/2026-03-23-tiled-lowering-and-blocked-layout-design.md`
@@ -553,7 +767,7 @@ git commit -m "feat: add late target physical layout mapping hooks"
 Run:
 
 ```bash
-pytest tests/test_execution_plan_ir.py tests/test_schedule_analysis_pass.py tests/test_layout_planning_pass.py tests/test_tiled_lowering_pass.py tests/test_memory_planning_v3.py tests/test_codegen_tiled_layout.py tests/test_tiled_runtime_correctness.py tests/test_resnet18_tiled_memory_budget.py -q
+pytest tests/test_execution_plan_ir.py tests/test_schedule_analysis_pass.py tests/test_layout_planning_pass.py tests/test_tiled_lowering_pass.py tests/test_tiled_region_sizing.py tests/test_memory_planning_v3.py tests/test_codegen_tiled_layout.py tests/test_tiled_execution_groups.py tests/test_tiled_runtime_correctness.py tests/test_resnet18_tiled_memory_budget.py -q
 ```
 
 Expected: PASS

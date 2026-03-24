@@ -4,6 +4,28 @@
 
 Proposed and user-approved at the design level on 2026-03-23.
 
+Partially implemented and revalidated during execution on 2026-03-24.
+
+Current implementation status in `nnc-py`:
+
+- structured execution-plan IR is in place
+- `ScheduleAnalysisPass`, `LayoutPlanningPass`, `TiledLoweringPass`, and `MemoryPlanningPassV3` are implemented
+- phase-1 tile-aware execution/storage support exists for a conservative supported subset, including:
+  - `Conv`
+  - `MaxPool`
+  - tile-compatible `Add` / `Relu` group handoff
+  - a minimal tail `Gemm` coverage path for `resnet18`
+- logical tile/scratch region metadata is emitted into code generation
+- late target-physical layout intent is recorded as deferred metadata/comments rather than materialized
+- `resnet18` now compiles successfully at `O3` with `max_memory='1M'`
+  - current emitted fast-memory size: `1,039,616` bytes
+
+Still intentionally deferred:
+
+- full device-specific physical layout materialization
+- broad graph-wide tile executor beyond the currently supported safe subsets
+- full operator coverage outside the documented phase-1 path
+
 ## Context
 
 `nnc-py` currently has the right high-level compiler shape for deployment on a heterogeneous embedded device:

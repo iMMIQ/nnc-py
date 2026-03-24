@@ -7,6 +7,7 @@ from nnc_py.passes.base import PassBase, PassManager
 # New memory strategy interface
 from nnc_py.passes.memory_strategy import (
     AllocationStrategy,
+    LogicalMemoryRegion,
     MemoryAllocationPlan,
     MemoryAllocationStrategy,
     StrategyRegistry,
@@ -19,7 +20,11 @@ from nnc_py.passes.memory_strategy import (
 )
 
 # New unified memory planning pass
-from nnc_py.passes.memory_planning import MemoryPlanningPassV2, get_memory_allocation_plan
+from nnc_py.passes.memory_planning import (
+    MemoryPlanningPassV2,
+    MemoryPlanningPassV3,
+    get_memory_allocation_plan,
+)
 
 # Optimization passes
 from nnc_py.passes.dead_code_elimination import DeadCodeEliminationPass
@@ -28,6 +33,7 @@ from nnc_py.passes.pattern_fusion import PatternFusionPass
 from nnc_py.passes.prepack_lowering import PrepackLoweringPass
 from nnc_py.passes.layout_planning import LayoutPlanningPass, LayoutPlan
 from nnc_py.passes.schedule_analysis import ScheduleAnalysisPass, ScheduleCandidate
+from nnc_py.passes.tiled_lowering import TiledLoweringPass
 from nnc_py.passes.dominator_fusion import DominatorFusionPass
 from nnc_py.passes.fusion_groups import FusionGroup, GroupArena
 from nnc_py.passes.path_validator import PathValidator
@@ -49,6 +55,7 @@ __all__ = [
 
     # New memory strategy interface
     "AllocationStrategy",
+    "LogicalMemoryRegion",
     "MemoryAllocationPlan",
     "MemoryAllocationStrategy",
     "StrategyRegistry",
@@ -61,6 +68,7 @@ __all__ = [
 
     # New unified pass
     "MemoryPlanningPassV2",
+    "MemoryPlanningPassV3",
     "get_memory_allocation_plan",
 
     # Optimization passes
@@ -72,6 +80,7 @@ __all__ = [
     "LayoutPlan",
     "ScheduleAnalysisPass",
     "ScheduleCandidate",
+    "TiledLoweringPass",
     "DominatorFusionPass",
 
     # Union-Find fusion groups
