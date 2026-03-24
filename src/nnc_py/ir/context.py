@@ -36,13 +36,15 @@ class CompileContext:
 
     @property
     def node_execution_plans(self) -> dict[str, "NodeExecutionPlan"]:
-        """Typed access to node execution plans stored in metadata."""
+        """Read-only typed access to node execution plans stored in metadata."""
 
         from nnc_py.ir.execution_plan import get_node_execution_plans
 
         return get_node_execution_plans(self)
 
     def get_node_execution_plan(self, node_name: str) -> "NodeExecutionPlan | None":
-        """Return a single node execution plan by name."""
+        """Return a single node execution plan by name without mutating metadata."""
 
-        return self.node_execution_plans.get(node_name)
+        from nnc_py.ir.execution_plan import get_node_execution_plan
+
+        return get_node_execution_plan(self, node_name)

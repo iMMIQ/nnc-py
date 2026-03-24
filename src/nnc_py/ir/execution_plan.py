@@ -71,8 +71,7 @@ def get_node_execution_plans(ctx: CompileContext) -> dict[str, NodeExecutionPlan
 
     plans = ctx.metadata.get(NODE_EXECUTION_PLANS_METADATA_KEY)
     if plans is None:
-        plans = {}
-        ctx.metadata[NODE_EXECUTION_PLANS_METADATA_KEY] = plans
+        return {}
     return plans
 
 
@@ -87,7 +86,8 @@ def get_node_execution_plan(
 def set_node_execution_plan(ctx: CompileContext, plan: NodeExecutionPlan) -> None:
     """Store a typed execution plan keyed by node name."""
 
-    get_node_execution_plans(ctx)[plan.node_name] = plan
+    plans = ctx.metadata.setdefault(NODE_EXECUTION_PLANS_METADATA_KEY, {})
+    plans[plan.node_name] = plan
 
 
 __all__ = [
