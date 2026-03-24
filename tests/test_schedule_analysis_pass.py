@@ -1,5 +1,3 @@
-import pytest
-
 from nnc_py.ir.context import CompileContext
 from nnc_py.ir.graph import Graph
 from nnc_py.ir.node import Node, OpType
@@ -129,3 +127,89 @@ def test_schedule_analysis_skips_unsupported_operator_families():
 
     schedule = ctx.metadata["schedule_candidates"]
     assert "relu0" not in schedule
+
+
+def test_schedule_analysis_marks_missing_tensor_metadata_as_unknown():
+    graph = Graph("missing_weight_metadata")
+    graph.inputs = ["input"]
+    graph.outputs = ["output"]
+
+    graph.add_tensor(
+        TensorType(
+            dtype=DataType.FLOAT32,
+            shape=TensorShape([1, 32, 32, 32], layout=MemoryLayout.NCHW),
+            name="input",
+        )
+    )
+    graph.add_tensor(
+        TensorType(
+            dtype=DataType.FLOAT32,
+            shape=TensorShape([1, 64, 32, 32], layout=MemoryLayout.NCHW),
+            name="output",
+        )
+    )
+    graph.add_node(
+        Node(
+            op_type=OpType.CONV2D,
+            name="conv_missing_weight",
+            inputs=["input", "weight"],
+            outputs=["output"],
+            attrs={"kernel_shape": [3, 3], "pads": [1, 1, 1, 1]},
+        )
+    )
+
+    ctx = CompileContext(graph=graph, target="x86", optimization_level=3)
+
+    ScheduleAnalysisPass().run(ctx)
+
+    candidate = ctx.metadata["schedule_candidates"]["conv_missing_weight"]
+    assert candidate.tensor_footprint_bytes is None
+    assert candidate.must_tile is False
+    assert candidate.reason == "unknown_working_set"
+
+
+def test_schedule_analysis_includes_supported_gemm_nodes():
+    graph = Graph("gemm_schedule")
+    graph.inputs = ["lhs"]
+    graph.outputs = ["out"]
+
+    graph.add_tensor(
+        TensorType(
+            dtype=DataType.FLOAT32,
+            shape=TensorShape([8, 16], layout=MemoryLayout.NCHW),
+            name="lhs",
+        )
+    )
+    graph.add_tensor(
+        TensorType(
+            dtype=DataType.FLOAT32,
+            shape=TensorShape([16, 32], layout=MemoryLayout.NCHW),
+            name="rhs",
+        )
+    )
+    graph.add_tensor(
+        TensorType(
+            dtype=DataType.FLOAT32,
+            shape=TensorShape([8, 32], layout=MemoryLayout.NCHW),
+            name="out",
+        )
+    )
+    graph.add_node(
+        Node(
+            op_type=OpType.GEMM,
+            name="fc0",
+            inputs=["lhs", "rhs"],
+            outputs=["out"],
+            attrs={"transA": 0, "transB": 0},
+        )
+    )
+
+    ctx = CompileContext(graph=graph, target="x86", optimization_level=3)
+
+    ScheduleAnalysisPass().run(ctx)
+
+    candidate = ctx.metadata["schedule_candidates"]["fc0"]
+    assert candidate.op_family == "gemm"
+    assert candidate.tensor_footprint_bytes == (8 * 16 + 16 * 32 + 8 * 32) * 4
+    assert candidate.must_tile is False
+    assert candidate.reason == "fits_working_set"
