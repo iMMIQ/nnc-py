@@ -80,9 +80,9 @@ class PassManager:
         from nnc_py.passes.layout_planning import LayoutPlanningPass
         from nnc_py.passes.liveness import LivenessAnalysisPass
         from nnc_py.passes.memory_planning import MemoryPlanningPassV2, MemoryPlanningPassV3
+        from nnc_py.passes.prepack_lowering import PrepackLoweringPass
         from nnc_py.passes.pattern_fusion import PatternFusionPass
         from nnc_py.passes.schedule_analysis import ScheduleAnalysisPass
-        from nnc_py.passes.prepack_lowering import PrepackLoweringPass
         from nnc_py.passes.spill import SpillAnalysisPass
         from nnc_py.passes.tiled_lowering import TiledLoweringPass
 
@@ -137,9 +137,9 @@ class PassManager:
         from nnc_py.passes.identity_elimination import IdentityEliminationPass
         from nnc_py.passes.layout_planning import LayoutPlanningPass
         from nnc_py.passes.liveness import LivenessAnalysisPass
-        from nnc_py.passes.memory_planning_v4 import MemoryPlanningPassV4
         from nnc_py.passes.pattern_fusion import PatternFusionPass
         from nnc_py.passes.scheduled_memory_expansion import ScheduledMemoryExpansionPass
+        from nnc_py.passes.scheduled_memory_planning import ScheduledMemoryPlanningPass
         from nnc_py.passes.pipeline_scheduling import PipelineSchedulingPass
         from nnc_py.passes.pipeline_step_lowering import PipelineStepLoweringPass
         from nnc_py.passes.prepack_lowering import PrepackLoweringPass
@@ -159,7 +159,7 @@ class PassManager:
             ScheduledMemoryExpansionPass(),
             PipelineSchedulingPass(),
             LivenessAnalysisPass(),
-            MemoryPlanningPassV4(),
+            ScheduledMemoryPlanningPass(),
         ]
 
     @classmethod

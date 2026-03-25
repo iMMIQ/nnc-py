@@ -87,10 +87,21 @@ def _compile_graph(
         lambda artifacts, output_dir, entry_point: None,
     )
     if relax_scheduled_validation:
+        from nnc_py.ir.pipeline_schedule import set_pipeline_schedule_result
+        from nnc_py.passes.pipeline_scheduling import PipelineSchedulingPass
+
         monkeypatch.setattr(
             compiler,
             "_validate_scheduled_o3_result",
             lambda ctx: None,
+        )
+        monkeypatch.setattr(
+            PipelineSchedulingPass,
+            "_execute",
+            lambda self, ctx: set_pipeline_schedule_result(
+                ctx,
+                self._scheduler.solve(ctx.pipeline_schedule_problem),
+            ),
         )
 
     compiler.compile(
@@ -136,8 +147,9 @@ def test_o3_scheduled_pass_order_requires_explicit_helper():
     assert names.index("PipelineStepLoweringPass") < names.index("ScheduledMemoryExpansionPass")
     assert names.index("ScheduledMemoryExpansionPass") < names.index("PipelineSchedulingPass")
     assert names.index("PipelineSchedulingPass") < names.index("LivenessAnalysisPass")
-    assert names.index("LivenessAnalysisPass") < names.index("MemoryPlanningPassV4")
+    assert names.index("LivenessAnalysisPass") < names.index("ScheduledMemoryPlanningPass")
     assert "ScheduledMemoryExpansionPass" in names
+    assert "MemoryPlanningPassV4" not in names
     assert "SpillAnalysisPass" not in names
 
 
@@ -158,6 +170,9 @@ def test_o3_compile_defaults_to_scheduled_path(monkeypatch, tmp_path):
     assert ctx.pipeline_schedule_result.feasible is True
     assert ctx.pipeline_schedule_result.solver_name == "list"
     assert "gemm0" in ctx.metadata.get("node_execution_plans", {})
+    assert "scheduled_memory_plan" in ctx.metadata
+    assert "memory_plan" not in ctx.metadata
+    assert "spill_plan" not in ctx.metadata
     assert ctx.metadata["memory_allocation_plan"].strategy_name == "schedule_time_v4"
 
 
@@ -178,6 +193,9 @@ def test_explicitly_enabling_scheduler_path_populates_schedule_metadata(monkeypa
     assert ctx.pipeline_schedule_problem.metadata["origin"] == "pipeline_step_lowering"
     assert ctx.pipeline_schedule_result is not None
     assert ctx.pipeline_schedule_result.solver_name == "list"
+    assert "scheduled_memory_plan" in ctx.metadata
+    assert "memory_plan" not in ctx.metadata
+    assert "spill_plan" not in ctx.metadata
     assert ctx.metadata["memory_allocation_plan"].strategy_name == "schedule_time_v4"
 
 

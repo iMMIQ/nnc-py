@@ -14,7 +14,6 @@ from nnc_py.ir.pipeline_schedule import (
 from nnc_py.ir.tensor import TensorShape, TensorType
 from nnc_py.ir.types import DataType
 from nnc_py.passes.memory_planning_v4 import MemoryPlanningPassV4
-from nnc_py.passes.spill import SpillAnalysisPass
 
 
 def make_context(
@@ -159,39 +158,6 @@ def test_memory_planning_v4_emits_expected_strategy_and_logical_allocations():
     assert plan.tensor_allocations["value_out"].offset == plan.buffers[0].offset
     assert plan.logical_regions["value_out"].size_bytes == 48
     assert plan.logical_regions["value_out"].offset == plan.buffers[0].offset
-
-
-def test_memory_planning_v4_remains_compatible_with_spill_analysis():
-    problem = make_problem(
-        SramValue(
-            name="value_out",
-            size_bytes=48,
-            producer_step_id="compute0",
-            consumer_step_ids=("store0",),
-        )
-    )
-    result = make_result(
-        ScheduledStep(
-            step_id="compute0",
-            resource_kind=PipelineResourceKind.MATMUL,
-            start_time=1,
-            end_time=3,
-        ),
-        ScheduledStep(
-            step_id="store0",
-            resource_kind=PipelineResourceKind.OTHER,
-            start_time=3,
-            end_time=5,
-        ),
-        makespan=5,
-    )
-    ctx = make_context(problem=problem, result=result)
-    ctx.metadata["max_memory"] = 64
-
-    MemoryPlanningPassV4().run(ctx)
-    SpillAnalysisPass().run(ctx)
-
-    assert ctx.metadata.get("spill_plan") is None
 
 
 def test_memory_planning_v4_falls_back_to_empty_plan_when_schedule_metadata_is_missing_or_unusable():

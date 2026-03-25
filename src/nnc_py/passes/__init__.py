@@ -26,6 +26,13 @@ from nnc_py.passes.memory_planning import (
     get_memory_allocation_plan,
 )
 from nnc_py.passes.memory_planning_v4 import MemoryPlanningPassV4
+from nnc_py.passes.scheduled_memory_planning import (
+    ScheduledFastAllocation,
+    ScheduledMemoryPlan,
+    ScheduledMemoryPlanningPass,
+    ScheduledSlowAllocation,
+    ScheduledTransferPoint,
+)
 
 # Optimization passes
 from nnc_py.passes.dead_code_elimination import DeadCodeEliminationPass
@@ -74,6 +81,11 @@ __all__ = [
     "MemoryPlanningPassV2",
     "MemoryPlanningPassV3",
     "MemoryPlanningPassV4",
+    "ScheduledFastAllocation",
+    "ScheduledMemoryPlan",
+    "ScheduledMemoryPlanningPass",
+    "ScheduledSlowAllocation",
+    "ScheduledTransferPoint",
     "get_memory_allocation_plan",
 
     # Optimization passes

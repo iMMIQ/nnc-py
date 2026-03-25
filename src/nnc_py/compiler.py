@@ -356,7 +356,7 @@ class Compiler:
         return "legacy_o3_default"
 
     def _validate_scheduled_o3_result(self, ctx: CompileContext) -> None:
-        """Require the strict O3 scheduled path to produce a feasible schedule."""
+        """Require the strict O3 scheduled path to produce a planned schedule."""
         if self.opt_level < 3:
             return
         if not bool(ctx.metadata.get("pipeline_scheduler_enabled")):
@@ -364,10 +364,18 @@ class Compiler:
 
         problem = ctx.pipeline_schedule_problem
         result = ctx.pipeline_schedule_result
-        if problem is not None and result is not None and result.feasible:
+        scheduled_memory_plan = ctx.metadata.get("scheduled_memory_plan")
+        if (
+            problem is not None
+            and result is not None
+            and result.feasible
+            and scheduled_memory_plan is not None
+        ):
             return
 
-        reason = "missing_schedule_result"
+        reason = "missing_scheduled_memory_plan"
+        if result is None:
+            reason = "missing_schedule_result"
         if result is not None:
             diagnostic_reason = result.diagnostics.get("reason")
             if isinstance(diagnostic_reason, str) and diagnostic_reason:
@@ -376,6 +384,8 @@ class Compiler:
                 reason = result.solver_name
             elif not result.feasible:
                 reason = "infeasible_schedule_result"
+            elif scheduled_memory_plan is None:
+                reason = "missing_scheduled_memory_plan"
         elif problem is None:
             reason = "missing_schedule_problem"
 
