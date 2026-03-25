@@ -22,4 +22,24 @@ class PipelineSchedulingPass(PassBase):
         problem = ctx.pipeline_schedule_problem
         if problem is None:
             return
-        set_pipeline_schedule_result(ctx, self._scheduler.solve(problem))
+        result = self._scheduler.solve(problem)
+        set_pipeline_schedule_result(ctx, result)
+        if (
+            ctx.optimization_level >= 3
+            and bool(ctx.metadata.get("pipeline_scheduler_enabled"))
+            and not result.feasible
+        ):
+            raise RuntimeError(_format_strict_o3_schedule_error(result.diagnostics))
+
+
+def _format_strict_o3_schedule_error(diagnostics: dict[str, object]) -> str:
+    reason = diagnostics.get("reason")
+    detail_parts: list[str] = []
+    if isinstance(reason, str) and reason:
+        detail_parts.append(reason)
+    for key in sorted(diagnostics):
+        if key == "reason":
+            continue
+        detail_parts.append(f"{key}={diagnostics[key]}")
+    detail = ", ".join(detail_parts) if detail_parts else "infeasible_schedule_result"
+    return f"O3 scheduled pipeline path failed ({detail})."

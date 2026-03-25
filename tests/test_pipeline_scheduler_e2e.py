@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 import onnx
 from onnx import TensorProto, helper
+import pytest
 
 from nnc_py.compiler import Compiler
 from nnc_py.codegen.x86_backend import X86Backend
@@ -48,14 +49,46 @@ def _make_pipeline_ready_matmul_model() -> onnx.ModelProto:
     return helper.make_model(graph, opset_imports=[helper.make_operatorsetid("", 13)])
 
 
+def _make_pipeline_ready_gemm_model() -> onnx.ModelProto:
+    lhs = helper.make_tensor(
+        "lhs",
+        TensorProto.FLOAT,
+        [1, 4],
+        np.ones((1, 4), dtype=np.float32).reshape(-1).tolist(),
+    )
+    weight = helper.make_tensor(
+        "weight",
+        TensorProto.FLOAT,
+        [4, 3],
+        np.ones((4, 3), dtype=np.float32).reshape(-1).tolist(),
+    )
+    output_info = helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 3])
+    gemm = helper.make_node(
+        "Gemm",
+        inputs=["lhs", "weight"],
+        outputs=["output"],
+        name="gemm0",
+    )
+    graph = helper.make_graph(
+        [gemm],
+        "pipeline_scheduler_e2e_gemm",
+        [],
+        [output_info],
+        [lhs, weight],
+    )
+    return helper.make_model(graph, opset_imports=[helper.make_operatorsetid("", 13)])
+
+
 def _compile_model(
     tmp_path,
     *,
     enable_pipeline_scheduler: bool | None,
     cost_model_cli_command: list[str] | None = None,
     metadata: dict[str, object] | None = None,
+    max_memory: str | None = None,
+    model_factory=_make_pipeline_ready_matmul_model,
 ):
-    model = _make_pipeline_ready_matmul_model()
+    model = model_factory()
     model_path = tmp_path / "model.onnx"
     output_dir = tmp_path / "build"
     onnx.save(model, model_path)
@@ -73,6 +106,7 @@ def _compile_model(
         str(output_dir),
         enable_pipeline_scheduler=enable_pipeline_scheduler,
         metadata=metadata,
+        max_memory=max_memory,
     )
 
     assert backend.ctx is not None
@@ -198,6 +232,36 @@ def test_missing_cli_cost_model_falls_back_without_failing_compile_or_build(tmp_
     assert (output_dir / "model.c").exists()
 
     _build_generated_x86_source(output_dir)
+
+
+def test_strict_o3_scheduled_compile_with_impossible_max_memory_preserves_budget_diagnostics(
+    tmp_path,
+):
+    model = _make_pipeline_ready_gemm_model()
+    model_path = tmp_path / "model.onnx"
+    output_dir = tmp_path / "build"
+    onnx.save(model, model_path)
+
+    compiler = Compiler(
+        target="x86",
+        opt_level=3,
+        enable_constant_folding=False,
+    )
+    backend = _CapturingX86Backend()
+    compiler.backend = backend
+
+    with pytest.raises(RuntimeError) as exc_info:
+        compiler.compile(
+            str(model_path),
+            str(output_dir),
+            enable_pipeline_scheduler=True,
+            max_memory="80",
+        )
+
+    message = str(exc_info.value)
+    assert "no_feasible_schedule_under_budget" in message
+    assert "step_id=gemm0.shape_prep" in message
+    assert "disable-pipeline-scheduler" not in message
 
 
 def test_scheduler_disable_keeps_conservative_fallback_metadata_explicit_and_buildable(

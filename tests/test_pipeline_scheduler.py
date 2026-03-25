@@ -1,11 +1,16 @@
 from nnc_py.ir.pipeline_schedule import (
     PipelineResourceKind,
     PipelineScheduleProblem,
+    ResidencyWindow,
     ScheduleDependencyKind,
     ScheduleEdge,
     ScheduleStep,
     ScheduleStepKind,
+    ScheduledValue,
+    ScheduledValueHomeTier,
     SramValue,
+    TransferStep,
+    TransferStepKind,
 )
 from nnc_py.scheduler import ListPipelineScheduler
 
@@ -16,6 +21,127 @@ def _scheduled_steps_by_id(result):
 
 def _intervals_by_value_name(result):
     return {interval.value_name: interval for interval in result.sram_intervals}
+
+
+def make_problem_with_reload_step() -> PipelineScheduleProblem:
+    return PipelineScheduleProblem(
+        steps=(
+            ScheduleStep(
+                id="lhs.load",
+                node_name="lhs.load",
+                step_kind=ScheduleStepKind.DMA_IN,
+                resource_kind=PipelineResourceKind.DMA,
+                duration=1,
+                sram_output_names=("lhs",),
+            ),
+            TransferStep(
+                id="value0.reload0",
+                node_name="reload:value0",
+                transfer_kind=TransferStepKind.RELOAD_DMA,
+                moved_value_name="value0",
+                src_tier=ScheduledValueHomeTier.SLOW,
+                dst_tier=ScheduledValueHomeTier.SRAM,
+                bytes=6,
+                duration=1,
+                sram_output_names=("value0.reload0.resident",),
+            ),
+            ScheduleStep(
+                id="consumer0.shape_prep",
+                node_name="consumer0.shape_prep",
+                step_kind=ScheduleStepKind.SHAPE_PREP,
+                resource_kind=PipelineResourceKind.SHAPE,
+                duration=1,
+                sram_input_names=("lhs", "value0.reload0.resident"),
+                sram_output_names=("shape0",),
+            ),
+            ScheduleStep(
+                id="consumer0.compute",
+                node_name="consumer0.compute",
+                step_kind=ScheduleStepKind.COMPUTE,
+                resource_kind=PipelineResourceKind.MATMUL,
+                duration=1,
+                sram_input_names=("lhs", "shape0"),
+            ),
+        ),
+        edges=(
+            ScheduleEdge("lhs.load", "consumer0.shape_prep", ScheduleDependencyKind.DATA),
+            ScheduleEdge("lhs.load", "consumer0.compute", ScheduleDependencyKind.DATA),
+            ScheduleEdge("value0.reload0", "consumer0.shape_prep", ScheduleDependencyKind.DATA),
+            ScheduleEdge("consumer0.shape_prep", "consumer0.compute", ScheduleDependencyKind.DATA),
+        ),
+        scheduled_values=(
+            ScheduledValue(
+                name="lhs",
+                graph_tensor_name="lhs",
+                size_bytes=2,
+                producer_step_id="lhs.load",
+                consumer_step_ids=("consumer0.shape_prep", "consumer0.compute"),
+                home_tier=ScheduledValueHomeTier.SRAM,
+            ),
+            ScheduledValue(
+                name="value0",
+                graph_tensor_name="value0",
+                size_bytes=6,
+                producer_step_id=None,
+                consumer_step_ids=("value0.reload0",),
+                home_tier=ScheduledValueHomeTier.SLOW,
+            ),
+            ScheduledValue(
+                name="value0.reload0.resident",
+                graph_tensor_name="value0",
+                size_bytes=6,
+                producer_step_id="value0.reload0",
+                consumer_step_ids=("consumer0.shape_prep",),
+                home_tier=ScheduledValueHomeTier.SRAM,
+            ),
+            ScheduledValue(
+                name="shape0",
+                graph_tensor_name=None,
+                size_bytes=6,
+                producer_step_id="consumer0.shape_prep",
+                consumer_step_ids=("consumer0.compute",),
+                home_tier=ScheduledValueHomeTier.SRAM,
+            ),
+        ),
+        residency_windows=(
+            ResidencyWindow(
+                value_name="lhs",
+                residency_id="lhs@0",
+                opened_by_step_id="lhs.load",
+                closed_by_step_id="consumer0.compute",
+            ),
+            ResidencyWindow(
+                value_name="value0.reload0.resident",
+                residency_id="value0.reload0.resident@0",
+                opened_by_step_id="value0.reload0",
+                closed_by_step_id="consumer0.shape_prep",
+            ),
+            ResidencyWindow(
+                value_name="shape0",
+                residency_id="shape0@0",
+                opened_by_step_id="consumer0.shape_prep",
+                closed_by_step_id="consumer0.compute",
+            ),
+        ),
+        resources=(
+            PipelineResourceKind.DMA,
+            PipelineResourceKind.SHAPE,
+            PipelineResourceKind.MATMUL,
+        ),
+        sram_capacity_bytes=10,
+    )
+
+
+def make_impossible_spill_problem() -> PipelineScheduleProblem:
+    problem = make_problem_with_reload_step()
+    return PipelineScheduleProblem(
+        steps=problem.steps,
+        edges=problem.edges,
+        scheduled_values=problem.scheduled_values,
+        residency_windows=problem.residency_windows,
+        resources=problem.resources,
+        sram_capacity_bytes=7,
+    )
 
 
 def test_list_scheduler_allows_dma_to_overlap_with_matmul():
@@ -240,8 +366,28 @@ def test_list_scheduler_returns_infeasible_result_when_step_can_never_fit_in_sra
     assert result.feasible is False
     assert result.scheduled_steps == ()
     assert result.makespan == 0
-    assert result.diagnostics["reason"] == "sram_capacity_exceeded"
+    assert result.diagnostics["reason"] == "no_feasible_schedule_under_budget"
     assert result.diagnostics["step_id"] == "too_large"
+
+
+def test_list_scheduler_places_reload_before_its_consumer():
+    problem = make_problem_with_reload_step()
+
+    result = ListPipelineScheduler().solve(problem)
+
+    assert result.feasible is True
+    by_id = _scheduled_steps_by_id(result)
+    assert by_id["value0.reload0"].end_time <= by_id["consumer0.shape_prep"].start_time
+    assert by_id["consumer0.shape_prep"].end_time <= by_id["consumer0.compute"].start_time
+
+
+def test_list_scheduler_reports_budget_failure_without_keyerror():
+    problem = make_impossible_spill_problem()
+
+    result = ListPipelineScheduler().solve(problem)
+
+    assert result.feasible is False
+    assert result.diagnostics["reason"] == "no_feasible_schedule_under_budget"
 
 
 def test_list_scheduler_returns_infeasible_result_for_cyclic_dependencies():
