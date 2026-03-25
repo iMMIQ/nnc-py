@@ -213,6 +213,7 @@ class Compiler:
                 "[bold yellow]Running optimization passes..."
             ):
                 self.pass_manager.run(ctx)
+                self._validate_scheduled_o3_result(ctx)
                 self.console.print(
                     f"✓ Applied {len(self.pass_manager.applied_passes)} passes"
                 )
@@ -307,7 +308,7 @@ class Compiler:
             return PassManager.get_default_passes(self.opt_level)
         if enable_pipeline_scheduler:
             return PassManager.get_scheduled_o3_passes()
-        return PassManager.get_default_passes(self.opt_level)
+        return PassManager.get_conservative_o3_passes()
 
     def _base_compile_metadata(self) -> dict[str, Any]:
         """Return normalized default metadata for a compile invocation."""
@@ -331,7 +332,7 @@ class Compiler:
             return bool(metadata["enable_pipeline_scheduler"])
         if "disable_pipeline_scheduler" in metadata:
             return not bool(metadata["disable_pipeline_scheduler"])
-        return False
+        return self.opt_level >= 3
 
     def _pipeline_scheduler_fallback_reason(
         self,
@@ -353,6 +354,35 @@ class Compiler:
         if bool(metadata.get("disable_pipeline_scheduler")):
             return "legacy_o3_disabled"
         return "legacy_o3_default"
+
+    def _validate_scheduled_o3_result(self, ctx: CompileContext) -> None:
+        """Require the strict O3 scheduled path to produce a feasible schedule."""
+        if self.opt_level < 3:
+            return
+        if not bool(ctx.metadata.get("pipeline_scheduler_enabled")):
+            return
+
+        problem = ctx.pipeline_schedule_problem
+        result = ctx.pipeline_schedule_result
+        if problem is not None and result is not None and result.feasible:
+            return
+
+        reason = "missing_schedule_result"
+        if result is not None:
+            diagnostic_reason = result.diagnostics.get("reason")
+            if isinstance(diagnostic_reason, str) and diagnostic_reason:
+                reason = diagnostic_reason
+            elif result.solver_name:
+                reason = result.solver_name
+            elif not result.feasible:
+                reason = "infeasible_schedule_result"
+        elif problem is None:
+            reason = "missing_schedule_problem"
+
+        raise RuntimeError(
+            "O3 scheduled pipeline path failed "
+            f"({reason}). Rerun with --disable-pipeline-scheduler to use legacy O3."
+        )
 
     def _normalize_metadata_mapping(
         self,

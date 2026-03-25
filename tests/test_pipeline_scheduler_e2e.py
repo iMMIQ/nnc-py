@@ -1,4 +1,4 @@
-"""End-to-end coverage for pipeline scheduling and fallback paths."""
+"""End-to-end coverage for pipeline scheduling and strict O3 scheduler mode."""
 
 from __future__ import annotations
 
@@ -144,7 +144,7 @@ def test_explicit_scheduler_enable_emits_current_schedule_contract_and_buildable
     _build_generated_x86_source(output_dir)
 
 
-def test_default_o3_branch_uses_conservative_fallback_contract_and_builds_generated_output(
+def test_default_o3_branch_uses_scheduled_contract_and_builds_generated_output(
     tmp_path,
 ):
     ctx, output_dir = _compile_model(
@@ -153,23 +153,21 @@ def test_default_o3_branch_uses_conservative_fallback_contract_and_builds_genera
         cost_model_cli_command=["/definitely-missing-cost-model-command-12345"],
     )
 
-    assert ctx.metadata["pipeline_scheduler_enabled"] is False
-    assert ctx.metadata["pipeline_scheduler_fallback"] == "legacy_o3_default"
+    assert ctx.metadata["pipeline_scheduler_enabled"] is True
+    assert "pipeline_scheduler_fallback" not in ctx.metadata
     assert ctx.metadata["cost_model_cli_command"] == [
         "/definitely-missing-cost-model-command-12345"
     ]
-    assert ctx.pipeline_schedule_problem is None
+    assert ctx.pipeline_schedule_problem is not None
     assert ctx.pipeline_schedule_result is not None
-    assert ctx.pipeline_schedule_result.solver_name == "disabled"
-    assert ctx.pipeline_schedule_result.feasible is False
-    assert ctx.pipeline_schedule_result.diagnostics["strategy"] == "serial"
-    assert ctx.pipeline_schedule_result.diagnostics["reason"] == "pipeline_scheduler_default_off"
-    assert ctx.metadata["memory_allocation_plan"].strategy_name != "schedule_time_v4"
+    assert ctx.pipeline_schedule_result.solver_name == "list"
+    assert ctx.pipeline_schedule_result.feasible is True
+    assert ctx.metadata["memory_allocation_plan"].strategy_name == "schedule_time_v4"
 
     model_c = (output_dir / "model.c").read_text()
     assert "Pipeline schedule summary" in model_c
     assert "schedule_metadata=present" in model_c
-    assert "solver=disabled" in model_c
+    assert "solver=list" in model_c
     assert "memory_plan_strategy=" in model_c
 
     _build_generated_x86_source(output_dir)

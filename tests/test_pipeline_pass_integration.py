@@ -1,10 +1,11 @@
-"""Integration tests for the O3 pipeline scheduling path and fallbacks."""
+"""Integration tests for the O3 pipeline scheduling path and strict scheduler mode."""
 
 from __future__ import annotations
 
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from nnc_py.codegen.base import CodeGenResult
 from nnc_py.compiler import Compiler
@@ -130,7 +131,7 @@ def test_o3_scheduled_pass_order_requires_explicit_helper():
     assert names.index("MemoryPlanningPassV4") < names.index("SpillAnalysisPass")
 
 
-def test_o3_compile_defaults_to_conservative_legacy_compatible_path(monkeypatch, tmp_path):
+def test_o3_compile_defaults_to_scheduled_path(monkeypatch, tmp_path):
     command = ["external-cost-model", "--stdio"]
 
     ctx = _compile_graph(
@@ -140,15 +141,14 @@ def test_o3_compile_defaults_to_conservative_legacy_compatible_path(monkeypatch,
     )
 
     assert ctx.metadata["cost_model_cli_command"] == command
-    assert ctx.metadata["pipeline_scheduler_enabled"] is False
-    assert ctx.metadata["pipeline_scheduler_fallback"] == "legacy_o3_default"
-    assert ctx.pipeline_schedule_problem is None
+    assert ctx.metadata["pipeline_scheduler_enabled"] is True
+    assert "pipeline_scheduler_fallback" not in ctx.metadata
+    assert ctx.pipeline_schedule_problem is not None
     assert ctx.pipeline_schedule_result is not None
-    assert ctx.pipeline_schedule_result.feasible is False
-    assert ctx.pipeline_schedule_result.diagnostics["strategy"] == "serial"
-    assert ctx.pipeline_schedule_result.diagnostics["reason"] == "pipeline_scheduler_default_off"
+    assert ctx.pipeline_schedule_result.feasible is True
+    assert ctx.pipeline_schedule_result.solver_name == "list"
     assert "gemm0" in ctx.metadata.get("node_execution_plans", {})
-    assert ctx.metadata["memory_allocation_plan"].strategy_name == "tile_regions_v3"
+    assert ctx.metadata["memory_allocation_plan"].strategy_name == "schedule_time_v4"
 
 
 def test_explicitly_enabling_scheduler_path_populates_schedule_metadata(monkeypatch, tmp_path):
@@ -207,7 +207,7 @@ def test_disabling_scheduler_with_max_memory_uses_legacy_compatible_fallback(
     assert ctx.metadata["memory_allocation_plan"].strategy_name == "tile_regions_v3"
 
 
-def test_compiler_explicit_enable_uses_scheduled_o3_helper(
+def test_compiler_default_o3_uses_scheduled_o3_helper(
     monkeypatch,
     tmp_path,
 ):
@@ -221,7 +221,7 @@ def test_compiler_explicit_enable_uses_scheduled_o3_helper(
         lambda artifacts, output_dir, entry_point: None,
     )
     monkeypatch.setattr(
-        PassManager, "get_default_passes", classmethod(lambda cls, opt_level: None)
+        PassManager, "get_default_passes", classmethod(lambda cls, opt_level: [])
     )
     monkeypatch.setattr(
         PassManager,
@@ -232,7 +232,44 @@ def test_compiler_explicit_enable_uses_scheduled_o3_helper(
     compiler.compile(
         "model.onnx",
         str(tmp_path),
-        enable_pipeline_scheduler=True,
     )
 
     assert backend.ctx is not None
+
+
+def test_o3_default_scheduler_failure_does_not_fallback(monkeypatch, tmp_path):
+    backend = _CapturingBackend()
+    compiler = Compiler(target="x86", opt_level=3)
+    compiler.frontend = SimpleNamespace(load=lambda _: _make_gemm_graph())
+    compiler.backend = backend
+    monkeypatch.setattr(
+        compiler,
+        "_write_output",
+        lambda artifacts, output_dir, entry_point: None,
+    )
+
+    class _FailingScheduledPass:
+        @property
+        def name(self) -> str:
+            return "FailingScheduledPass"
+
+        def run(self, ctx):
+            from nnc_py.ir.pipeline_schedule import PipelineScheduleResult, set_pipeline_schedule_result
+
+            set_pipeline_schedule_result(
+                ctx,
+                PipelineScheduleResult(
+                    feasible=False,
+                    solver_name="test",
+                    diagnostics={"strategy": "serial", "reason": "synthetic_failure"},
+                ),
+            )
+
+    monkeypatch.setattr(
+        PassManager,
+        "get_scheduled_o3_passes",
+        classmethod(lambda cls: [_FailingScheduledPass()]),
+    )
+
+    with pytest.raises(RuntimeError, match="scheduled pipeline path"):
+        compiler.compile("model.onnx", str(tmp_path))
