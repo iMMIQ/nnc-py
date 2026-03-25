@@ -79,13 +79,10 @@ class PassManager:
         from nnc_py.passes.identity_elimination import IdentityEliminationPass
         from nnc_py.passes.layout_planning import LayoutPlanningPass
         from nnc_py.passes.liveness import LivenessAnalysisPass
-        from nnc_py.passes.memory_planning import MemoryPlanningPassV2
-        from nnc_py.passes.memory_planning_v4 import MemoryPlanningPassV4
+        from nnc_py.passes.memory_planning import MemoryPlanningPassV2, MemoryPlanningPassV3
         from nnc_py.passes.pattern_fusion import PatternFusionPass
-        from nnc_py.passes.pipeline_scheduling import PipelineSchedulingPass
-        from nnc_py.passes.pipeline_step_lowering import PipelineStepLoweringPass
-        from nnc_py.passes.prepack_lowering import PrepackLoweringPass
         from nnc_py.passes.schedule_analysis import ScheduleAnalysisPass
+        from nnc_py.passes.prepack_lowering import PrepackLoweringPass
         from nnc_py.passes.spill import SpillAnalysisPass
         from nnc_py.passes.tiled_lowering import TiledLoweringPass
 
@@ -114,42 +111,40 @@ class PassManager:
                 SpillAnalysisPass(),  # Handles overflow if max_memory set
             ]
 
-        # O3: Advanced optimizations
+        # O3: Legacy-compatible advanced optimizations
         if opt_level >= 3:
             return [
                 IdentityEliminationPass(),
-                DeadCodeEliminationPass(),
-                PatternFusionPass(),      # NEW: Pattern-based fusion
-                PrepackLoweringPass(),    # Compile-time lowering and weight prepack
-                DominatorFusionPass(),    # NEW: Dominator-based fusion
+                DeadCodeEliminationPass(),   # Then remove dead code
+                PatternFusionPass(),         # Pattern-based fusion
+                PrepackLoweringPass(),       # Compile-time lowering and weight prepack
+                DominatorFusionPass(),       # Dominator-based fusion
                 ScheduleAnalysisPass(),
                 LayoutPlanningPass(),
                 TiledLoweringPass(),
-                PipelineStepLoweringPass(),
-                PipelineSchedulingPass(),
                 LivenessAnalysisPass(),
-                MemoryPlanningPassV4(),
+                MemoryPlanningPassV3(),
                 SpillAnalysisPass(),
             ]
 
         return []
 
     @classmethod
-    def get_conservative_o3_passes(cls) -> List[PassBase]:
-        """Get the legacy-compatible O3 compile path.
-
-        This keeps the higher-level O3 graph optimizations but avoids the
-        schedule-driven lowering/memory-planning path until downstream users
-        are ready for it.
-        """
+    def get_scheduled_o3_passes(cls) -> List[PassBase]:
+        """Get the explicit schedule-driven O3 compile path."""
         from nnc_py.passes.dead_code_elimination import DeadCodeEliminationPass
         from nnc_py.passes.dominator_fusion import DominatorFusionPass
         from nnc_py.passes.identity_elimination import IdentityEliminationPass
+        from nnc_py.passes.layout_planning import LayoutPlanningPass
         from nnc_py.passes.liveness import LivenessAnalysisPass
-        from nnc_py.passes.memory_planning import MemoryPlanningPassV2
+        from nnc_py.passes.memory_planning_v4 import MemoryPlanningPassV4
         from nnc_py.passes.pattern_fusion import PatternFusionPass
+        from nnc_py.passes.pipeline_scheduling import PipelineSchedulingPass
+        from nnc_py.passes.pipeline_step_lowering import PipelineStepLoweringPass
         from nnc_py.passes.prepack_lowering import PrepackLoweringPass
+        from nnc_py.passes.schedule_analysis import ScheduleAnalysisPass
         from nnc_py.passes.spill import SpillAnalysisPass
+        from nnc_py.passes.tiled_lowering import TiledLoweringPass
 
         return [
             IdentityEliminationPass(),
@@ -157,7 +152,17 @@ class PassManager:
             PatternFusionPass(),
             PrepackLoweringPass(),
             DominatorFusionPass(),
+            ScheduleAnalysisPass(),
+            LayoutPlanningPass(),
+            TiledLoweringPass(),
+            PipelineStepLoweringPass(),
+            PipelineSchedulingPass(),
             LivenessAnalysisPass(),
-            MemoryPlanningPassV2(),
+            MemoryPlanningPassV4(),
             SpillAnalysisPass(),
         ]
+
+    @classmethod
+    def get_conservative_o3_passes(cls) -> List[PassBase]:
+        """Get the legacy-compatible O3 compile path."""
+        return cls.get_default_passes(3)

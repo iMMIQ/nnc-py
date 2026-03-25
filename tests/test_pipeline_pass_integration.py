@@ -96,8 +96,30 @@ def _compile_graph(
     return backend.ctx
 
 
-def test_o3_default_pass_order_includes_pipeline_scheduler_and_v4():
+def test_o3_default_pass_order_uses_tile_aware_v3_without_scheduler_and_v4():
     names = [pass_obj.__class__.__name__ for pass_obj in PassManager.get_default_passes(3)]
+
+    assert "ScheduleAnalysisPass" in names
+    assert "LayoutPlanningPass" in names
+    assert "TiledLoweringPass" in names
+    assert "MemoryPlanningPassV3" in names
+    assert "PipelineStepLoweringPass" not in names
+    assert "PipelineSchedulingPass" not in names
+    assert "MemoryPlanningPassV4" not in names
+    assert names.index("PrepackLoweringPass") < names.index("DominatorFusionPass")
+    assert names.index("DominatorFusionPass") < names.index("ScheduleAnalysisPass")
+    assert names.index("ScheduleAnalysisPass") < names.index("LayoutPlanningPass")
+    assert names.index("LayoutPlanningPass") < names.index("TiledLoweringPass")
+    assert names.index("TiledLoweringPass") < names.index("LivenessAnalysisPass")
+    assert names.index("LivenessAnalysisPass") < names.index("MemoryPlanningPassV3")
+    assert names.index("MemoryPlanningPassV3") < names.index("SpillAnalysisPass")
+
+
+def test_o3_scheduled_pass_order_requires_explicit_helper():
+    names = [
+        pass_obj.__class__.__name__
+        for pass_obj in PassManager.get_scheduled_o3_passes()
+    ]
 
     assert names.index("ScheduleAnalysisPass") < names.index("LayoutPlanningPass")
     assert names.index("LayoutPlanningPass") < names.index("TiledLoweringPass")
@@ -125,8 +147,8 @@ def test_o3_compile_defaults_to_conservative_legacy_compatible_path(monkeypatch,
     assert ctx.pipeline_schedule_result.feasible is False
     assert ctx.pipeline_schedule_result.diagnostics["strategy"] == "serial"
     assert ctx.pipeline_schedule_result.diagnostics["reason"] == "pipeline_scheduler_default_off"
-    assert "memory_plan" in ctx.metadata
-    assert ctx.metadata["memory_allocation_plan"].strategy_name != "schedule_time_v4"
+    assert "gemm0" in ctx.metadata.get("node_execution_plans", {})
+    assert ctx.metadata["memory_allocation_plan"].strategy_name == "tile_regions_v3"
 
 
 def test_explicitly_enabling_scheduler_path_populates_schedule_metadata(monkeypatch, tmp_path):
@@ -163,8 +185,7 @@ def test_disabling_scheduler_path_keeps_fallback_state_explicit(monkeypatch, tmp
     assert ctx.pipeline_schedule_result.diagnostics["strategy"] == "serial"
     assert ctx.pipeline_schedule_result.diagnostics["reason"] == "pipeline_scheduler_disabled"
     assert ctx.metadata["pipeline_scheduler_fallback"] == "legacy_o3_disabled"
-    assert "memory_plan" in ctx.metadata
-    assert ctx.metadata["memory_allocation_plan"].strategy_name != "schedule_time_v4"
+    assert ctx.metadata["memory_allocation_plan"].strategy_name == "tile_regions_v3"
 
 
 def test_disabling_scheduler_with_max_memory_uses_legacy_compatible_fallback(
@@ -183,11 +204,10 @@ def test_disabling_scheduler_with_max_memory_uses_legacy_compatible_fallback(
     assert ctx.pipeline_schedule_result is not None
     assert ctx.pipeline_schedule_result.diagnostics["strategy"] == "serial"
     assert ctx.metadata["pipeline_scheduler_fallback"] == "legacy_o3_disabled"
-    assert "memory_plan" in ctx.metadata
-    assert ctx.metadata["memory_allocation_plan"].strategy_name != "schedule_time_v4"
+    assert ctx.metadata["memory_allocation_plan"].strategy_name == "tile_regions_v3"
 
 
-def test_compiler_explicit_enable_uses_legacy_get_default_passes_call_pattern(
+def test_compiler_explicit_enable_uses_scheduled_o3_helper(
     monkeypatch,
     tmp_path,
 ):
@@ -201,9 +221,12 @@ def test_compiler_explicit_enable_uses_legacy_get_default_passes_call_pattern(
         lambda artifacts, output_dir, entry_point: None,
     )
     monkeypatch.setattr(
+        PassManager, "get_default_passes", classmethod(lambda cls, opt_level: None)
+    )
+    monkeypatch.setattr(
         PassManager,
-        "get_default_passes",
-        classmethod(lambda cls, opt_level: []),
+        "get_scheduled_o3_passes",
+        classmethod(lambda cls: []),
     )
 
     compiler.compile(

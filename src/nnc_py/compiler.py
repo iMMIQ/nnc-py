@@ -306,8 +306,8 @@ class Compiler:
         if self.opt_level < 3:
             return PassManager.get_default_passes(self.opt_level)
         if enable_pipeline_scheduler:
-            return PassManager.get_default_passes(self.opt_level)
-        return PassManager.get_conservative_o3_passes()
+            return PassManager.get_scheduled_o3_passes()
+        return PassManager.get_default_passes(self.opt_level)
 
     def _base_compile_metadata(self) -> dict[str, Any]:
         """Return normalized default metadata for a compile invocation."""
