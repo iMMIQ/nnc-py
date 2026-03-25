@@ -15,6 +15,7 @@ from nnc_py.ir.pipeline_schedule import (
     PipelineResourceKind,
     ScheduleDependencyKind,
     ScheduleStepKind,
+    ScheduledValueHomeTier,
     get_pipeline_schedule_problem,
 )
 from nnc_py.ir.tensor import TensorShape, TensorType
@@ -337,32 +338,42 @@ def test_tiled_conv_lowers_to_mixed_granularity_schedule_problem():
     assert conv_steps[0].sram_output_names
     assert conv_steps[2].sram_temp_bytes > 0
 
-    sram_values = {value.name: value for value in problem.sram_values}
+    scheduled_values = {value.name: value for value in problem.scheduled_values}
     conv_input_name = _staged_value_name("conv0", "input")
     conv_weight_name = _staged_value_name("conv0", "weight")
     conv_shape_name = _shape_value_name("conv0")
     conv_output_name = _staged_value_name("conv0", "conv_out")
-    assert sram_values[conv_input_name].size_bytes == 1 * 64 * 18 * 18 * 4
-    assert sram_values[conv_input_name].producer_step_id == conv_steps[0].id
-    assert set(sram_values[conv_input_name].consumer_step_ids) == {
+    assert scheduled_values[conv_input_name].size_bytes == 1 * 64 * 18 * 18 * 4
+    assert scheduled_values[conv_input_name].producer_step_id == conv_steps[0].id
+    assert set(scheduled_values[conv_input_name].consumer_step_ids) == {
         conv_steps[1].id,
         conv_steps[2].id,
     }
-    assert sram_values[conv_weight_name].size_bytes == 64 * 64 * 3 * 3 * 4
-    assert sram_values[conv_weight_name].producer_step_id == conv_steps[0].id
-    assert set(sram_values[conv_weight_name].consumer_step_ids) == {
+    assert scheduled_values[conv_input_name].home_tier is ScheduledValueHomeTier.SRAM
+    assert scheduled_values[conv_input_name].graph_tensor_name == "input"
+    assert scheduled_values[conv_weight_name].size_bytes == 64 * 64 * 3 * 3 * 4
+    assert scheduled_values[conv_weight_name].producer_step_id == conv_steps[0].id
+    assert set(scheduled_values[conv_weight_name].consumer_step_ids) == {
         conv_steps[1].id,
         conv_steps[2].id,
     }
-    assert sram_values[conv_shape_name].size_bytes == 9 * 16
-    assert sram_values[conv_shape_name].producer_step_id == conv_steps[1].id
-    assert sram_values[conv_shape_name].consumer_step_ids == (conv_steps[2].id,)
-    assert sram_values[conv_output_name].size_bytes == 1 * 64 * 16 * 16 * 4
-    assert sram_values[conv_output_name].producer_step_id == conv_steps[2].id
-    assert sram_values[conv_output_name].consumer_step_ids == (conv_steps[3].id,)
-    assert sram_values["conv_out"].size_bytes == 0
-    assert sram_values["conv_out"].producer_step_id is None
-    assert sram_values["conv_out"].consumer_step_ids == ("relu0.compute",)
+    assert scheduled_values[conv_weight_name].home_tier is ScheduledValueHomeTier.SRAM
+    assert scheduled_values[conv_weight_name].graph_tensor_name == "weight"
+    assert scheduled_values[conv_shape_name].size_bytes == 9 * 16
+    assert scheduled_values[conv_shape_name].producer_step_id == conv_steps[1].id
+    assert scheduled_values[conv_shape_name].consumer_step_ids == (conv_steps[2].id,)
+    assert scheduled_values[conv_shape_name].home_tier is ScheduledValueHomeTier.SRAM
+    assert scheduled_values[conv_shape_name].graph_tensor_name is None
+    assert scheduled_values[conv_output_name].size_bytes == 1 * 64 * 16 * 16 * 4
+    assert scheduled_values[conv_output_name].producer_step_id == conv_steps[2].id
+    assert scheduled_values[conv_output_name].consumer_step_ids == (conv_steps[3].id,)
+    assert scheduled_values[conv_output_name].home_tier is ScheduledValueHomeTier.SRAM
+    assert scheduled_values[conv_output_name].graph_tensor_name == "conv_out"
+    assert scheduled_values["conv_out"].size_bytes == 1 * 64 * 32 * 32 * 4
+    assert scheduled_values["conv_out"].producer_step_id is None
+    assert scheduled_values["conv_out"].consumer_step_ids == ("relu0.compute",)
+    assert scheduled_values["conv_out"].home_tier is ScheduledValueHomeTier.SLOW
+    assert scheduled_values["conv_out"].graph_tensor_name == "conv_out"
 
     assert problem.resources == (
         PipelineResourceKind.DMA,
@@ -406,13 +417,14 @@ def test_no_plan_relu_still_lowers_to_single_compute_step():
         for edge in problem.edges
     )
 
-    sram_values = {value.name: value for value in problem.sram_values}
+    scheduled_values = {value.name: value for value in problem.scheduled_values}
     relu_output_name = _staged_value_name("relu0", "relu_out")
-    assert sram_values[relu_output_name].size_bytes == 1 * 64 * 32 * 32 * 4
-    assert sram_values[relu_output_name].producer_step_id == relu_steps[0].id
-    assert sram_values[relu_output_name].consumer_step_ids == ()
+    assert scheduled_values[relu_output_name].size_bytes == 1 * 64 * 32 * 32 * 4
+    assert scheduled_values[relu_output_name].producer_step_id == relu_steps[0].id
+    assert scheduled_values[relu_output_name].consumer_step_ids == ()
+    assert scheduled_values[relu_output_name].home_tier is ScheduledValueHomeTier.SRAM
     conv_output_name = _staged_value_name("conv0", "conv_out")
-    assert sram_values[conv_output_name].consumer_step_ids == ("conv0.dma_out",)
+    assert scheduled_values[conv_output_name].consumer_step_ids == ("conv0.dma_out",)
 
 
 def test_shape_family_operator_uses_shape_pipeline_step():
@@ -430,6 +442,30 @@ def test_shape_family_operator_uses_shape_pipeline_step():
     assert shape_step.launch_overhead > 0
 
 
+def test_pipeline_step_lowering_marks_external_values_with_home_tier():
+    ctx = _make_conv_relu_context()
+
+    _run_pipeline_step_lowering(ctx)
+
+    problem = ctx.pipeline_schedule_problem
+    input_value = next(value for value in problem.scheduled_values if value.name == "input")
+
+    assert input_value.home_tier is ScheduledValueHomeTier.INPUT
+
+
+def test_pipeline_step_lowering_keeps_staged_outputs_as_sram_values():
+    ctx = _make_conv_relu_context()
+
+    _run_pipeline_step_lowering(ctx)
+
+    problem = ctx.pipeline_schedule_problem
+    staged = next(
+        value for value in problem.scheduled_values if value.name.startswith("sram|node|")
+    )
+
+    assert staged.home_tier is ScheduledValueHomeTier.SRAM
+
+
 def test_shared_graph_weight_stages_to_distinct_node_local_sram_values():
     ctx = _make_two_conv_shared_weight_context()
 
@@ -438,27 +474,27 @@ def test_shared_graph_weight_stages_to_distinct_node_local_sram_values():
     problem = ctx.get_pipeline_schedule_problem()
     assert problem is not None
 
-    sram_values = {value.name: value for value in problem.sram_values}
+    scheduled_values = {value.name: value for value in problem.scheduled_values}
     conv0_weight_name = _staged_value_name("conv0", "weight")
     conv1_weight_name = _staged_value_name("conv1", "weight")
-    assert conv0_weight_name in sram_values
-    assert conv1_weight_name in sram_values
-    assert sram_values[conv0_weight_name].name != sram_values[conv1_weight_name].name
-    assert sram_values[conv0_weight_name].producer_step_id == "conv0.dma_in"
-    assert sram_values[conv1_weight_name].producer_step_id == "conv1.dma_in"
-    assert set(sram_values[conv0_weight_name].consumer_step_ids) == {
+    assert conv0_weight_name in scheduled_values
+    assert conv1_weight_name in scheduled_values
+    assert scheduled_values[conv0_weight_name].name != scheduled_values[conv1_weight_name].name
+    assert scheduled_values[conv0_weight_name].producer_step_id == "conv0.dma_in"
+    assert scheduled_values[conv1_weight_name].producer_step_id == "conv1.dma_in"
+    assert set(scheduled_values[conv0_weight_name].consumer_step_ids) == {
         "conv0.shape_prep",
         "conv0.compute",
     }
-    assert set(sram_values[conv1_weight_name].consumer_step_ids) == {
+    assert set(scheduled_values[conv1_weight_name].consumer_step_ids) == {
         "conv1.shape_prep",
         "conv1.compute",
     }
     assert all(
-        "conv1" not in consumer for consumer in sram_values[conv0_weight_name].consumer_step_ids
+        "conv1" not in consumer for consumer in scheduled_values[conv0_weight_name].consumer_step_ids
     )
     assert all(
-        "conv0" not in consumer for consumer in sram_values[conv1_weight_name].consumer_step_ids
+        "conv0" not in consumer for consumer in scheduled_values[conv1_weight_name].consumer_step_ids
     )
 
 
@@ -470,10 +506,12 @@ def test_lowering_tracks_external_input_values_for_scheduler_validation():
     problem = ctx.get_pipeline_schedule_problem()
     assert problem is not None
 
-    sram_values = {value.name: value for value in problem.sram_values}
-    assert "input" in sram_values
-    assert "weight" in sram_values
-    assert sram_values["input"].producer_step_id is None
-    assert sram_values["weight"].producer_step_id is None
-    assert "conv0.dma_in" in sram_values["input"].consumer_step_ids
-    assert "conv0.dma_in" in sram_values["weight"].consumer_step_ids
+    scheduled_values = {value.name: value for value in problem.scheduled_values}
+    assert "input" in scheduled_values
+    assert "weight" in scheduled_values
+    assert scheduled_values["input"].producer_step_id is None
+    assert scheduled_values["weight"].producer_step_id is None
+    assert scheduled_values["input"].home_tier is ScheduledValueHomeTier.INPUT
+    assert scheduled_values["weight"].home_tier is ScheduledValueHomeTier.SLOW
+    assert "conv0.dma_in" in scheduled_values["input"].consumer_step_ids
+    assert "conv0.dma_in" in scheduled_values["weight"].consumer_step_ids

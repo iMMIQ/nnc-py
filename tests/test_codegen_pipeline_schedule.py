@@ -17,10 +17,11 @@ from nnc_py.ir.pipeline_schedule import (
     PipelineScheduleProblem,
     PipelineScheduleResult,
     SramAllocationInterval,
+    ScheduledValue,
+    ScheduledValueHomeTier,
     ScheduledStep,
     ScheduleStep,
     ScheduleStepKind,
-    SramValue,
 )
 from nnc_py.ir.tensor import TensorShape, TensorType
 from nnc_py.ir.types import DataType
@@ -96,14 +97,16 @@ def _attach_schedule_metadata(
                 },
             ),
         ),
-        sram_values=(
-            SramValue(
+        scheduled_values=(
+            ScheduledValue(
                 name="output",
+                graph_tensor_name="output",
                 size_bytes=16,
                 producer_step_id="relu0.compute",
                 consumer_step_ids=(),
                 must_reside_in_sram=True,
                 can_alias=True,
+                home_tier=ScheduledValueHomeTier.SRAM,
             ),
         ),
         resources=(PipelineResourceKind.OTHER,),
@@ -298,22 +301,26 @@ def test_schedule_codegen_materializes_step_level_worker_functions():
                 attrs={"cost_model": "unit_test_cost_model"},
             ),
         ),
-        sram_values=(
-            SramValue(
+        scheduled_values=(
+            ScheduledValue(
                 name="input",
+                graph_tensor_name="input",
                 size_bytes=16,
                 producer_step_id=None,
                 consumer_step_ids=("relu0.dma_in", "relu0.shape_prep", "relu0.compute"),
                 must_reside_in_sram=False,
                 can_alias=True,
+                home_tier=ScheduledValueHomeTier.INPUT,
             ),
-            SramValue(
+            ScheduledValue(
                 name="output",
+                graph_tensor_name="output",
                 size_bytes=16,
                 producer_step_id="relu0.compute",
                 consumer_step_ids=("relu0.dma_out",),
                 must_reside_in_sram=False,
                 can_alias=True,
+                home_tier=ScheduledValueHomeTier.SLOW,
             ),
         ),
         resources=(
@@ -419,22 +426,26 @@ def test_schedule_codegen_materializes_staged_dma_buffers_and_memcpy_flow():
                 attrs={"cost_model": "unit_test_cost_model"},
             ),
         ),
-        sram_values=(
-            SramValue(
+        scheduled_values=(
+            ScheduledValue(
                 name=staged_input,
+                graph_tensor_name="input",
                 size_bytes=16,
                 producer_step_id="relu0.dma_in",
                 consumer_step_ids=("relu0.compute",),
                 must_reside_in_sram=False,
                 can_alias=True,
+                home_tier=ScheduledValueHomeTier.SRAM,
             ),
-            SramValue(
+            ScheduledValue(
                 name=staged_output,
+                graph_tensor_name="output",
                 size_bytes=16,
                 producer_step_id="relu0.compute",
                 consumer_step_ids=("relu0.dma_out",),
                 must_reside_in_sram=False,
                 can_alias=True,
+                home_tier=ScheduledValueHomeTier.SRAM,
             ),
         ),
         resources=(PipelineResourceKind.DMA, PipelineResourceKind.OTHER),
@@ -541,22 +552,26 @@ def test_schedule_codegen_moves_unified_spill_transfers_onto_dma_workers():
                 kind=ScheduleDependencyKind.SAME_NODE_SEQUENCE,
             ),
         ),
-        sram_values=(
-            SramValue(
+        scheduled_values=(
+            ScheduledValue(
                 name="input",
+                graph_tensor_name="input",
                 size_bytes=16,
                 producer_step_id=None,
                 consumer_step_ids=("relu0.dma_in", "relu0.compute"),
                 must_reside_in_sram=False,
                 can_alias=True,
+                home_tier=ScheduledValueHomeTier.INPUT,
             ),
-            SramValue(
+            ScheduledValue(
                 name="output",
+                graph_tensor_name="output",
                 size_bytes=16,
                 producer_step_id="relu0.compute",
                 consumer_step_ids=("relu0.dma_out",),
                 must_reside_in_sram=False,
                 can_alias=True,
+                home_tier=ScheduledValueHomeTier.SLOW,
             ),
         ),
         resources=(PipelineResourceKind.DMA, PipelineResourceKind.OTHER),

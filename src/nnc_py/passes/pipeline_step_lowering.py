@@ -17,7 +17,8 @@ from nnc_py.ir.pipeline_schedule import (
     ScheduleEdge,
     ScheduleStep,
     ScheduleStepKind,
-    SramValue,
+    ScheduledValue,
+    ScheduledValueHomeTier,
     set_pipeline_schedule_problem,
 )
 from nnc_py.ir.types import DataType
@@ -151,7 +152,8 @@ def lower_execution_plans_to_schedule_problem(
     return PipelineScheduleProblem(
         steps=tuple(steps),
         edges=tuple(edges),
-        sram_values=_build_sram_values(
+        scheduled_values=_build_scheduled_values(
+            ctx,
             steps,
             produced_values_by_name,
             external_values_by_name=external_values_by_name,
@@ -407,12 +409,13 @@ def _make_step(
     )
 
 
-def _build_sram_values(
+def _build_scheduled_values(
+    ctx: CompileContext,
     steps: Sequence[ScheduleStep],
     produced_values_by_name: dict[str, _ValueSpec],
     *,
     external_values_by_name: dict[str, _ValueSpec],
-) -> tuple[SramValue, ...]:
+) -> tuple[ScheduledValue, ...]:
     consumers_by_name: dict[str, list[str]] = {}
     for step in steps:
         for name in step.sram_input_names:
@@ -425,20 +428,44 @@ def _build_sram_values(
         ordered_value_specs.append(external_values_by_name[value_name])
 
     return tuple(
-        SramValue(
-            name=value_spec.name,
-            size_bytes=(
-                0
-                if value_spec.producer_step_id is None
-                else max(value_spec.size_bytes, 1)
-            ),
-            producer_step_id=value_spec.producer_step_id,
+        _scheduled_value_from_spec(
+            value_spec,
             consumer_step_ids=tuple(consumers_by_name.get(value_spec.name, ())),
-            must_reside_in_sram=False,
-            can_alias=True,
+            home_tier=_scheduled_value_home_tier(ctx, value_spec),
         )
         for value_spec in ordered_value_specs
     )
+
+
+def _scheduled_value_from_spec(
+    value_spec: _ValueSpec,
+    *,
+    consumer_step_ids: tuple[str, ...],
+    home_tier: ScheduledValueHomeTier,
+) -> ScheduledValue:
+    return ScheduledValue(
+        name=value_spec.name,
+        graph_tensor_name=value_spec.graph_tensor_name,
+        size_bytes=max(value_spec.size_bytes, 1),
+        producer_step_id=value_spec.producer_step_id,
+        consumer_step_ids=consumer_step_ids,
+        can_alias=True,
+        home_tier=home_tier,
+    )
+
+
+def _scheduled_value_home_tier(
+    ctx: CompileContext,
+    value_spec: _ValueSpec,
+) -> ScheduledValueHomeTier:
+    if value_spec.producer_step_id is not None:
+        return ScheduledValueHomeTier.SRAM
+    tensor_name = value_spec.graph_tensor_name or value_spec.name
+    if tensor_name in ctx.graph.inputs:
+        return ScheduledValueHomeTier.INPUT
+    if tensor_name in ctx.graph.constants:
+        return ScheduledValueHomeTier.CONST
+    return ScheduledValueHomeTier.SLOW
 
 
 def _append_edge(
