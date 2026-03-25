@@ -34,6 +34,7 @@ from nnc_py.passes.prepack_lowering import PrepackLoweringPass
 from nnc_py.passes.layout_planning import LayoutPlanningPass, LayoutPlan
 from nnc_py.passes.schedule_analysis import ScheduleAnalysisPass, ScheduleCandidate
 from nnc_py.passes.pipeline_step_lowering import PipelineStepLoweringPass
+from nnc_py.passes.pipeline_scheduling import PipelineSchedulingPass
 from nnc_py.passes.tiled_lowering import TiledLoweringPass
 from nnc_py.passes.dominator_fusion import DominatorFusionPass
 from nnc_py.passes.fusion_groups import FusionGroup, GroupArena
@@ -82,6 +83,7 @@ __all__ = [
     "ScheduleAnalysisPass",
     "ScheduleCandidate",
     "PipelineStepLoweringPass",
+    "PipelineSchedulingPass",
     "TiledLoweringPass",
     "DominatorFusionPass",
 
