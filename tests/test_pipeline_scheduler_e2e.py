@@ -122,8 +122,12 @@ def test_explicit_scheduler_enable_emits_current_schedule_contract_and_buildable
     assert ctx.pipeline_schedule_problem.metadata["origin"] == "pipeline_step_lowering"
     assert ctx.pipeline_schedule_result is not None
     assert ctx.pipeline_schedule_result.solver_name == "list"
-    assert ctx.pipeline_schedule_result.feasible is False
-    assert ctx.pipeline_schedule_result.diagnostics["reason"] == "unknown_sram_value_reference"
+    assert ctx.pipeline_schedule_result.feasible is True
+    assert ctx.pipeline_schedule_result.makespan > 0
+    assert len(ctx.pipeline_schedule_result.scheduled_steps) == 1
+    assert ctx.pipeline_schedule_result.diagnostics["scheduled_order"] == (
+        "matmul0.compute",
+    )
     assert ctx.metadata["memory_allocation_plan"].strategy_name in {
         "schedule_time_v4",
         "tile_regions_v3",
@@ -133,7 +137,8 @@ def test_explicit_scheduler_enable_emits_current_schedule_contract_and_buildable
     assert "Pipeline schedule summary" in model_c
     assert "schedule_metadata=present" in model_c
     assert "solver=list" in model_c
-    assert "feasible=no" in model_c
+    assert "feasible=yes" in model_c
+    assert "pipeline step:" in model_c
     assert "memory_plan_strategy=" in model_c
 
     _build_generated_x86_source(output_dir)

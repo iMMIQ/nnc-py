@@ -360,7 +360,9 @@ def test_tiled_conv_lowers_to_mixed_granularity_schedule_problem():
     assert sram_values[conv_output_name].size_bytes == 1 * 64 * 16 * 16 * 4
     assert sram_values[conv_output_name].producer_step_id == conv_steps[2].id
     assert sram_values[conv_output_name].consumer_step_ids == (conv_steps[3].id,)
-    assert "conv_out" not in sram_values
+    assert sram_values["conv_out"].size_bytes == 0
+    assert sram_values["conv_out"].producer_step_id is None
+    assert sram_values["conv_out"].consumer_step_ids == ("relu0.compute",)
 
     assert problem.resources == (
         PipelineResourceKind.DMA,
@@ -458,3 +460,20 @@ def test_shared_graph_weight_stages_to_distinct_node_local_sram_values():
     assert all(
         "conv0" not in consumer for consumer in sram_values[conv1_weight_name].consumer_step_ids
     )
+
+
+def test_lowering_tracks_external_input_values_for_scheduler_validation():
+    ctx = _make_conv_relu_context()
+
+    _run_pipeline_step_lowering(ctx)
+
+    problem = ctx.get_pipeline_schedule_problem()
+    assert problem is not None
+
+    sram_values = {value.name: value for value in problem.sram_values}
+    assert "input" in sram_values
+    assert "weight" in sram_values
+    assert sram_values["input"].producer_step_id is None
+    assert sram_values["weight"].producer_step_id is None
+    assert "conv0.dma_in" in sram_values["input"].consumer_step_ids
+    assert "conv0.dma_in" in sram_values["weight"].consumer_step_ids

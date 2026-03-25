@@ -404,3 +404,29 @@ def test_list_scheduler_rejects_missing_sram_consumer_ownership():
     assert result.diagnostics["reason"] == "sram_consumer_mismatch"
     assert result.diagnostics["step_id"] == "consumer0"
     assert result.diagnostics["value_name"] == "value0"
+
+
+def test_list_scheduler_treats_zero_capacity_as_unbounded_default():
+    problem = PipelineScheduleProblem(
+        steps=(
+            ScheduleStep(
+                id="compute0",
+                node_name="compute0",
+                step_kind=ScheduleStepKind.COMPUTE,
+                resource_kind=PipelineResourceKind.MATMUL,
+                duration=3,
+                sram_output_names=("value0",),
+                sram_temp_bytes=4,
+            ),
+        ),
+        sram_values=(SramValue(name="value0", size_bytes=8, producer_step_id="compute0"),),
+        resources=(PipelineResourceKind.MATMUL,),
+        sram_capacity_bytes=0,
+    )
+
+    result = ListPipelineScheduler().solve(problem)
+
+    assert result.feasible is True
+    assert len(result.scheduled_steps) == 1
+    assert result.scheduled_steps[0].step_id == "compute0"
+    assert result.makespan == 3

@@ -344,15 +344,18 @@ def _earliest_feasible_start(
         resource_available.get(step.resource_kind, 0),
     )
     duration = step.duration + step.launch_overhead
-    if problem.sram_capacity_bytes < 0:
+    capacity_bytes = problem.sram_capacity_bytes
+    if capacity_bytes < 0:
         return None
+    if capacity_bytes == 0:
+        return start_time
 
     reserved_bytes = step.sram_temp_bytes + sum(
         value_by_name[name].size_bytes
         for name in step.sram_output_names
         if name in value_by_name
     )
-    if reserved_bytes > problem.sram_capacity_bytes:
+    if reserved_bytes > capacity_bytes:
         return None
 
     occupancy_intervals = _occupied_sram_intervals(
@@ -367,7 +370,7 @@ def _earliest_feasible_start(
             end_time=end_time,
             reserved_bytes=reserved_bytes,
             occupancy_intervals=occupancy_intervals,
-            capacity_bytes=problem.sram_capacity_bytes,
+            capacity_bytes=capacity_bytes,
         )
         if violating_end_times == []:
             return start_time

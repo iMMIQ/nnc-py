@@ -96,9 +96,15 @@ def lower_execution_plans_to_schedule_problem(
     step_order_by_node: dict[str, list[str]] = {}
     producer_last_step_by_tensor: dict[str, str] = {}
     produced_values_by_name: dict[str, _ValueSpec] = {}
+    external_values_by_name: dict[str, _ValueSpec] = {}
 
     for node in ctx.graph.topological_sort():
         plan = ctx.get_node_execution_plan(node.name) or _synthesize_execution_plan(ctx, node)
+        for input_access in plan.input_accesses:
+            external_spec = _external_value_spec_for_access(ctx, input_access)
+            existing_spec = external_values_by_name.get(external_spec.name)
+            if existing_spec is None or external_spec.size_bytes > existing_spec.size_bytes:
+                external_values_by_name[external_spec.name] = external_spec
         lowering = _build_node_steps(
             ctx,
             node,
@@ -145,7 +151,11 @@ def lower_execution_plans_to_schedule_problem(
     return PipelineScheduleProblem(
         steps=tuple(steps),
         edges=tuple(edges),
-        sram_values=_build_sram_values(steps, produced_values_by_name),
+        sram_values=_build_sram_values(
+            steps,
+            produced_values_by_name,
+            external_values_by_name=external_values_by_name,
+        ),
         resources=_RESOURCE_ORDER,
         sram_capacity_bytes=int(ctx.metadata.get("pipeline_sram_capacity_bytes", 0) or 0),
         metadata={
@@ -400,23 +410,34 @@ def _make_step(
 def _build_sram_values(
     steps: Sequence[ScheduleStep],
     produced_values_by_name: dict[str, _ValueSpec],
+    *,
+    external_values_by_name: dict[str, _ValueSpec],
 ) -> tuple[SramValue, ...]:
     consumers_by_name: dict[str, list[str]] = {}
     for step in steps:
         for name in step.sram_input_names:
-            if name in produced_values_by_name:
-                consumers_by_name.setdefault(name, []).append(step.id)
+            consumers_by_name.setdefault(name, []).append(step.id)
+
+    ordered_value_specs: list[_ValueSpec] = list(produced_values_by_name.values())
+    for value_name in sorted(external_values_by_name):
+        if value_name in produced_values_by_name:
+            continue
+        ordered_value_specs.append(external_values_by_name[value_name])
 
     return tuple(
         SramValue(
             name=value_spec.name,
-            size_bytes=max(value_spec.size_bytes, 1),
+            size_bytes=(
+                0
+                if value_spec.producer_step_id is None
+                else max(value_spec.size_bytes, 1)
+            ),
             producer_step_id=value_spec.producer_step_id,
             consumer_step_ids=tuple(consumers_by_name.get(value_spec.name, ())),
             must_reside_in_sram=False,
             can_alias=True,
         )
-        for value_spec in produced_values_by_name.values()
+        for value_spec in ordered_value_specs
     )
 
 
