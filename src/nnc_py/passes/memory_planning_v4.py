@@ -13,6 +13,12 @@ from nnc_py.ir.pipeline_schedule import (
 )
 from nnc_py.passes.base import PassBase
 from nnc_py.passes.memory_plan import MemoryBuffer
+from nnc_py.passes.memory_planning import (
+    MemoryPlanningPassV2,
+    _resolve_max_memory_budget,
+    _should_use_tile_aware_v3,
+    allocate_tile_regions,
+)
 from nnc_py.passes.memory_strategy import (
     LogicalMemoryRegion,
     MemoryAllocationPlan,
@@ -47,7 +53,29 @@ class MemoryPlanningPassV4(PassBase):
 
     def _execute(self, ctx: CompileContext) -> None:
         plan = self._build_plan(ctx)
+        max_memory = _resolve_max_memory_budget(ctx)
+        if max_memory is not None:
+            execution_plans = ctx.node_execution_plans
+            if plan.total_fast_memory > max_memory and _should_use_tile_aware_v3(
+                ctx, execution_plans
+            ):
+                tile_plan = allocate_tile_regions(ctx)
+                if tile_plan.total_fast_memory <= max_memory:
+                    ctx.metadata["memory_allocation_plan"] = tile_plan
+                    ctx.metadata["memory_budget_satisfied_by_v3"] = max_memory
+                    ctx.metadata.pop("memory_plan", None)
+                    ctx.metadata.pop("max_memory", None)
+                    return
+
+            if 0 < plan.total_fast_memory <= max_memory:
+                ctx.metadata["memory_allocation_plan"] = plan
+                ctx.metadata["memory_budget_satisfied_by_v4"] = max_memory
+                MemoryPlanningPassV2()._store_legacy_formats(ctx, plan)
+                ctx.metadata.pop("max_memory", None)
+                return
+
         ctx.metadata["memory_allocation_plan"] = plan
+        MemoryPlanningPassV2()._store_legacy_formats(ctx, plan)
 
     def _build_plan(self, ctx: CompileContext) -> MemoryAllocationPlan:
         intervals = self._collect_intervals(ctx)
@@ -120,7 +148,21 @@ class MemoryPlanningPassV4(PassBase):
         normalized: list[_TimedValueInterval] = []
         seen_names: set[str] = set()
         for value in schedule_problem.sram_values:
-            interval = _derive_interval(value, scheduled_steps, schedule_result.makespan)
+            size_bytes = _resolve_value_size_bytes(ctx, value)
+            if size_bytes <= 0:
+                return None
+            interval = _derive_interval(
+                SramValue(
+                    name=value.name,
+                    size_bytes=size_bytes,
+                    producer_step_id=value.producer_step_id,
+                    consumer_step_ids=value.consumer_step_ids,
+                    must_reside_in_sram=value.must_reside_in_sram,
+                    can_alias=value.can_alias,
+                ),
+                scheduled_steps,
+                schedule_result.makespan,
+            )
             if interval is None:
                 return None
             if interval.name in seen_names:
@@ -136,6 +178,17 @@ class MemoryPlanningPassV4(PassBase):
             )
         )
         return normalized
+
+
+def _resolve_value_size_bytes(ctx: CompileContext, value: SramValue) -> int:
+    if value.size_bytes > 0:
+        return value.size_bytes
+
+    tensor = ctx.graph.tensors.get(value.name)
+    if tensor is None:
+        return 0
+
+    return max(tensor.byte_size(), 0)
 
 
 def _empty_plan() -> MemoryAllocationPlan:

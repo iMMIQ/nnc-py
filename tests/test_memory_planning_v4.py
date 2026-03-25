@@ -11,7 +11,10 @@ from nnc_py.ir.pipeline_schedule import (
     SramAllocationInterval,
     SramValue,
 )
+from nnc_py.ir.tensor import TensorShape, TensorType
+from nnc_py.ir.types import DataType
 from nnc_py.passes.memory_planning_v4 import MemoryPlanningPassV4
+from nnc_py.passes.spill import SpillAnalysisPass
 
 
 def make_context(
@@ -158,6 +161,39 @@ def test_memory_planning_v4_emits_expected_strategy_and_logical_allocations():
     assert plan.logical_regions["value_out"].offset == plan.buffers[0].offset
 
 
+def test_memory_planning_v4_remains_compatible_with_spill_analysis():
+    problem = make_problem(
+        SramValue(
+            name="value_out",
+            size_bytes=48,
+            producer_step_id="compute0",
+            consumer_step_ids=("store0",),
+        )
+    )
+    result = make_result(
+        ScheduledStep(
+            step_id="compute0",
+            resource_kind=PipelineResourceKind.MATMUL,
+            start_time=1,
+            end_time=3,
+        ),
+        ScheduledStep(
+            step_id="store0",
+            resource_kind=PipelineResourceKind.OTHER,
+            start_time=3,
+            end_time=5,
+        ),
+        makespan=5,
+    )
+    ctx = make_context(problem=problem, result=result)
+    ctx.metadata["max_memory"] = 64
+
+    MemoryPlanningPassV4().run(ctx)
+    SpillAnalysisPass().run(ctx)
+
+    assert ctx.metadata.get("spill_plan") is None
+
+
 def test_memory_planning_v4_falls_back_to_empty_plan_when_schedule_metadata_is_missing_or_unusable():
     missing_ctx = make_context()
     missing_problem_ctx = make_context(
@@ -203,6 +239,51 @@ def test_memory_planning_v4_falls_back_to_empty_plan_when_schedule_metadata_is_m
         assert plan.logical_regions == {}
         assert plan.total_fast_memory == 0
         assert plan.num_buffers == 0
+
+
+def test_memory_planning_v4_uses_graph_tensor_size_for_external_zero_sized_values():
+    graph = Graph("memory_v4_external")
+    graph.add_tensor(
+        TensorType(
+            name="external_in",
+            dtype=DataType.FLOAT32,
+            shape=TensorShape([1, 8]),
+        )
+    )
+    ctx = CompileContext(graph=graph, target="x86", optimization_level=3)
+    ctx.metadata["pipeline_schedule_problem"] = make_problem(
+        SramValue(
+            name="external_in",
+            size_bytes=0,
+            producer_step_id=None,
+            consumer_step_ids=("consumer0",),
+        ),
+        steps=(
+            ScheduleStep(
+                id="consumer0",
+                node_name="consumer0",
+                resource_kind=PipelineResourceKind.OTHER,
+                duration=1,
+                sram_input_names=("external_in",),
+            ),
+        ),
+    )
+    ctx.metadata["pipeline_schedule_result"] = make_result(
+        ScheduledStep(
+            step_id="consumer0",
+            resource_kind=PipelineResourceKind.OTHER,
+            start_time=0,
+            end_time=2,
+        ),
+        feasible=True,
+        makespan=2,
+    )
+
+    MemoryPlanningPassV4().run(ctx)
+
+    plan = ctx.metadata["memory_allocation_plan"]
+    assert plan.total_fast_memory == 32
+    assert plan.tensor_allocations["external_in"].size == 32
 
 
 def test_memory_planning_v4_changes_buffer_count_when_derived_interval_timing_changes():
