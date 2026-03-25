@@ -117,7 +117,9 @@ def expand_schedule_problem(
             )
         )
 
-        for consumer_index, consumer_step_id in enumerate(value.consumer_step_ids):
+        for consumer_index, consumer_step_id in enumerate(
+            _unique_consumer_step_ids(value.consumer_step_ids)
+        ):
             reload_step_id = f"{value.name}.reload{consumer_index}"
             resident_value_name = f"{reload_step_id}.resident"
             reload_step = TransferStep(
@@ -302,6 +304,19 @@ def _pick_spill_candidate(
             -lifetime.producer_index,
         ),
     )
+
+
+def _unique_consumer_step_ids(
+    consumer_step_ids: tuple[str, ...],
+) -> tuple[str, ...]:
+    unique_consumer_step_ids: list[str] = []
+    seen_step_ids: set[str] = set()
+    for consumer_step_id in consumer_step_ids:
+        if consumer_step_id in seen_step_ids:
+            continue
+        unique_consumer_step_ids.append(consumer_step_id)
+        seen_step_ids.add(consumer_step_id)
+    return tuple(unique_consumer_step_ids)
 
 
 def _transfer_duration(size_bytes: int) -> int:

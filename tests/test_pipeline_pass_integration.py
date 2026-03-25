@@ -66,10 +66,12 @@ def _compile_graph(
     monkeypatch,
     tmp_path,
     *,
+    graph_factory=_make_gemm_graph,
     metadata: dict[str, object] | None = None,
     cost_model_cli_command: list[str] | None = None,
     max_memory: str | None = None,
     enable_pipeline_scheduler: bool | None = None,
+    relax_scheduled_validation: bool = False,
 ):
     backend = _CapturingBackend()
     compiler = Compiler(
@@ -77,13 +79,19 @@ def _compile_graph(
         opt_level=3,
         cost_model_cli_command=cost_model_cli_command,
     )
-    compiler.frontend = SimpleNamespace(load=lambda _: _make_gemm_graph())
+    compiler.frontend = SimpleNamespace(load=lambda _: graph_factory())
     compiler.backend = backend
     monkeypatch.setattr(
         compiler,
         "_write_output",
         lambda artifacts, output_dir, entry_point: None,
     )
+    if relax_scheduled_validation:
+        monkeypatch.setattr(
+            compiler,
+            "_validate_scheduled_o3_result",
+            lambda ctx: None,
+        )
 
     compiler.compile(
         "model.onnx",
@@ -171,6 +179,22 @@ def test_explicitly_enabling_scheduler_path_populates_schedule_metadata(monkeypa
     assert ctx.pipeline_schedule_result is not None
     assert ctx.pipeline_schedule_result.solver_name == "list"
     assert ctx.metadata["memory_allocation_plan"].strategy_name == "schedule_time_v4"
+
+
+def test_scheduled_compile_with_max_memory_records_expansion_output(monkeypatch, tmp_path):
+    ctx = _compile_graph(
+        monkeypatch,
+        tmp_path,
+        max_memory="80",
+        relax_scheduled_validation=True,
+    )
+
+    problem = ctx.pipeline_schedule_problem
+    assert problem is not None
+    assert problem.metadata["scheduled_memory_expansion"]["max_memory"] == 80
+    assert problem.metadata["scheduled_memory_expansion"]["spilled_values"]
+    assert any(step.id.endswith(".spill0") for step in problem.steps)
+    assert any(step.id.endswith(".reload0") for step in problem.steps)
 
 
 def test_disabling_scheduler_path_keeps_fallback_state_explicit(monkeypatch, tmp_path):
