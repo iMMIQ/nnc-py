@@ -1,8 +1,9 @@
 """Main compiler class."""
 
 import re
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from rich.console import Console
 
@@ -10,6 +11,7 @@ from nnc_py.codegen.npu_backend import NPUBackend
 from nnc_py.codegen.x86_backend import X86Backend
 from nnc_py.frontend.onnx_loader import ONNXFrontend
 from nnc_py.ir.context import CompileContext
+from nnc_py.ir.pipeline_schedule import PipelineScheduleResult, set_pipeline_schedule_result
 from nnc_py.passes.base import PassManager
 
 
@@ -71,6 +73,9 @@ class Compiler:
         memory_strategy: str = None,
         enable_constant_folding: bool = True,
         debug_mode: bool = False,
+        cost_model_cli_command: str | list[str] | None = None,
+        enable_pipeline_scheduler: bool | None = None,
+        metadata: Mapping[str, Any] | None = None,
     ):
         """Initialize the compiler.
 
@@ -80,22 +85,29 @@ class Compiler:
             memory_strategy: Memory allocation strategy (e.g., "basic").
             enable_constant_folding: Whether to enable ONNX constant folding (via onnxsim).
             debug_mode: Whether to enable debug mode with intermediate tensor dumps.
+            cost_model_cli_command: Optional external CLI command for schedule-step cost estimation.
+            enable_pipeline_scheduler: Override for the O3 pipeline scheduler path.
+            metadata: Default compile-context metadata to merge into each compilation.
         """
         self.target = target
         self.opt_level = opt_level
         self.memory_strategy = memory_strategy
         self.enable_constant_folding = enable_constant_folding
         self.debug_mode = debug_mode
+        self.cost_model_cli_command = cost_model_cli_command
+        self.enable_pipeline_scheduler = enable_pipeline_scheduler
+        self.default_metadata = self._normalize_metadata_mapping(metadata)
         self.console = Console()
 
         # Initialize compiler stages
         self.frontend = ONNXFrontend(enable_simplify=enable_constant_folding)
-        self.pass_manager = PassManager()
         self.backend = self._create_backend(target)
-
-        # Register default passes based on optimization level
-        for pass_obj in PassManager.get_default_passes(opt_level):
-            self.pass_manager.register(pass_obj)
+        self.pass_manager = self._build_pass_manager(
+            enable_pipeline_scheduler=self._resolve_pipeline_scheduler_enabled(
+                self._base_compile_metadata(),
+                explicit_enable_pipeline_scheduler=None,
+            )
+        )
 
     def compile(
         self,
@@ -104,6 +116,9 @@ class Compiler:
         entry_point: str = "nnc_run",
         max_memory: str = None,
         memory_strategy: str = None,
+        cost_model_cli_command: str | list[str] | None = None,
+        enable_pipeline_scheduler: bool | None = None,
+        metadata: Mapping[str, Any] | None = None,
     ) -> None:
         """Compile an ONNX model to C code.
 
@@ -113,6 +128,9 @@ class Compiler:
             entry_point: Name for the entry point function.
             max_memory: Maximum fast memory size (e.g., "256K", "1M", "16MB").
             memory_strategy: Memory allocation strategy (overrides constructor).
+            cost_model_cli_command: Optional external CLI command for schedule-step cost estimation.
+            enable_pipeline_scheduler: Override for the O3 pipeline scheduler path.
+            metadata: Additional compile-context metadata for this invocation.
         """
         # Parse max_memory if provided
         max_memory_bytes = None
@@ -137,9 +155,14 @@ class Compiler:
 
         # Use method parameter if provided, otherwise use constructor value
         strategy = memory_strategy or self.memory_strategy
+        compile_metadata = self._base_compile_metadata()
+        compile_metadata.update(self._normalize_metadata_mapping(metadata))
+        if cost_model_cli_command is not None:
+            compile_metadata["cost_model_cli_command"] = cost_model_cli_command
 
         # Stage 2: Create compilation context
         ctx = CompileContext(graph, self.target, self.opt_level)
+        ctx.metadata.update(compile_metadata)
         ctx.metadata["entry_point"] = entry_point
 
         # Store max_memory in context for memory planning pass
@@ -151,12 +174,39 @@ class Compiler:
             ctx.metadata["memory_strategy"] = strategy
             self.console.print(f"  Memory strategy: {strategy}")
 
+        scheduler_enabled = self._resolve_pipeline_scheduler_enabled(
+            ctx.metadata,
+            explicit_enable_pipeline_scheduler=enable_pipeline_scheduler,
+        )
+        ctx.metadata["pipeline_scheduler_enabled"] = scheduler_enabled
+        if self.opt_level >= 3 and not scheduler_enabled:
+            fallback_reason = self._pipeline_scheduler_fallback_reason(
+                ctx.metadata,
+                explicit_enable_pipeline_scheduler=enable_pipeline_scheduler,
+            )
+            ctx.metadata["pipeline_scheduler_fallback"] = fallback_reason
+            set_pipeline_schedule_result(
+                ctx,
+                PipelineScheduleResult(
+                    feasible=False,
+                    solver_name="disabled",
+                    diagnostics={
+                        "strategy": "serial",
+                        "reason": (
+                            "pipeline_scheduler_disabled"
+                            if fallback_reason == "legacy_o3_disabled"
+                            else "pipeline_scheduler_default_off"
+                        ),
+                    },
+                ),
+            )
+
         # Stage 3: Run optimization passes
         # Re-register passes for current opt_level to avoid accumulation
         # when the same Compiler instance is reused across multiple compilations
-        self.pass_manager = PassManager()
-        for pass_obj in PassManager.get_default_passes(self.opt_level):
-            self.pass_manager.register(pass_obj)
+        self.pass_manager = self._build_pass_manager(
+            enable_pipeline_scheduler=scheduler_enabled
+        )
 
         if self.pass_manager.passes:
             with self.console.status(
@@ -243,3 +293,72 @@ class Compiler:
         artifacts.metadata["entry_point"] = entry_point
         artifacts.metadata["target"] = self.target
         artifacts.metadata["opt_level"] = self.opt_level
+
+    def _build_pass_manager(self, *, enable_pipeline_scheduler: bool) -> PassManager:
+        """Build a fresh pass manager for the requested optimization path."""
+        pass_manager = PassManager()
+        for pass_obj in self._get_passes(enable_pipeline_scheduler=enable_pipeline_scheduler):
+            pass_manager.register(pass_obj)
+        return pass_manager
+
+    def _get_passes(self, *, enable_pipeline_scheduler: bool):
+        """Return the pass sequence for the current optimization level."""
+        if self.opt_level < 3:
+            return PassManager.get_default_passes(self.opt_level)
+        if enable_pipeline_scheduler:
+            return PassManager.get_default_passes(self.opt_level)
+        return PassManager.get_conservative_o3_passes()
+
+    def _base_compile_metadata(self) -> dict[str, Any]:
+        """Return normalized default metadata for a compile invocation."""
+        metadata = dict(self.default_metadata)
+        if self.cost_model_cli_command is not None:
+            metadata["cost_model_cli_command"] = self.cost_model_cli_command
+        if self.enable_pipeline_scheduler is not None:
+            metadata["enable_pipeline_scheduler"] = self.enable_pipeline_scheduler
+        return metadata
+
+    def _resolve_pipeline_scheduler_enabled(
+        self,
+        metadata: Mapping[str, Any],
+        *,
+        explicit_enable_pipeline_scheduler: bool | None,
+    ) -> bool:
+        """Resolve the scheduler-path toggle with conservative defaults."""
+        if explicit_enable_pipeline_scheduler is not None:
+            return bool(explicit_enable_pipeline_scheduler)
+        if "enable_pipeline_scheduler" in metadata:
+            return bool(metadata["enable_pipeline_scheduler"])
+        if "disable_pipeline_scheduler" in metadata:
+            return not bool(metadata["disable_pipeline_scheduler"])
+        return False
+
+    def _pipeline_scheduler_fallback_reason(
+        self,
+        metadata: Mapping[str, Any],
+        *,
+        explicit_enable_pipeline_scheduler: bool | None,
+    ) -> str:
+        """Return a deterministic label describing why the legacy path ran."""
+        if explicit_enable_pipeline_scheduler is False:
+            return "legacy_o3_disabled"
+        if explicit_enable_pipeline_scheduler is True:
+            return "legacy_o3_default"
+        if "enable_pipeline_scheduler" in metadata:
+            return (
+                "legacy_o3_default"
+                if bool(metadata["enable_pipeline_scheduler"])
+                else "legacy_o3_disabled"
+            )
+        if bool(metadata.get("disable_pipeline_scheduler")):
+            return "legacy_o3_disabled"
+        return "legacy_o3_default"
+
+    def _normalize_metadata_mapping(
+        self,
+        metadata: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Copy optional user metadata into a mutable dictionary."""
+        if metadata is None:
+            return {}
+        return {str(key): value for key, value in metadata.items()}

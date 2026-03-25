@@ -79,8 +79,11 @@ class PassManager:
         from nnc_py.passes.identity_elimination import IdentityEliminationPass
         from nnc_py.passes.layout_planning import LayoutPlanningPass
         from nnc_py.passes.liveness import LivenessAnalysisPass
-        from nnc_py.passes.memory_planning import MemoryPlanningPassV2, MemoryPlanningPassV3
+        from nnc_py.passes.memory_planning import MemoryPlanningPassV2
+        from nnc_py.passes.memory_planning_v4 import MemoryPlanningPassV4
         from nnc_py.passes.pattern_fusion import PatternFusionPass
+        from nnc_py.passes.pipeline_scheduling import PipelineSchedulingPass
+        from nnc_py.passes.pipeline_step_lowering import PipelineStepLoweringPass
         from nnc_py.passes.prepack_lowering import PrepackLoweringPass
         from nnc_py.passes.schedule_analysis import ScheduleAnalysisPass
         from nnc_py.passes.spill import SpillAnalysisPass
@@ -122,9 +125,39 @@ class PassManager:
                 ScheduleAnalysisPass(),
                 LayoutPlanningPass(),
                 TiledLoweringPass(),
+                PipelineStepLoweringPass(),
+                PipelineSchedulingPass(),
                 LivenessAnalysisPass(),
-                MemoryPlanningPassV3(),
+                MemoryPlanningPassV4(),
                 SpillAnalysisPass(),
             ]
 
         return []
+
+    @classmethod
+    def get_conservative_o3_passes(cls) -> List[PassBase]:
+        """Get the legacy-compatible O3 compile path.
+
+        This keeps the higher-level O3 graph optimizations but avoids the
+        schedule-driven lowering/memory-planning path until downstream users
+        are ready for it.
+        """
+        from nnc_py.passes.dead_code_elimination import DeadCodeEliminationPass
+        from nnc_py.passes.dominator_fusion import DominatorFusionPass
+        from nnc_py.passes.identity_elimination import IdentityEliminationPass
+        from nnc_py.passes.liveness import LivenessAnalysisPass
+        from nnc_py.passes.memory_planning import MemoryPlanningPassV2
+        from nnc_py.passes.pattern_fusion import PatternFusionPass
+        from nnc_py.passes.prepack_lowering import PrepackLoweringPass
+        from nnc_py.passes.spill import SpillAnalysisPass
+
+        return [
+            IdentityEliminationPass(),
+            DeadCodeEliminationPass(),
+            PatternFusionPass(),
+            PrepackLoweringPass(),
+            DominatorFusionPass(),
+            LivenessAnalysisPass(),
+            MemoryPlanningPassV2(),
+            SpillAnalysisPass(),
+        ]
