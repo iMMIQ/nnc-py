@@ -128,7 +128,7 @@ def make_problem_with_reload_step() -> PipelineScheduleProblem:
             PipelineResourceKind.SHAPE,
             PipelineResourceKind.MATMUL,
         ),
-        sram_capacity_bytes=10,
+        sram_capacity_bytes=14,
     )
 
 
@@ -383,6 +383,65 @@ def test_list_scheduler_places_reload_before_its_consumer():
 
 def test_list_scheduler_reports_budget_failure_without_keyerror():
     problem = make_impossible_spill_problem()
+
+    result = ListPipelineScheduler().solve(problem)
+
+    assert result.feasible is False
+    assert result.diagnostics["reason"] == "no_feasible_schedule_under_budget"
+
+
+def test_list_scheduler_charges_residency_window_output_during_producer_step():
+    problem = PipelineScheduleProblem(
+        steps=(
+            TransferStep(
+                id="value0.reload0",
+                node_name="reload:value0",
+                transfer_kind=TransferStepKind.RELOAD_DMA,
+                moved_value_name="value0",
+                src_tier=ScheduledValueHomeTier.SLOW,
+                dst_tier=ScheduledValueHomeTier.SRAM,
+                bytes=5,
+                duration=3,
+                sram_output_names=("value0.reload0.resident",),
+            ),
+            ScheduleStep(
+                id="other0.shape",
+                node_name="other0.shape",
+                step_kind=ScheduleStepKind.SHAPE_PREP,
+                resource_kind=PipelineResourceKind.SHAPE,
+                duration=3,
+                sram_temp_bytes=5,
+            ),
+        ),
+        scheduled_values=(
+            ScheduledValue(
+                name="value0",
+                graph_tensor_name="value0",
+                size_bytes=5,
+                producer_step_id=None,
+                consumer_step_ids=("value0.reload0",),
+                home_tier=ScheduledValueHomeTier.SLOW,
+            ),
+            ScheduledValue(
+                name="value0.reload0.resident",
+                graph_tensor_name="value0",
+                size_bytes=5,
+                producer_step_id="value0.reload0",
+                consumer_step_ids=(),
+                home_tier=ScheduledValueHomeTier.SRAM,
+            ),
+        ),
+        residency_windows=(
+            ResidencyWindow(
+                value_name="value0.reload0.resident",
+                residency_id="value0.reload0.resident@0",
+                opened_by_step_id="value0.reload0",
+                closed_by_step_id=None,
+            ),
+        ),
+        resources=(PipelineResourceKind.DMA, PipelineResourceKind.SHAPE),
+        sram_capacity_bytes=5,
+    )
 
     result = ListPipelineScheduler().solve(problem)
 

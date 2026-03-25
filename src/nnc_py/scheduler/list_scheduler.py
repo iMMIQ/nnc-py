@@ -466,6 +466,25 @@ def _occupied_sram_intervals(
         )
 
     explicit_window_names = {window.value_name for window in problem.residency_windows}
+    for step_id, scheduled_step in scheduled_steps.items():
+        producer_output_bytes = _explicit_window_output_bytes(
+            step=step_by_id[step_id],
+            value_by_name=value_by_name,
+            explicit_window_names=explicit_window_names,
+        )
+        if (
+            producer_output_bytes <= 0
+            or scheduled_step.start_time >= scheduled_step.end_time
+        ):
+            continue
+        intervals.append(
+            (
+                scheduled_step.start_time,
+                float(scheduled_step.end_time),
+                producer_output_bytes,
+                step_id != candidate_step_id,
+            )
+        )
 
     if candidate_step_id is not None:
         candidate_schedule = scheduled_steps.get(candidate_step_id)
@@ -512,6 +531,22 @@ def _occupied_sram_intervals(
             intervals.append(interval)
 
     return tuple(intervals)
+
+
+def _explicit_window_output_bytes(
+    *,
+    step: ScheduleStep,
+    value_by_name: Mapping[str, ScheduledValue],
+    explicit_window_names: set[str],
+) -> int:
+    return sum(
+        value.size_bytes
+        for value_name in step.sram_output_names
+        if (value := value_by_name.get(value_name)) is not None
+        and value.name in explicit_window_names
+        and value.home_tier is ScheduledValueHomeTier.SRAM
+        and value.size_bytes > 0
+    )
 
 
 def _candidate_output_bytes(
