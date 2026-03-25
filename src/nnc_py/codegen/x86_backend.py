@@ -1,5 +1,6 @@
 """x86 backend for simulation."""
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, List, Union
 
 import numpy as np
@@ -47,6 +48,7 @@ class X86Backend(BackendBase):
     def generate(self, ctx: CompileContext) -> CodeGenResult:
         """Generate x86 C code."""
         result = CodeGenResult()
+        self._prune_unused_tensor_defs(ctx)
 
         # Assign C symbol names
         self._assign_symbols(ctx)
@@ -1665,7 +1667,7 @@ class X86Backend(BackendBase):
             return None
 
         consumer = consumers[0]
-        if consumer.name in visited_node_names or consumer.name in execution_plans:
+        if consumer.name in visited_node_names:
             return None
         if len(consumer.outputs) != 1:
             return None
@@ -3598,10 +3600,7 @@ extern FILE* debug_file;
         if has_constants:
             objs += " constants_loader.o"
         objs += " test_runner.o ops.o"
-
-        # Determine runtime path relative to the output directory
-        # For installed package: use NNC_RUNTIME_PATH env var
-        # For development: relative path from output to project root
+        runtime_dir = self._default_runtime_dir()
 
         # Different makefile content based on whether we have constants
         if has_constants:
@@ -3612,7 +3611,7 @@ CFLAGS = -D_GNU_SOURCE -std=c11 -O2 -Wall -Wextra -pthread
 LDFLAGS = -lm -pthread
 
 # Runtime include path - can be overridden by environment
-NNC_RUNTIME ?= ../../runtime
+NNC_RUNTIME ?= {runtime_dir}
 CFLAGS += -I$(NNC_RUNTIME)/include
 
 .PHONY: all clean run
@@ -3642,7 +3641,7 @@ CFLAGS = -D_GNU_SOURCE -std=c11 -O2 -Wall -Wextra -pthread
 LDFLAGS = -lm -pthread
 
 # Runtime include path - can be overridden by environment
-NNC_RUNTIME ?= ../../runtime
+NNC_RUNTIME ?= {runtime_dir}
 CFLAGS += -I$(NNC_RUNTIME)/include
 
 .PHONY: all clean run
@@ -3666,6 +3665,26 @@ run: model
 """
 
         return makefile_body
+
+    def _default_runtime_dir(self) -> str:
+        """Return the default runtime directory to embed into generated builds."""
+        runtime_dir = Path(__file__).resolve().parents[3] / "runtime"
+        return str(runtime_dir)
+
+    def _prune_unused_tensor_defs(self, ctx: CompileContext) -> None:
+        """Drop dead tensor definitions left behind by earlier graph rewrites."""
+        used_tensor_names = set(ctx.graph.inputs) | set(ctx.graph.outputs) | set(ctx.graph.constants)
+        for node in ctx.graph.nodes.values():
+            used_tensor_names.update(node.inputs)
+            used_tensor_names.update(node.outputs)
+
+        dead_tensor_names = [
+            tensor_name
+            for tensor_name in ctx.graph.tensors
+            if tensor_name not in used_tensor_names
+        ]
+        for tensor_name in dead_tensor_names:
+            ctx.graph.tensors.pop(tensor_name, None)
 
     def _generate_tensors(self, ctx: CompileContext) -> str:
         """Generate tensors definition file."""

@@ -80,15 +80,6 @@ def _compile_model(
 
 
 def _build_generated_x86_source(output_dir: Path) -> None:
-    runtime_dir = Path(__file__).resolve().parents[1] / "runtime"
-    makefile_path = output_dir / "Makefile"
-    makefile_text = makefile_path.read_text()
-    makefile_text = makefile_text.replace(
-        "NNC_RUNTIME ?= ../../runtime",
-        f"NNC_RUNTIME = {runtime_dir}",
-    )
-    makefile_path.write_text(makefile_text)
-
     subprocess.run(
         ["make", "clean"],
         cwd=output_dir,
@@ -107,6 +98,20 @@ def _build_generated_x86_source(output_dir: Path) -> None:
     )
     assert result.returncode == 0, result.stderr or result.stdout
     assert (output_dir / "model").exists()
+
+
+def test_generated_makefile_uses_real_runtime_path_for_out_of_tree_builds(tmp_path):
+    _, output_dir = _compile_model(
+        tmp_path,
+        enable_pipeline_scheduler=True,
+    )
+
+    makefile_text = (output_dir / "Makefile").read_text()
+    runtime_dir = Path(__file__).resolve().parents[1] / "runtime"
+
+    assert "NNC_RUNTIME ?= ../../runtime" not in makefile_text
+    assert f"NNC_RUNTIME ?= {runtime_dir}" in makefile_text
+    assert "NNC_RUNTIME ?=" in makefile_text
 
 
 def test_explicit_scheduler_enable_emits_current_schedule_contract_and_buildable_x86_source(

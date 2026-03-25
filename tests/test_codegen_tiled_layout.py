@@ -299,6 +299,15 @@ def test_codegen_emits_supported_tile_wrappers_for_phase1_conv_add_relu_group():
     assert "_nnc_fast_pool +" in code["tensors.c"]
 
 
+def test_codegen_reuses_fast_pool_for_internal_tensors_in_tile_execution_group():
+    code = _compile_model_with_real_tiled_plan(_make_phase1_conv_add_relu_model())
+
+    assert "Detached tensor buffer: conv_out" not in code["tensors.c"]
+    assert "Detached tensor buffer: add_out" not in code["tensors.c"]
+    assert "_nnc_tensor_buffer_tensor_conv_out" not in code["tensors.c"]
+    assert "_nnc_tensor_buffer_tensor_add_out" not in code["tensors.c"]
+
+
 def test_codegen_keeps_single_gemm_storage_self_consistent_under_tile_regions_v3():
     code = _compile_model_with_real_tiled_plan(_make_phase1_gemm_model())
 
