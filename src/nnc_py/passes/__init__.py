@@ -25,6 +25,7 @@ from nnc_py.passes.memory_planning import (
     MemoryPlanningPassV3,
     get_memory_allocation_plan,
 )
+from nnc_py.passes.memory_planning_v4 import MemoryPlanningPassV4
 
 # Optimization passes
 from nnc_py.passes.dead_code_elimination import DeadCodeEliminationPass
@@ -71,6 +72,7 @@ __all__ = [
     # New unified pass
     "MemoryPlanningPassV2",
     "MemoryPlanningPassV3",
+    "MemoryPlanningPassV4",
     "get_memory_allocation_plan",
 
     # Optimization passes
