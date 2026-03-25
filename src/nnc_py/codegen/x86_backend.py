@@ -89,6 +89,218 @@ class X86Backend(BackendBase):
             return "nnc_run"
         return entry_point
 
+    def _build_pipeline_codegen_metadata(
+        self,
+        ctx: CompileContext,
+        alloc_plan: "MemoryAllocationPlan | None",
+    ) -> dict[str, Any]:
+        """Build schedule-visible metadata for generated simulation code."""
+        try:
+            schedule_problem = ctx.pipeline_schedule_problem
+            schedule_result = ctx.pipeline_schedule_result
+        except TypeError as exc:
+            return {
+                "summary_lines": [
+                    "schedule_metadata=invalid",
+                    f"schedule_metadata_error={self._sanitize_c_comment_text(str(exc))}",
+                    self._build_memory_plan_summary_line(alloc_plan, ctx),
+                ],
+                "node_comments": {},
+            }
+
+        summary_lines = ["schedule_metadata=absent"]
+        node_comments: dict[str, list[str]] = {}
+
+        if schedule_result is None:
+            fallback_reason = ctx.metadata.get("pipeline_scheduler_fallback")
+            if fallback_reason is not None:
+                summary_lines.append(
+                    f"fallback={self._sanitize_c_comment_text(str(fallback_reason))}"
+                )
+            summary_lines.append(self._build_memory_plan_summary_line(alloc_plan, ctx))
+            return {
+                "summary_lines": summary_lines,
+                "node_comments": node_comments,
+            }
+
+        summary_lines = [
+            "schedule_metadata=present",
+            f"solver={self._sanitize_c_comment_text(schedule_result.solver_name or 'unknown')}",
+            f"feasible={'yes' if schedule_result.feasible else 'no'}",
+            f"makespan={schedule_result.makespan}",
+            f"scheduled_steps={len(schedule_result.scheduled_steps)}",
+            self._build_memory_plan_summary_line(alloc_plan, ctx),
+        ]
+        diagnostics_summary = self._format_json_mapping(schedule_result.diagnostics)
+        if diagnostics_summary:
+            summary_lines.append(f"diagnostics={diagnostics_summary}")
+
+        if schedule_problem is None or not schedule_result.feasible:
+            return {
+                "summary_lines": summary_lines,
+                "node_comments": node_comments,
+            }
+
+        problem_steps = {step.id: step for step in schedule_problem.steps}
+        value_bindings = self._build_schedule_value_bindings(alloc_plan, schedule_result)
+
+        for scheduled_step in sorted(
+            schedule_result.scheduled_steps,
+            key=lambda step: (step.start_time, step.end_time, step.step_id),
+        ):
+            problem_step = problem_steps.get(scheduled_step.step_id)
+            if problem_step is None:
+                continue
+            node_comments.setdefault(problem_step.node_name, []).append(
+                self._format_pipeline_step_comment(
+                    scheduled_step=scheduled_step,
+                    problem_step=problem_step,
+                    value_bindings=value_bindings,
+                )
+            )
+
+        return {
+            "summary_lines": summary_lines,
+            "node_comments": node_comments,
+        }
+
+    def _build_memory_plan_summary_line(
+        self,
+        alloc_plan: "MemoryAllocationPlan | None",
+        ctx: CompileContext,
+    ) -> str:
+        """Return a compact summary line for memory planning metadata."""
+        if alloc_plan is not None:
+            return f"memory_plan_strategy={alloc_plan.strategy_name}"
+        if "memory_plan" in ctx.metadata:
+            return "memory_plan_strategy=legacy"
+        return "memory_plan_strategy=none"
+
+    def _build_schedule_value_bindings(
+        self,
+        alloc_plan: "MemoryAllocationPlan | None",
+        schedule_result: Any,
+    ) -> dict[str, dict[str, Any]]:
+        """Collect SRAM binding details keyed by scheduled value name."""
+        value_bindings: dict[str, dict[str, Any]] = {}
+        if alloc_plan is not None:
+            for value_name, allocation in alloc_plan.tensor_allocations.items():
+                binding = value_bindings.setdefault(value_name, {})
+                binding["offset"] = allocation.offset
+                binding["source"] = "memory_plan"
+            for region_name, region in alloc_plan.logical_regions.items():
+                binding = value_bindings.setdefault(region_name, {})
+                binding["offset"] = region.offset
+                binding["region"] = region.name
+                binding["source"] = "memory_plan"
+
+        for interval in getattr(schedule_result, "sram_intervals", ()):
+            binding = value_bindings.get(interval.value_name)
+            if binding is not None and binding.get("source") == "memory_plan":
+                continue
+            binding = value_bindings.setdefault(interval.value_name, {})
+            binding["buffer_id"] = interval.buffer_id
+            binding["interval"] = (interval.start_time, interval.end_time)
+            binding["size_bytes"] = interval.size_bytes
+            binding["source"] = "schedule_interval"
+
+        return value_bindings
+
+    def _format_pipeline_step_comment(
+        self,
+        *,
+        scheduled_step: Any,
+        problem_step: Any,
+        value_bindings: dict[str, dict[str, Any]],
+    ) -> str:
+        """Return one schedule annotation comment for a lowered step."""
+        duration = scheduled_step.end_time - scheduled_step.start_time
+        if duration <= 0:
+            duration = getattr(problem_step, "duration", 0)
+
+        cost_source = "unknown"
+        attrs = getattr(problem_step, "attrs", {})
+        if hasattr(attrs, "get") and attrs.get("cost_model") is not None:
+            cost_source = str(attrs["cost_model"])
+
+        binding_names = tuple(problem_step.sram_input_names) + tuple(problem_step.sram_output_names)
+        binding_parts: list[str] = []
+        for value_name in binding_names:
+            binding = value_bindings.get(value_name)
+            if not binding:
+                continue
+            base = f"{value_name}@{binding['offset']}" if "offset" in binding else value_name
+            details = []
+            if "buffer_id" in binding:
+                details.append(f"buffer={binding['buffer_id']}")
+            if "region" in binding:
+                details.append(f"region={binding['region']}")
+            if details:
+                binding_parts.append(f"{base}[{', '.join(details)}]")
+            else:
+                binding_parts.append(base)
+
+        parts = [
+            f"step_id={scheduled_step.step_id}",
+            f"resource={scheduled_step.resource_kind.value}",
+            f"start={scheduled_step.start_time}",
+            f"end={scheduled_step.end_time}",
+            f"duration={duration}",
+            f"cost_source={self._sanitize_c_comment_text(cost_source)}",
+        ]
+        if binding_parts:
+            parts.append(
+                "sram_bindings="
+                + self._sanitize_c_comment_text("; ".join(binding_parts))
+            )
+        return "pipeline step: " + ", ".join(parts)
+
+    def _format_json_mapping(self, value: Any) -> str:
+        """Format small JSON-like mappings for comment output."""
+        if not isinstance(value, dict):
+            try:
+                items = list(value.items())
+            except AttributeError:
+                return ""
+        else:
+            items = list(value.items())
+
+        if not items:
+            return ""
+        return self._sanitize_c_comment_text(
+            ", ".join(f"{key}={item}" for key, item in sorted(items))
+        )
+
+    def _sanitize_c_comment_text(self, value: str) -> str:
+        """Avoid terminating generated C comments accidentally."""
+        return value.replace("*/", "* /").replace("\n", " ")
+
+    def _append_pipeline_schedule_summary_block(
+        self,
+        lines: list[str],
+        pipeline_codegen_metadata: dict[str, Any],
+    ) -> None:
+        """Append a labeled pipeline schedule summary comment block."""
+        lines.append("/* Pipeline schedule summary")
+        for summary_line in pipeline_codegen_metadata.get("summary_lines", ()):
+            lines.append(
+                f" * {self._sanitize_c_comment_text(str(summary_line))}"
+            )
+        lines.append(" */")
+        lines.append("")
+
+    def _append_pipeline_step_comment_lines(
+        self,
+        lines: list[str],
+        pipeline_codegen_metadata: dict[str, Any],
+        node_name: str,
+        *,
+        indent: str = "",
+    ) -> None:
+        """Append grouped pipeline step comments for a node."""
+        for comment in pipeline_codegen_metadata.get("node_comments", {}).get(node_name, ()):
+            lines.append(f"{indent}/* {self._sanitize_c_comment_text(comment)} */")
+
     def _generate_source(self, ctx: CompileContext) -> str:
         """Generate main source file with spill/reload support."""
         from nnc_py.codegen.c_emitter import CEmitter
@@ -98,6 +310,7 @@ class X86Backend(BackendBase):
         # Check for new MemoryAllocationPlan
         alloc_plan = get_memory_allocation_plan(ctx)
         tile_aware_runtime_plan = self._get_tile_aware_runtime_plan(ctx, alloc_plan)
+        pipeline_codegen_metadata = self._build_pipeline_codegen_metadata(ctx, alloc_plan)
 
         # Check for legacy spill plan
         spill_plan = get_spill_plan(ctx)
@@ -105,14 +318,23 @@ class X86Backend(BackendBase):
         # Determine which plan to use
         if alloc_plan is not None and (alloc_plan.has_spill or bool(alloc_plan.move_points)):
             # Use new MemoryAllocationPlan with reload code generation
-            source = self._generate_source_with_unified_spill(ctx, alloc_plan)
+            source = self._generate_source_with_unified_spill(
+                ctx,
+                alloc_plan,
+                pipeline_codegen_metadata,
+            )
         elif spill_plan is not None and spill_plan.has_overflow:
             # Use legacy spill plan
-            source = self._generate_source_with_spill(ctx, spill_plan)
+            source = self._generate_source_with_spill(
+                ctx,
+                spill_plan,
+                pipeline_codegen_metadata,
+            )
         else:
             # No overflow, use standard emitter
             emitter = CEmitter(
-                tile_aware_wrapper_nodes=tile_aware_runtime_plan.get("wrapper_nodes", {})
+                tile_aware_wrapper_nodes=tile_aware_runtime_plan.get("wrapper_nodes", {}),
+                pipeline_schedule_metadata=pipeline_codegen_metadata,
             )
             source = emitter.emit(ctx)
 
@@ -505,7 +727,12 @@ extern FILE* debug_file;
 
         return "\n".join(output)
 
-    def _generate_source_with_spill(self, ctx: CompileContext, spill_plan: "SpillPlan") -> str:
+    def _generate_source_with_spill(
+        self,
+        ctx: CompileContext,
+        spill_plan: "SpillPlan",
+        pipeline_codegen_metadata: dict[str, Any],
+    ) -> str:
         """Generate source file with spill/reload wrapper functions."""
         from nnc_py.codegen.c_emitter import CEmitter
 
@@ -524,6 +751,7 @@ extern FILE* debug_file;
             "",
             "/* Forward declarations for spill/reload functions */",
         ]
+        self._append_pipeline_schedule_summary_block(lines, pipeline_codegen_metadata)
 
         # Generate forward declarations for node functions
         nodes = ctx.graph.topological_sort()
@@ -564,6 +792,12 @@ extern FILE* debug_file;
 
             lines.append(f"/* {func_name}: {node.op_type.value} */")
             lines.append(f"static void {func_name}(void) {{")
+            self._append_pipeline_step_comment_lines(
+                lines,
+                pipeline_codegen_metadata,
+                node.name,
+                indent="    ",
+            )
 
             # Reload before node
             for reload in reloads_before:
@@ -598,7 +832,7 @@ extern FILE* debug_file;
         lines.append("/* Node body functions */")
 
         # Generate body functions (using standard emitter)
-        emitter = CEmitter()
+        emitter = CEmitter(pipeline_schedule_metadata=pipeline_codegen_metadata)
         body_code = emitter.emit(ctx)
 
         # We need to modify the body_code to rename functions to _body
@@ -614,6 +848,12 @@ extern FILE* debug_file;
             if node.op_type == OpType.CONSTANT:
                 continue
             func_name = ctx.node_symbols.get(node.name, node.name)
+            self._append_pipeline_step_comment_lines(
+                lines,
+                pipeline_codegen_metadata,
+                node.name,
+                indent="    ",
+            )
             lines.append(f"    {func_name}();")
 
         lines.append("}")
@@ -650,7 +890,12 @@ extern FILE* debug_file;
 
         return "\n".join(output)
 
-    def _generate_source_with_unified_spill(self, ctx: CompileContext, plan: "MemoryAllocationPlan") -> str:
+    def _generate_source_with_unified_spill(
+        self,
+        ctx: CompileContext,
+        plan: "MemoryAllocationPlan",
+        pipeline_codegen_metadata: dict[str, Any],
+    ) -> str:
         """Generate source file with spill/reload wrapper functions using MemoryAllocationPlan.
 
         The key requirement: ALL operators must execute with inputs/outputs in fast memory.
@@ -675,6 +920,7 @@ extern FILE* debug_file;
             "extern uint8_t _nnc_slow_pool[];",
             "",
         ]
+        self._append_pipeline_schedule_summary_block(lines, pipeline_codegen_metadata)
 
         def get_output_spill_points(node_idx: int) -> dict[str, SpillPoint]:
             return {
@@ -755,7 +1001,7 @@ extern FILE* debug_file;
             max_tensor_size = max(max_tensor_size, point.size)
 
         if not plan.has_spill and not plan.move_points:
-            emitter = CEmitter()
+            emitter = CEmitter(pipeline_schedule_metadata=pipeline_codegen_metadata)
             return emitter.emit(ctx)
 
         # Generate reload buffers in fast memory
@@ -892,6 +1138,12 @@ extern FILE* debug_file;
 
             lines.append(f"/* {func_name}: {node.op_type.value} */")
             lines.append(f"static void {func_name}(void) {{")
+            self._append_pipeline_step_comment_lines(
+                lines,
+                pipeline_codegen_metadata,
+                node.name,
+                indent="    ",
+            )
 
             moved_first_use_inputs = [
                 input_name
@@ -1096,6 +1348,12 @@ extern FILE* debug_file;
             if node.op_type == OpType.CONSTANT:
                 continue
             func_name = ctx.node_symbols.get(node.name, node.name)
+            self._append_pipeline_step_comment_lines(
+                lines,
+                pipeline_codegen_metadata,
+                node.name,
+                indent="    ",
+            )
             lines.append(f"    {func_name}();")
 
         for tensor_name in ctx.graph.inputs:
@@ -2260,6 +2518,10 @@ run: model
             "/* Auto-generated by NNC - DO NOT EDIT */",
             '#include "nnc_types.h"',
             "",
+            "#ifndef NNC_MEMORY_ALIGNMENT",
+            "#define NNC_MEMORY_ALIGNMENT 16",
+            "#endif",
+            "",
         ]
 
         # Check for new memory allocation plan
@@ -2506,6 +2768,19 @@ run: model
                 )
                 lines.append("")
                 return lines
+
+            lines = [
+                "/* Static Memory Pool */",
+                f"/* Strategy: {alloc_plan.strategy_name} */",
+                f"/* Total size: {alloc_plan.total_fast_memory} bytes ({alloc_plan.total_fast_memory / 1024:.2f} KB) */",
+                f"/* Buffers: {alloc_plan.num_buffers}, Logical regions: {len(alloc_plan.logical_regions)} */",
+                f"#define NNC_MEMORY_SIZE {alloc_plan.total_fast_memory}",
+                "#define NNC_MEMORY_ALIGNMENT 16",
+                "static uint8_t _nnc_memory_pool[NNC_MEMORY_SIZE] "
+                "__attribute__((aligned(NNC_MEMORY_ALIGNMENT))) = {0};",
+                "",
+            ]
+            return lines
 
         # Fall back to legacy implementation
         plan = get_memory_plan(ctx)

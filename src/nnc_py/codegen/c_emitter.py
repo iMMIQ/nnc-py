@@ -14,14 +14,20 @@ class CEmitter:
     indent: int
     output: StringIO
 
-    def __init__(self, tile_aware_wrapper_nodes: dict[str, dict[str, Any]] | None = None) -> None:
+    def __init__(
+        self,
+        tile_aware_wrapper_nodes: dict[str, dict[str, Any]] | None = None,
+        pipeline_schedule_metadata: dict[str, Any] | None = None,
+    ) -> None:
         self.indent = 0
         self.output = StringIO()
         self.tile_aware_wrapper_nodes = tile_aware_wrapper_nodes or {}
+        self.pipeline_schedule_metadata = pipeline_schedule_metadata or {}
 
     def emit(self, ctx: CompileContext) -> str:
         """Emit complete C code."""
         self._emit_includes(ctx)
+        self._emit_pipeline_schedule_summary()
         self._emit_declarations(ctx)
         self._emit_functions(ctx)
         self._emit_entry_point(ctx)
@@ -35,6 +41,14 @@ class CEmitter:
         self.write_line("#include <stdlib.h>")
         self.write_line('#include "model.h"')
         self.write_line('#include "nnc_ops.h"')
+        self.write_line()
+
+    def _emit_pipeline_schedule_summary(self) -> None:
+        """Emit a file-level summary of the schedule metadata consumed by codegen."""
+        self.write_line("/* Pipeline schedule summary")
+        for summary_line in self.pipeline_schedule_metadata.get("summary_lines", ("schedule_metadata=absent",)):
+            self.write_line(f" * {self._sanitize_comment_text(str(summary_line))}")
+        self.write_line(" */")
         self.write_line()
 
     def _emit_declarations(self, ctx: CompileContext) -> None:
@@ -78,6 +92,7 @@ class CEmitter:
         self.write_line(f"/* {node.op_type.value}: {node.name} */")
         self.write_line(f"void {func_name}(void) {{")
         self.indent += 1
+        self._emit_pipeline_step_comments(node.name)
         self._emit_lowering_comment(node)
 
         # Emit operator call
@@ -110,6 +125,7 @@ class CEmitter:
         self.write_line(f"void {func_name}(void) {{")
         self.indent += 1
         self.write_line(f"/* {wrapper_comment} */")
+        self._emit_pipeline_step_comments(node.name)
         self.write_line(f"{body_name}();")
         self.indent -= 1
         self.write_line("}")
@@ -838,6 +854,15 @@ class CEmitter:
             self.write_line(
                 "/* Tile-aware execution path is enabled for supported nodes. */"
             )
+
+    def _emit_pipeline_step_comments(self, node_name: str) -> None:
+        """Emit grouped pipeline-step comments for the lowered node."""
+        for comment in self.pipeline_schedule_metadata.get("node_comments", {}).get(node_name, ()):
+            self.write_line(f"/* {self._sanitize_comment_text(comment)} */")
+
+    def _sanitize_comment_text(self, value: str) -> str:
+        """Avoid accidentally terminating a generated C comment."""
+        return value.replace("*/", "* /").replace("\n", " ")
 
     def write_line(self, text: str = "") -> None:
         """Write a line with proper indentation."""
