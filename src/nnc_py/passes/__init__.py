@@ -34,6 +34,7 @@ from nnc_py.passes.pattern_fusion import PatternFusionPass
 from nnc_py.passes.prepack_lowering import PrepackLoweringPass
 from nnc_py.passes.layout_planning import LayoutPlanningPass, LayoutPlan
 from nnc_py.passes.schedule_analysis import ScheduleAnalysisPass, ScheduleCandidate
+from nnc_py.passes.scheduled_memory_expansion import ScheduledMemoryExpansionPass
 from nnc_py.passes.pipeline_step_lowering import PipelineStepLoweringPass
 from nnc_py.passes.pipeline_scheduling import PipelineSchedulingPass
 from nnc_py.passes.tiled_lowering import TiledLoweringPass
@@ -84,6 +85,7 @@ __all__ = [
     "LayoutPlan",
     "ScheduleAnalysisPass",
     "ScheduleCandidate",
+    "ScheduledMemoryExpansionPass",
     "PipelineStepLoweringPass",
     "PipelineSchedulingPass",
     "TiledLoweringPass",

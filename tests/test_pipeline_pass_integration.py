@@ -125,10 +125,12 @@ def test_o3_scheduled_pass_order_requires_explicit_helper():
     assert names.index("ScheduleAnalysisPass") < names.index("LayoutPlanningPass")
     assert names.index("LayoutPlanningPass") < names.index("TiledLoweringPass")
     assert names.index("TiledLoweringPass") < names.index("PipelineStepLoweringPass")
-    assert names.index("PipelineStepLoweringPass") < names.index("PipelineSchedulingPass")
+    assert names.index("PipelineStepLoweringPass") < names.index("ScheduledMemoryExpansionPass")
+    assert names.index("ScheduledMemoryExpansionPass") < names.index("PipelineSchedulingPass")
     assert names.index("PipelineSchedulingPass") < names.index("LivenessAnalysisPass")
     assert names.index("LivenessAnalysisPass") < names.index("MemoryPlanningPassV4")
-    assert names.index("MemoryPlanningPassV4") < names.index("SpillAnalysisPass")
+    assert "ScheduledMemoryExpansionPass" in names
+    assert "SpillAnalysisPass" not in names
 
 
 def test_o3_compile_defaults_to_scheduled_path(monkeypatch, tmp_path):
