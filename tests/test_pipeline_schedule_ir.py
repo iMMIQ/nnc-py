@@ -426,6 +426,52 @@ def test_pipeline_schedule_problem_rejects_inconsistent_value_shims():
         )
 
 
+def test_pipeline_schedule_problem_projects_non_sram_scheduled_values_to_zero_sized_legacy_shim():
+    problem = PipelineScheduleProblem(
+        scheduled_values=(
+            ScheduledValue(
+                name="input0",
+                graph_tensor_name="input0",
+                size_bytes=64,
+                producer_step_id=None,
+                consumer_step_ids=("consumer0",),
+                home_tier=ScheduledValueHomeTier.INPUT,
+            ),
+            ScheduledValue(
+                name="const0",
+                graph_tensor_name="const0",
+                size_bytes=128,
+                producer_step_id=None,
+                consumer_step_ids=("consumer0",),
+                home_tier=ScheduledValueHomeTier.CONST,
+            ),
+            ScheduledValue(
+                name="slow0",
+                graph_tensor_name="slow0",
+                size_bytes=256,
+                producer_step_id=None,
+                consumer_step_ids=("consumer0",),
+                home_tier=ScheduledValueHomeTier.SLOW,
+            ),
+            ScheduledValue(
+                name="staged0",
+                graph_tensor_name="tensor0",
+                size_bytes=32,
+                producer_step_id="producer0",
+                consumer_step_ids=("consumer0",),
+                home_tier=ScheduledValueHomeTier.SRAM,
+            ),
+        ),
+    )
+
+    legacy_values = {value.name: value for value in problem.sram_values}
+
+    assert legacy_values["input0"].size_bytes == 0
+    assert legacy_values["const0"].size_bytes == 0
+    assert legacy_values["slow0"].size_bytes == 0
+    assert legacy_values["staged0"].size_bytes == 32
+
+
 def test_pipeline_schedule_metadata_helpers_validate_runtime_types():
     ctx = CompileContext(graph=Graph("typed_pipeline_ctx"), target="x86")
     problem = PipelineScheduleProblem()

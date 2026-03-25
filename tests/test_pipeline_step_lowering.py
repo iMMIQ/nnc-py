@@ -219,6 +219,12 @@ def _make_shape_context() -> CompileContext:
     return ctx
 
 
+def _make_conv_with_constant_weight_context() -> CompileContext:
+    ctx = _make_conv_relu_context(include_relu_plan=False)
+    ctx.graph.constants["weight"] = [1.0]
+    return ctx
+
+
 def _make_two_conv_shared_weight_context() -> CompileContext:
     graph = Graph("two_conv_shared_weight")
     graph.inputs = ["input"]
@@ -453,6 +459,23 @@ def test_pipeline_step_lowering_marks_external_values_with_home_tier():
     assert input_value.home_tier is ScheduledValueHomeTier.INPUT
 
 
+def test_pipeline_step_lowering_preserves_external_sizes_in_scheduled_values_but_zero_sizes_legacy_externals():
+    ctx = _make_conv_relu_context()
+
+    _run_pipeline_step_lowering(ctx)
+
+    problem = ctx.pipeline_schedule_problem
+    scheduled_values = {value.name: value for value in problem.scheduled_values}
+    sram_values = {value.name: value for value in problem.sram_values}
+
+    assert scheduled_values["input"].size_bytes == 1 * 64 * 16 * 16 * 4
+    assert scheduled_values["input"].home_tier is ScheduledValueHomeTier.INPUT
+    assert scheduled_values["weight"].size_bytes == 64 * 64 * 3 * 3 * 4
+    assert scheduled_values["weight"].home_tier is ScheduledValueHomeTier.SLOW
+    assert sram_values["input"].size_bytes == 0
+    assert sram_values["weight"].size_bytes == 0
+
+
 def test_pipeline_step_lowering_keeps_staged_outputs_as_sram_values():
     ctx = _make_conv_relu_context()
 
@@ -467,6 +490,20 @@ def test_pipeline_step_lowering_keeps_staged_outputs_as_sram_values():
 
     assert staged.home_tier is ScheduledValueHomeTier.SRAM
     assert staged.graph_tensor_name == "conv_out"
+
+
+def test_pipeline_step_lowering_marks_constant_externals_with_const_home_tier():
+    ctx = _make_conv_with_constant_weight_context()
+
+    _run_pipeline_step_lowering(ctx)
+
+    problem = ctx.pipeline_schedule_problem
+    scheduled_values = {value.name: value for value in problem.scheduled_values}
+    sram_values = {value.name: value for value in problem.sram_values}
+
+    assert scheduled_values["weight"].home_tier is ScheduledValueHomeTier.CONST
+    assert scheduled_values["weight"].size_bytes == 64 * 64 * 3 * 3 * 4
+    assert sram_values["weight"].size_bytes == 0
 
 
 def test_shared_graph_weight_stages_to_distinct_node_local_sram_values():

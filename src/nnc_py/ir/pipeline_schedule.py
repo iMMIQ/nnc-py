@@ -464,7 +464,11 @@ def _scheduled_value_from_sram_value(value: SramValue) -> ScheduledValue:
 def _sram_value_from_scheduled_value(value: ScheduledValue) -> SramValue:
     return SramValue(
         name=value.name,
-        size_bytes=value.size_bytes,
+        size_bytes=(
+            value.size_bytes
+            if value.home_tier is ScheduledValueHomeTier.SRAM
+            else 0
+        ),
         producer_step_id=value.producer_step_id,
         consumer_step_ids=value.consumer_step_ids,
         must_reside_in_sram=value.must_reside_in_sram,
