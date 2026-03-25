@@ -636,6 +636,8 @@ class PipelineScheduleResult:
 
     scheduled_steps: tuple[ScheduledStep, ...] = ()
     sram_intervals: tuple[SramAllocationInterval, ...] = ()
+    scheduled_values: tuple[ScheduledValue, ...] = ()
+    residency_windows: tuple[ResidencyWindow, ...] = ()
     makespan: int = 0
     feasible: bool = False
     solver_name: str = ""
@@ -663,6 +665,24 @@ class PipelineScheduleResult:
         )
         object.__setattr__(
             self,
+            "scheduled_values",
+            _coerce_tuple_of_type(
+                self.scheduled_values,
+                ScheduledValue,
+                field_name="PipelineScheduleResult.scheduled_values",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "residency_windows",
+            _coerce_tuple_of_type(
+                self.residency_windows,
+                ResidencyWindow,
+                field_name="PipelineScheduleResult.residency_windows",
+            ),
+        )
+        object.__setattr__(
+            self,
             "diagnostics",
             _freeze_json_mapping(
                 self.diagnostics, field_name="PipelineScheduleResult.diagnostics"
@@ -683,6 +703,12 @@ class PipelineScheduleResult:
         return {
             "scheduled_steps": [step.to_json() for step in self.scheduled_steps],
             "sram_intervals": [interval.to_json() for interval in self.sram_intervals],
+            "scheduled_values": [
+                value.to_json() for value in self.scheduled_values
+            ],
+            "residency_windows": [
+                window.to_json() for window in self.residency_windows
+            ],
             "makespan": self.makespan,
             "feasible": self.feasible,
             "solver_name": self.solver_name,
@@ -736,23 +762,29 @@ def get_pipeline_schedule_result(
 def get_pipeline_scheduled_values(
     ctx: CompileContext,
 ) -> tuple[ScheduledValue, ...]:
-    """Return scheduled values from the stored schedule problem."""
+    """Return scheduled values from the stored schedule result when available."""
 
+    result = get_pipeline_schedule_result(ctx)
+    if result is not None and result.scheduled_values:
+        return result.scheduled_values
     problem = get_pipeline_schedule_problem(ctx)
-    if problem is None:
-        return ()
-    return problem.scheduled_values
+    if problem is not None:
+        return problem.scheduled_values
+    return ()
 
 
 def get_pipeline_residency_windows(
     ctx: CompileContext,
 ) -> tuple[ResidencyWindow, ...]:
-    """Return residency windows from the stored schedule problem."""
+    """Return residency windows from the stored schedule result when available."""
 
+    result = get_pipeline_schedule_result(ctx)
+    if result is not None and result.residency_windows:
+        return result.residency_windows
     problem = get_pipeline_schedule_problem(ctx)
-    if problem is None:
-        return ()
-    return problem.residency_windows
+    if problem is not None:
+        return problem.residency_windows
+    return ()
 
 
 def get_pipeline_transfer_diagnostics(

@@ -261,6 +261,18 @@ def test_pipeline_schedule_ir_exposes_json_ready_data():
         resources=(PipelineResourceKind.DMA, PipelineResourceKind.MATMUL),
         metadata={"notes": ("alpha", "beta")},
     )
+    result_value = ScheduledValue(
+        name="conv0.out",
+        graph_tensor_name="y",
+        size_bytes=64,
+        home_tier=ScheduledValueHomeTier.SLOW,
+    )
+    result_window = ResidencyWindow(
+        value_name="conv0.out",
+        residency_id="conv0.out@0",
+        opened_by_step_id="dma0.in",
+        closed_by_step_id="conv0.compute",
+    )
     result = PipelineScheduleResult(
         scheduled_steps=(
             ScheduledStep(
@@ -271,6 +283,8 @@ def test_pipeline_schedule_ir_exposes_json_ready_data():
                 end_time=4,
             ),
         ),
+        scheduled_values=(result_value,),
+        residency_windows=(result_window,),
         feasible=True,
         solver_name="list",
         diagnostics={"status": {"kind": "ok"}},
@@ -318,6 +332,26 @@ def test_pipeline_schedule_ir_exposes_json_ready_data():
             }
         ],
         "sram_intervals": [],
+        "scheduled_values": [
+            {
+                "name": "conv0.out",
+                "graph_tensor_name": "y",
+                "size_bytes": 64,
+                "producer_step_id": None,
+                "consumer_step_ids": [],
+                "must_reside_in_sram": False,
+                "can_alias": False,
+                "home_tier": "slow",
+            }
+        ],
+        "residency_windows": [
+            {
+                "value_name": "conv0.out",
+                "residency_id": "conv0.out@0",
+                "opened_by_step_id": "dma0.in",
+                "closed_by_step_id": "conv0.compute",
+            }
+        ],
         "makespan": 0,
         "feasible": True,
         "solver_name": "list",
@@ -412,11 +446,28 @@ def test_pipeline_schedule_metadata_helpers_validate_runtime_types():
 
 def test_pipeline_schedule_accessors_store_and_load_typed_metadata():
     ctx = CompileContext(graph=Graph("pipeline_ctx"), target="x86")
-    scheduled_value = ScheduledValue(
+    problem_value = ScheduledValue(
         name="shape0.out",
         graph_tensor_name="shape0_out",
         size_bytes=64,
         home_tier=ScheduledValueHomeTier.SRAM,
+    )
+    result_value = ScheduledValue(
+        name="shape0.reload",
+        graph_tensor_name="shape0_reload",
+        size_bytes=128,
+        home_tier=ScheduledValueHomeTier.SLOW,
+    )
+    problem_window = ResidencyWindow(
+        value_name="shape0.out",
+        residency_id="shape0.out@0",
+        opened_by_step_id="shape0.prepare",
+    )
+    result_window = ResidencyWindow(
+        value_name="shape0.reload",
+        residency_id="shape0.reload@1",
+        opened_by_step_id="shape0.prepare",
+        closed_by_step_id="shape0.compute",
     )
     problem = PipelineScheduleProblem(
         steps=(
@@ -429,14 +480,8 @@ def test_pipeline_schedule_accessors_store_and_load_typed_metadata():
                 launch_overhead=1,
             ),
         ),
-        scheduled_values=(scheduled_value,),
-        residency_windows=(
-            ResidencyWindow(
-                value_name="shape0.out",
-                residency_id="shape0.out@0",
-                opened_by_step_id="shape0.prepare",
-            ),
-        ),
+        scheduled_values=(problem_value,),
+        residency_windows=(problem_window,),
         sram_capacity_bytes=8 * 1024,
     )
     result = PipelineScheduleResult(
@@ -449,6 +494,8 @@ def test_pipeline_schedule_accessors_store_and_load_typed_metadata():
                 end_time=4,
             ),
         ),
+        scheduled_values=(result_value,),
+        residency_windows=(result_window,),
         makespan=4,
         feasible=True,
         solver_name="list",
@@ -464,10 +511,14 @@ def test_pipeline_schedule_accessors_store_and_load_typed_metadata():
     assert get_pipeline_schedule_result(ctx) is result
     assert ctx.pipeline_schedule_problem is problem
     assert ctx.pipeline_schedule_result is result
-    assert ctx.pipeline_scheduled_values == (scheduled_value,)
-    assert ctx.get_pipeline_scheduled_values() == (scheduled_value,)
-    assert ctx.pipeline_residency_windows == problem.residency_windows
-    assert ctx.get_pipeline_residency_windows() == problem.residency_windows
+    assert problem.scheduled_values == (problem_value,)
+    assert result.scheduled_values == (result_value,)
+    assert problem.residency_windows == (problem_window,)
+    assert result.residency_windows == (result_window,)
+    assert ctx.pipeline_scheduled_values == (result_value,)
+    assert ctx.get_pipeline_scheduled_values() == (result_value,)
+    assert ctx.pipeline_residency_windows == (result_window,)
+    assert ctx.get_pipeline_residency_windows() == (result_window,)
     assert ctx.pipeline_transfer_diagnostics == {"shape0.out": {"kind": "resident"}}
     assert ctx.get_pipeline_transfer_diagnostics() == {
         "shape0.out": {"kind": "resident"}
