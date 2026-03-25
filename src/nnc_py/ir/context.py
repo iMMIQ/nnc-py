@@ -6,10 +6,15 @@ from typing import TYPE_CHECKING, Any
 from nnc_py.ir.graph import Graph
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from nnc_py.ir.execution_plan import NodeExecutionPlan
     from nnc_py.ir.pipeline_schedule import (
+        JsonValue,
         PipelineScheduleProblem,
         PipelineScheduleResult,
+        ResidencyWindow,
+        ScheduledValue,
     )
 
 
@@ -82,3 +87,48 @@ class CompileContext:
         from nnc_py.ir.pipeline_schedule import get_pipeline_schedule_result
 
         return get_pipeline_schedule_result(self)
+
+    @property
+    def pipeline_scheduled_values(self) -> "tuple[ScheduledValue, ...]":
+        """Read-only typed access to scheduled values stored in metadata."""
+
+        from nnc_py.ir.pipeline_schedule import get_pipeline_scheduled_values
+
+        return get_pipeline_scheduled_values(self)
+
+    def get_pipeline_scheduled_values(self) -> "tuple[ScheduledValue, ...]":
+        """Return scheduled values without mutating metadata."""
+
+        from nnc_py.ir.pipeline_schedule import get_pipeline_scheduled_values
+
+        return get_pipeline_scheduled_values(self)
+
+    @property
+    def pipeline_residency_windows(self) -> "tuple[ResidencyWindow, ...]":
+        """Read-only typed access to residency windows stored in metadata."""
+
+        from nnc_py.ir.pipeline_schedule import get_pipeline_residency_windows
+
+        return get_pipeline_residency_windows(self)
+
+    def get_pipeline_residency_windows(self) -> "tuple[ResidencyWindow, ...]":
+        """Return residency windows without mutating metadata."""
+
+        from nnc_py.ir.pipeline_schedule import get_pipeline_residency_windows
+
+        return get_pipeline_residency_windows(self)
+
+    @property
+    def pipeline_transfer_diagnostics(self) -> "Mapping[str, JsonValue]":
+        """Read-only typed access to transfer diagnostics stored in metadata."""
+
+        from nnc_py.ir.pipeline_schedule import get_pipeline_transfer_diagnostics
+
+        return get_pipeline_transfer_diagnostics(self)
+
+    def get_pipeline_transfer_diagnostics(self) -> "Mapping[str, JsonValue]":
+        """Return transfer diagnostics without mutating metadata."""
+
+        from nnc_py.ir.pipeline_schedule import get_pipeline_transfer_diagnostics
+
+        return get_pipeline_transfer_diagnostics(self)

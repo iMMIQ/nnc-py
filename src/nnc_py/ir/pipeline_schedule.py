@@ -154,6 +154,8 @@ class ScheduleStepKind(str, Enum):
     DMA_IN = "dma_in"
     SHAPE_PREP = "shape_prep"
     COMPUTE = "compute"
+    SPILL_DMA = "spill_dma"
+    RELOAD_DMA = "reload_dma"
     DMA_OUT = "dma_out"
 
 
@@ -163,6 +165,28 @@ class ScheduleDependencyKind(str, Enum):
     DATA = "data"
     ORDER = "order"
     SAME_NODE_SEQUENCE = "same_node_sequence"
+
+
+class TransferStepKind(str, Enum):
+    """Semantic categories for transfer-oriented schedule steps."""
+
+    DMA_IN = "dma_in"
+    SPILL_DMA = "spill_dma"
+    RELOAD_DMA = "reload_dma"
+    DMA_OUT = "dma_out"
+
+
+class ScheduledValueHomeTier(str, Enum):
+    """Where a scheduled value naturally resides when not in active SRAM use."""
+
+    INPUT = "input"
+    CONST = "const"
+    SLOW = "slow"
+    SRAM = "sram"
+
+
+def _transfer_kind_to_step_kind(transfer_kind: TransferStepKind) -> ScheduleStepKind:
+    return ScheduleStepKind(transfer_kind.value)
 
 
 @dataclass(frozen=True)
@@ -237,6 +261,65 @@ class ScheduleStep:
 
 
 @dataclass(frozen=True)
+class TransferStep(ScheduleStep):
+    """Schedule step that moves one value between storage tiers via DMA."""
+
+    transfer_kind: TransferStepKind = TransferStepKind.DMA_IN
+    moved_value_name: str = ""
+    src_tier: ScheduledValueHomeTier = ScheduledValueHomeTier.SLOW
+    dst_tier: ScheduledValueHomeTier = ScheduledValueHomeTier.SRAM
+    bytes: int = 0
+
+    def __post_init__(self) -> None:
+        transfer_kind = _coerce_enum(
+            self.transfer_kind,
+            TransferStepKind,
+            field_name="TransferStep.transfer_kind",
+        )
+        object.__setattr__(self, "transfer_kind", transfer_kind)
+        object.__setattr__(
+            self,
+            "src_tier",
+            _coerce_enum(
+                self.src_tier,
+                ScheduledValueHomeTier,
+                field_name="TransferStep.src_tier",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "dst_tier",
+            _coerce_enum(
+                self.dst_tier,
+                ScheduledValueHomeTier,
+                field_name="TransferStep.dst_tier",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "step_kind",
+            _transfer_kind_to_step_kind(transfer_kind),
+        )
+        object.__setattr__(self, "resource_kind", PipelineResourceKind.DMA)
+        super().__post_init__()
+
+    def to_json(self) -> dict[str, object]:
+        """Return a JSON-ready representation of the transfer step."""
+
+        payload = super().to_json()
+        payload.update(
+            {
+                "transfer_kind": self.transfer_kind.value,
+                "moved_value_name": self.moved_value_name,
+                "src_tier": self.src_tier.value,
+                "dst_tier": self.dst_tier.value,
+                "bytes": self.bytes,
+            }
+        )
+        return payload
+
+
+@dataclass(frozen=True)
 class SramValue:
     """Value that may remain live in SRAM across schedule-step boundaries."""
 
@@ -271,6 +354,53 @@ class SramValue:
 
 
 @dataclass(frozen=True)
+class ScheduledValue:
+    """Value tracked by the scheduler across SRAM and slow-tier residency."""
+
+    name: str
+    graph_tensor_name: str | None
+    size_bytes: int
+    producer_step_id: str | None = None
+    consumer_step_ids: tuple[str, ...] = ()
+    must_reside_in_sram: bool = False
+    can_alias: bool = False
+    home_tier: ScheduledValueHomeTier = ScheduledValueHomeTier.SRAM
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "consumer_step_ids",
+            _coerce_str_tuple(
+                self.consumer_step_ids,
+                field_name="ScheduledValue.consumer_step_ids",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "home_tier",
+            _coerce_enum(
+                self.home_tier,
+                ScheduledValueHomeTier,
+                field_name="ScheduledValue.home_tier",
+            ),
+        )
+
+    def to_json(self) -> dict[str, object]:
+        """Return a JSON-ready representation of the scheduled value."""
+
+        return {
+            "name": self.name,
+            "graph_tensor_name": self.graph_tensor_name,
+            "size_bytes": self.size_bytes,
+            "producer_step_id": self.producer_step_id,
+            "consumer_step_ids": list(self.consumer_step_ids),
+            "must_reside_in_sram": self.must_reside_in_sram,
+            "can_alias": self.can_alias,
+            "home_tier": self.home_tier.value,
+        }
+
+
+@dataclass(frozen=True)
 class ScheduleEdge:
     """Dependency edge between two schedule steps."""
 
@@ -297,6 +427,49 @@ class ScheduleEdge:
             "dst_step_id": self.dst_step_id,
             "kind": self.kind.value,
         }
+
+
+@dataclass(frozen=True)
+class ResidencyWindow:
+    """Logical lifetime window for one scheduled value residency."""
+
+    value_name: str
+    residency_id: str
+    opened_by_step_id: str
+    closed_by_step_id: str | None = None
+
+    def to_json(self) -> dict[str, object]:
+        """Return a JSON-ready representation of the residency window."""
+
+        return {
+            "value_name": self.value_name,
+            "residency_id": self.residency_id,
+            "opened_by_step_id": self.opened_by_step_id,
+            "closed_by_step_id": self.closed_by_step_id,
+        }
+
+
+def _scheduled_value_from_sram_value(value: SramValue) -> ScheduledValue:
+    return ScheduledValue(
+        name=value.name,
+        graph_tensor_name=None,
+        size_bytes=value.size_bytes,
+        producer_step_id=value.producer_step_id,
+        consumer_step_ids=value.consumer_step_ids,
+        must_reside_in_sram=value.must_reside_in_sram,
+        can_alias=value.can_alias,
+    )
+
+
+def _sram_value_from_scheduled_value(value: ScheduledValue) -> SramValue:
+    return SramValue(
+        name=value.name,
+        size_bytes=value.size_bytes,
+        producer_step_id=value.producer_step_id,
+        consumer_step_ids=value.consumer_step_ids,
+        must_reside_in_sram=value.must_reside_in_sram,
+        can_alias=value.can_alias,
+    )
 
 
 @dataclass(frozen=True)
@@ -361,12 +534,32 @@ class PipelineScheduleProblem:
     steps: tuple[ScheduleStep, ...] = ()
     edges: tuple[ScheduleEdge, ...] = ()
     sram_values: tuple[SramValue, ...] = ()
+    scheduled_values: tuple[ScheduledValue, ...] = ()
+    residency_windows: tuple[ResidencyWindow, ...] = ()
     resources: tuple[PipelineResourceKind, ...] = ()
     sram_capacity_bytes: int = 0
     objective: str = "min_makespan"
     metadata: Mapping[str, JsonValue] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        sram_values = _coerce_tuple_of_type(
+            self.sram_values,
+            SramValue,
+            field_name="PipelineScheduleProblem.sram_values",
+        )
+        scheduled_values = _coerce_tuple_of_type(
+            self.scheduled_values,
+            ScheduledValue,
+            field_name="PipelineScheduleProblem.scheduled_values",
+        )
+        if not scheduled_values and sram_values:
+            scheduled_values = tuple(
+                _scheduled_value_from_sram_value(value) for value in sram_values
+            )
+        if not sram_values and scheduled_values:
+            sram_values = tuple(
+                _sram_value_from_scheduled_value(value) for value in scheduled_values
+            )
         object.__setattr__(
             self,
             "steps",
@@ -384,10 +577,20 @@ class PipelineScheduleProblem:
         object.__setattr__(
             self,
             "sram_values",
+            sram_values,
+        )
+        object.__setattr__(
+            self,
+            "scheduled_values",
+            scheduled_values,
+        )
+        object.__setattr__(
+            self,
+            "residency_windows",
             _coerce_tuple_of_type(
-                self.sram_values,
-                SramValue,
-                field_name="PipelineScheduleProblem.sram_values",
+                self.residency_windows,
+                ResidencyWindow,
+                field_name="PipelineScheduleProblem.residency_windows",
             ),
         )
         object.__setattr__(
@@ -414,6 +617,12 @@ class PipelineScheduleProblem:
             "steps": [step.to_json() for step in self.steps],
             "edges": [edge.to_json() for edge in self.edges],
             "sram_values": [value.to_json() for value in self.sram_values],
+            "scheduled_values": [
+                value.to_json() for value in self.scheduled_values
+            ],
+            "residency_windows": [
+                window.to_json() for window in self.residency_windows
+            ],
             "resources": [resource.value for resource in self.resources],
             "sram_capacity_bytes": self.sram_capacity_bytes,
             "objective": self.objective,
@@ -431,6 +640,7 @@ class PipelineScheduleResult:
     feasible: bool = False
     solver_name: str = ""
     diagnostics: Mapping[str, JsonValue] = field(default_factory=dict)
+    transfer_diagnostics: Mapping[str, JsonValue] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -458,6 +668,14 @@ class PipelineScheduleResult:
                 self.diagnostics, field_name="PipelineScheduleResult.diagnostics"
             ),
         )
+        object.__setattr__(
+            self,
+            "transfer_diagnostics",
+            _freeze_json_mapping(
+                self.transfer_diagnostics,
+                field_name="PipelineScheduleResult.transfer_diagnostics",
+            ),
+        )
 
     def to_json(self) -> dict[str, object]:
         """Return a JSON-ready representation of the schedule result."""
@@ -469,6 +687,7 @@ class PipelineScheduleResult:
             "feasible": self.feasible,
             "solver_name": self.solver_name,
             "diagnostics": _to_json_value(self.diagnostics),
+            "transfer_diagnostics": _to_json_value(self.transfer_diagnostics),
         }
 
 
@@ -514,6 +733,39 @@ def get_pipeline_schedule_result(
     return result
 
 
+def get_pipeline_scheduled_values(
+    ctx: CompileContext,
+) -> tuple[ScheduledValue, ...]:
+    """Return scheduled values from the stored schedule problem."""
+
+    problem = get_pipeline_schedule_problem(ctx)
+    if problem is None:
+        return ()
+    return problem.scheduled_values
+
+
+def get_pipeline_residency_windows(
+    ctx: CompileContext,
+) -> tuple[ResidencyWindow, ...]:
+    """Return residency windows from the stored schedule problem."""
+
+    problem = get_pipeline_schedule_problem(ctx)
+    if problem is None:
+        return ()
+    return problem.residency_windows
+
+
+def get_pipeline_transfer_diagnostics(
+    ctx: CompileContext,
+) -> Mapping[str, JsonValue]:
+    """Return transfer-specific diagnostics from the stored schedule result."""
+
+    result = get_pipeline_schedule_result(ctx)
+    if result is None:
+        return MappingProxyType({})
+    return result.transfer_diagnostics
+
+
 def set_pipeline_schedule_result(
     ctx: CompileContext, result: PipelineScheduleResult
 ) -> None:
@@ -534,15 +786,23 @@ __all__ = [
     "PipelineScheduleResult",
     "JsonScalar",
     "JsonValue",
+    "ResidencyWindow",
     "ScheduleDependencyKind",
     "ScheduleEdge",
     "ScheduledStep",
     "ScheduleStep",
     "ScheduleStepKind",
+    "ScheduledValue",
+    "ScheduledValueHomeTier",
     "SramAllocationInterval",
     "SramValue",
+    "TransferStep",
+    "TransferStepKind",
     "get_pipeline_schedule_problem",
+    "get_pipeline_residency_windows",
     "get_pipeline_schedule_result",
+    "get_pipeline_scheduled_values",
+    "get_pipeline_transfer_diagnostics",
     "set_pipeline_schedule_problem",
     "set_pipeline_schedule_result",
 ]

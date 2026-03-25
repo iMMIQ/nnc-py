@@ -8,13 +8,18 @@ from nnc_py.ir.pipeline_schedule import (
     PipelineResourceKind,
     PipelineScheduleProblem,
     PipelineScheduleResult,
+    ResidencyWindow,
     ScheduleDependencyKind,
     ScheduleEdge,
     ScheduledStep,
     ScheduleStep,
     ScheduleStepKind,
+    ScheduledValue,
+    ScheduledValueHomeTier,
     SramAllocationInterval,
     SramValue,
+    TransferStep,
+    TransferStepKind,
     get_pipeline_schedule_problem,
     get_pipeline_schedule_result,
     set_pipeline_schedule_problem,
@@ -218,6 +223,31 @@ def test_pipeline_schedule_constructors_copy_sequences_and_normalize_enum_string
     assert problem.sram_values[0].consumer_step_ids == ("relu0.compute",)
 
 
+def test_scheduled_value_tracks_home_tier_and_graph_tensor_name():
+    value = ScheduledValue(
+        name="sram|node|4:add0|tensor|1:y",
+        graph_tensor_name="y",
+        size_bytes=64,
+        home_tier=ScheduledValueHomeTier.SLOW,
+    )
+
+    assert value.graph_tensor_name == "y"
+    assert value.home_tier is ScheduledValueHomeTier.SLOW
+
+
+def test_transfer_step_uses_dma_resource_and_names_moved_value():
+    step = TransferStep(
+        id="y.reload0",
+        node_name="reload:y",
+        transfer_kind=TransferStepKind.RELOAD_DMA,
+        moved_value_name="y",
+        bytes=64,
+    )
+
+    assert step.resource_kind is PipelineResourceKind.DMA
+    assert step.step_kind is ScheduleStepKind.RELOAD_DMA
+
+
 def test_pipeline_schedule_ir_exposes_json_ready_data():
     step = ScheduleStep(
         id="dma0.in",
@@ -270,6 +300,8 @@ def test_pipeline_schedule_ir_exposes_json_ready_data():
         ],
         "edges": [],
         "sram_values": [],
+        "scheduled_values": [],
+        "residency_windows": [],
         "resources": ["dma", "matmul"],
         "sram_capacity_bytes": 0,
         "objective": "min_makespan",
@@ -290,6 +322,7 @@ def test_pipeline_schedule_ir_exposes_json_ready_data():
         "feasible": True,
         "solver_name": "list",
         "diagnostics": {"status": {"kind": "ok"}},
+        "transfer_diagnostics": {},
     }
 
 
@@ -379,6 +412,12 @@ def test_pipeline_schedule_metadata_helpers_validate_runtime_types():
 
 def test_pipeline_schedule_accessors_store_and_load_typed_metadata():
     ctx = CompileContext(graph=Graph("pipeline_ctx"), target="x86")
+    scheduled_value = ScheduledValue(
+        name="shape0.out",
+        graph_tensor_name="shape0_out",
+        size_bytes=64,
+        home_tier=ScheduledValueHomeTier.SRAM,
+    )
     problem = PipelineScheduleProblem(
         steps=(
             ScheduleStep(
@@ -388,6 +427,14 @@ def test_pipeline_schedule_accessors_store_and_load_typed_metadata():
                 resource_kind=PipelineResourceKind.SHAPE,
                 duration=4,
                 launch_overhead=1,
+            ),
+        ),
+        scheduled_values=(scheduled_value,),
+        residency_windows=(
+            ResidencyWindow(
+                value_name="shape0.out",
+                residency_id="shape0.out@0",
+                opened_by_step_id="shape0.prepare",
             ),
         ),
         sram_capacity_bytes=8 * 1024,
@@ -405,6 +452,7 @@ def test_pipeline_schedule_accessors_store_and_load_typed_metadata():
         makespan=4,
         feasible=True,
         solver_name="list",
+        transfer_diagnostics={"shape0.out": {"kind": "resident"}},
     )
 
     set_pipeline_schedule_problem(ctx, problem)
@@ -416,6 +464,14 @@ def test_pipeline_schedule_accessors_store_and_load_typed_metadata():
     assert get_pipeline_schedule_result(ctx) is result
     assert ctx.pipeline_schedule_problem is problem
     assert ctx.pipeline_schedule_result is result
+    assert ctx.pipeline_scheduled_values == (scheduled_value,)
+    assert ctx.get_pipeline_scheduled_values() == (scheduled_value,)
+    assert ctx.pipeline_residency_windows == problem.residency_windows
+    assert ctx.get_pipeline_residency_windows() == problem.residency_windows
+    assert ctx.pipeline_transfer_diagnostics == {"shape0.out": {"kind": "resident"}}
+    assert ctx.get_pipeline_transfer_diagnostics() == {
+        "shape0.out": {"kind": "resident"}
+    }
 
 
 def test_pipeline_schedule_accessors_do_not_mutate_missing_metadata_on_read():
@@ -429,5 +485,11 @@ def test_pipeline_schedule_accessors_do_not_mutate_missing_metadata_on_read():
     assert ctx.pipeline_schedule_result is None
     assert ctx.get_pipeline_schedule_problem() is None
     assert ctx.get_pipeline_schedule_result() is None
+    assert ctx.pipeline_scheduled_values == ()
+    assert ctx.get_pipeline_scheduled_values() == ()
+    assert ctx.pipeline_residency_windows == ()
+    assert ctx.get_pipeline_residency_windows() == ()
+    assert ctx.pipeline_transfer_diagnostics == {}
+    assert ctx.get_pipeline_transfer_diagnostics() == {}
     assert "pipeline_schedule_problem" not in ctx.metadata
     assert "pipeline_schedule_result" not in ctx.metadata
