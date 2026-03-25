@@ -411,6 +411,21 @@ def test_pipeline_schedule_rejects_invalid_enum_values():
         )
 
 
+def test_pipeline_schedule_problem_rejects_inconsistent_value_shims():
+    with pytest.raises(ValueError, match="scheduled_values must match sram_values"):
+        PipelineScheduleProblem(
+            sram_values=(SramValue(name="x", size_bytes=64),),
+            scheduled_values=(
+                ScheduledValue(
+                    name="x",
+                    graph_tensor_name="x",
+                    size_bytes=128,
+                    home_tier=ScheduledValueHomeTier.SLOW,
+                ),
+            ),
+        )
+
+
 def test_pipeline_schedule_metadata_helpers_validate_runtime_types():
     ctx = CompileContext(graph=Graph("typed_pipeline_ctx"), target="x86")
     problem = PipelineScheduleProblem()
@@ -523,6 +538,41 @@ def test_pipeline_schedule_accessors_store_and_load_typed_metadata():
     assert ctx.get_pipeline_transfer_diagnostics() == {
         "shape0.out": {"kind": "resident"}
     }
+
+
+def test_pipeline_schedule_accessors_respect_explicit_empty_result_metadata():
+    ctx = CompileContext(graph=Graph("pipeline_ctx_empty_result"), target="x86")
+    problem = PipelineScheduleProblem(
+        scheduled_values=(
+            ScheduledValue(
+                name="shape0.out",
+                graph_tensor_name="shape0_out",
+                size_bytes=64,
+                home_tier=ScheduledValueHomeTier.SRAM,
+            ),
+        ),
+        residency_windows=(
+            ResidencyWindow(
+                value_name="shape0.out",
+                residency_id="shape0.out@0",
+                opened_by_step_id="shape0.prepare",
+            ),
+        ),
+    )
+    result = PipelineScheduleResult(
+        scheduled_values=(),
+        residency_windows=(),
+        feasible=True,
+        solver_name="list",
+    )
+
+    set_pipeline_schedule_problem(ctx, problem)
+    set_pipeline_schedule_result(ctx, result)
+
+    assert ctx.pipeline_scheduled_values == ()
+    assert ctx.get_pipeline_scheduled_values() == ()
+    assert ctx.pipeline_residency_windows == ()
+    assert ctx.get_pipeline_residency_windows() == ()
 
 
 def test_pipeline_schedule_accessors_do_not_mutate_missing_metadata_on_read():

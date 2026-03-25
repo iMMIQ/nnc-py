@@ -472,6 +472,17 @@ def _sram_value_from_scheduled_value(value: ScheduledValue) -> SramValue:
     )
 
 
+def _validate_value_shim_consistency(
+    sram_values: tuple[SramValue, ...],
+    scheduled_values: tuple[ScheduledValue, ...],
+) -> None:
+    projected_sram_values = tuple(
+        _sram_value_from_scheduled_value(value) for value in scheduled_values
+    )
+    if sram_values != projected_sram_values:
+        raise ValueError("scheduled_values must match sram_values")
+
+
 @dataclass(frozen=True)
 class ScheduledStep:
     """Scheduled placement for one step on a resource slot."""
@@ -556,10 +567,12 @@ class PipelineScheduleProblem:
             scheduled_values = tuple(
                 _scheduled_value_from_sram_value(value) for value in sram_values
             )
-        if not sram_values and scheduled_values:
+        elif not sram_values and scheduled_values:
             sram_values = tuple(
                 _sram_value_from_scheduled_value(value) for value in scheduled_values
             )
+        elif sram_values and scheduled_values:
+            _validate_value_shim_consistency(sram_values, scheduled_values)
         object.__setattr__(
             self,
             "steps",
@@ -765,7 +778,7 @@ def get_pipeline_scheduled_values(
     """Return scheduled values from the stored schedule result when available."""
 
     result = get_pipeline_schedule_result(ctx)
-    if result is not None and result.scheduled_values:
+    if result is not None:
         return result.scheduled_values
     problem = get_pipeline_schedule_problem(ctx)
     if problem is not None:
@@ -779,7 +792,7 @@ def get_pipeline_residency_windows(
     """Return residency windows from the stored schedule result when available."""
 
     result = get_pipeline_schedule_result(ctx)
-    if result is not None and result.residency_windows:
+    if result is not None:
         return result.residency_windows
     problem = get_pipeline_schedule_problem(ctx)
     if problem is not None:
