@@ -106,6 +106,7 @@ class X86Backend(BackendBase):
                     self._build_memory_plan_summary_line(alloc_plan, ctx),
                 ],
                 "node_comments": {},
+                "parallel_runtime": None,
             }
 
         summary_lines = ["schedule_metadata=absent"]
@@ -121,6 +122,7 @@ class X86Backend(BackendBase):
             return {
                 "summary_lines": summary_lines,
                 "node_comments": node_comments,
+                "parallel_runtime": None,
             }
 
         summary_lines = [
@@ -135,10 +137,21 @@ class X86Backend(BackendBase):
         if diagnostics_summary:
             summary_lines.append(f"diagnostics={diagnostics_summary}")
 
+        parallel_runtime = self._build_pipeline_parallel_runtime_metadata(
+            ctx,
+            schedule_problem=schedule_problem,
+            schedule_result=schedule_result,
+        )
+        if parallel_runtime is not None:
+            summary_lines.append("parallel_runtime=enabled(workers=4)")
+        else:
+            summary_lines.append("parallel_runtime=disabled")
+
         if schedule_problem is None or not schedule_result.feasible:
             return {
                 "summary_lines": summary_lines,
                 "node_comments": node_comments,
+                "parallel_runtime": parallel_runtime,
             }
 
         problem_steps = {step.id: step for step in schedule_problem.steps}
@@ -162,7 +175,1096 @@ class X86Backend(BackendBase):
         return {
             "summary_lines": summary_lines,
             "node_comments": node_comments,
+            "parallel_runtime": parallel_runtime,
         }
+
+    def _build_pipeline_parallel_runtime_metadata(
+        self,
+        ctx: CompileContext,
+        *,
+        schedule_problem: Any,
+        schedule_result: Any,
+    ) -> dict[str, Any] | None:
+        """Build structured metadata used to emit a true parallel C simulation runtime."""
+        if self.debug_mode:
+            return None
+        if schedule_problem is None:
+            return None
+        if schedule_result is None or not schedule_result.feasible:
+            return None
+
+        problem_steps = {step.id: step for step in schedule_problem.steps}
+        if not problem_steps:
+            return None
+
+        nodes_with_compute = {
+            step.node_name
+            for step in schedule_problem.steps
+            if getattr(getattr(step, "step_kind", None), "value", None) == "compute"
+        }
+        resource_to_index = {
+            "dma": 0,
+            "shape": 1,
+            "matmul": 2,
+            "other": 3,
+        }
+
+        ordered_scheduled_steps = sorted(
+            schedule_result.scheduled_steps,
+            key=lambda step: (step.start_time, step.end_time, step.step_id),
+        )
+        step_records: list[dict[str, Any]] = []
+        for scheduled_step in ordered_scheduled_steps:
+            problem_step = problem_steps.get(scheduled_step.step_id)
+            if problem_step is None:
+                continue
+
+            resource_kind = getattr(scheduled_step.resource_kind, "value", "other")
+            resource_index = resource_to_index.get(resource_kind)
+            if resource_index is None:
+                continue
+
+            step_kind = getattr(getattr(problem_step, "step_kind", None), "value", "")
+            invoke_node = False
+            if step_kind == "compute":
+                invoke_node = True
+            elif step_kind == "shape_prep" and problem_step.node_name not in nodes_with_compute:
+                invoke_node = True
+
+            invoke_symbol = None
+            invoke_symbol = self._parallel_step_function_name(problem_step.id)
+            input_tensor_symbols = self._collect_parallel_step_tensor_symbols(
+                ctx,
+                tuple(getattr(problem_step, "sram_input_names", ())),
+            )
+            output_tensor_symbols = self._collect_parallel_step_tensor_symbols(
+                ctx,
+                tuple(getattr(problem_step, "sram_output_names", ())),
+            )
+            input_value_records = self._collect_parallel_step_value_records(
+                ctx,
+                tuple(getattr(problem_step, "sram_input_names", ())),
+            )
+            output_value_records = self._collect_parallel_step_value_records(
+                ctx,
+                tuple(getattr(problem_step, "sram_output_names", ())),
+            )
+
+            step_records.append(
+                {
+                    "step_id": scheduled_step.step_id,
+                    "node_name": problem_step.node_name,
+                    "step_kind": step_kind,
+                    "resource_index": resource_index,
+                    "start_time": int(scheduled_step.start_time),
+                    "end_time": int(scheduled_step.end_time),
+                    "invoke_symbol": invoke_symbol,
+                    "invoke_node": invoke_node,
+                    "node_symbol": ctx.node_symbols.get(problem_step.node_name, problem_step.node_name),
+                    "input_tensor_symbols": input_tensor_symbols,
+                    "output_tensor_symbols": output_tensor_symbols,
+                    "input_value_records": input_value_records,
+                    "output_value_records": output_value_records,
+                }
+            )
+
+        if not step_records:
+            return None
+
+        step_index_by_id = {
+            record["step_id"]: index
+            for index, record in enumerate(step_records)
+        }
+        predecessor_indices: list[set[int]] = [set() for _ in step_records]
+        successor_indices: list[set[int]] = [set() for _ in step_records]
+        for edge in getattr(schedule_problem, "edges", ()):
+            src_index = step_index_by_id.get(edge.src_step_id)
+            dst_index = step_index_by_id.get(edge.dst_step_id)
+            if src_index is None or dst_index is None:
+                continue
+            predecessor_indices[dst_index].add(src_index)
+            successor_indices[src_index].add(dst_index)
+
+        return {
+            "enabled": True,
+            "worker_count": 4,
+            "steps": tuple(step_records),
+            "predecessor_indices": tuple(
+                tuple(sorted(indices)) for indices in predecessor_indices
+            ),
+            "successor_indices": tuple(
+                tuple(sorted(indices)) for indices in successor_indices
+            ),
+        }
+
+    def _has_parallel_runtime(self, pipeline_codegen_metadata: dict[str, Any]) -> bool:
+        runtime = pipeline_codegen_metadata.get("parallel_runtime")
+        return bool(isinstance(runtime, dict) and runtime.get("enabled") is True)
+
+    def _parallel_step_function_name(self, step_id: str) -> str:
+        sanitized = []
+        for char in step_id:
+            if char.isalnum():
+                sanitized.append(char)
+            else:
+                sanitized.append("_")
+        return "nnc_pipeline_step_" + "".join(sanitized)
+
+    def _decode_schedule_value_graph_tensor_name(self, value_name: str) -> str | None:
+        if value_name.startswith("sram|node|") and "|tensor|" in value_name:
+            encoded_tensor = value_name.split("|tensor|", 1)[1]
+            name_parts = encoded_tensor.split(":", 1)
+            if len(name_parts) == 2:
+                return name_parts[1]
+            return encoded_tensor
+        if value_name.startswith("sram|"):
+            return None
+        return value_name
+
+    def _collect_parallel_step_tensor_symbols(
+        self,
+        ctx: CompileContext,
+        value_names: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        symbols: list[str] = []
+        for value_name in value_names:
+            graph_tensor_name = self._decode_schedule_value_graph_tensor_name(value_name)
+            if graph_tensor_name is None:
+                continue
+            if graph_tensor_name not in ctx.graph.tensors:
+                continue
+            symbol = ctx.tensor_symbols.get(graph_tensor_name, graph_tensor_name)
+            if symbol not in symbols:
+                symbols.append(symbol)
+        return tuple(symbols)
+
+    def _parallel_value_storage_name(self, value_name: str) -> str:
+        sanitized = []
+        for char in value_name:
+            if char.isalnum():
+                sanitized.append(char)
+            else:
+                sanitized.append("_")
+        return "_nnc_pipeline_value_" + "".join(sanitized)
+
+    def _parallel_tensor_saved_data_name(self, tensor_symbol: str) -> str:
+        return f"_nnc_pipeline_saved_{tensor_symbol}_data"
+
+    def _clone_pipeline_codegen_metadata(
+        self,
+        pipeline_codegen_metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        cloned = dict(pipeline_codegen_metadata)
+        runtime = pipeline_codegen_metadata.get("parallel_runtime")
+        if not isinstance(runtime, dict):
+            return cloned
+
+        cloned_runtime = dict(runtime)
+        cloned_runtime["steps"] = tuple(dict(step) for step in runtime.get("steps", ()))
+        custom_declarations = runtime.get("custom_declarations", ())
+        cloned_runtime["custom_declarations"] = tuple(str(line) for line in custom_declarations)
+        cloned["parallel_runtime"] = cloned_runtime
+        return cloned
+
+    def _augment_parallel_runtime_for_legacy_spill(
+        self,
+        ctx: CompileContext,
+        spill_plan: "SpillPlan",
+        pipeline_codegen_metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not self._has_parallel_runtime(pipeline_codegen_metadata):
+            return pipeline_codegen_metadata
+
+        cloned = self._clone_pipeline_codegen_metadata(pipeline_codegen_metadata)
+        runtime = cloned.get("parallel_runtime")
+        if not isinstance(runtime, dict):
+            return pipeline_codegen_metadata
+
+        steps_by_id = {
+            str(step["step_id"]): step
+            for step in tuple(runtime.get("steps", ()))
+        }
+        nodes = ctx.graph.topological_sort()
+
+        for node in nodes:
+            if node.op_type == OpType.CONSTANT:
+                continue
+
+            func_name = ctx.node_symbols.get(node.name, node.name)
+            dma_in_lines: list[str] = []
+            for reload_point in spill_plan.reload_points:
+                if reload_point.before_node != node.name:
+                    continue
+                dma_in_lines.extend(
+                    [
+                        "memcpy(",
+                        f"    _nnc_fast_pool + {reload_point.to_fast_offset},",
+                        f"    _nnc_slow_pool + {reload_point.from_slow_offset},",
+                        f"    {reload_point.size}",
+                        ");",
+                    ]
+                )
+
+            dma_out_lines: list[str] = []
+            for spill_point in spill_plan.spill_points:
+                if spill_point.after_node != node.name:
+                    continue
+                dma_out_lines.extend(
+                    [
+                        "memcpy(",
+                        f"    _nnc_slow_pool + {spill_point.to_slow_offset},",
+                        f"    _nnc_fast_pool + {spill_point.from_fast_offset},",
+                        f"    {spill_point.size}",
+                        ");",
+                    ]
+                )
+
+            compute_step = steps_by_id.get(f"{node.name}.compute")
+            if compute_step is not None:
+                compute_step["custom_body_lines"] = (f"{func_name}_body();",)
+
+            dma_in_step = steps_by_id.get(f"{node.name}.dma_in")
+            if dma_in_step is not None and dma_in_lines:
+                dma_in_step["custom_body_lines"] = tuple(dma_in_lines)
+
+            dma_out_step = steps_by_id.get(f"{node.name}.dma_out")
+            if dma_out_step is not None and dma_out_lines:
+                dma_out_step["custom_body_lines"] = tuple(dma_out_lines)
+
+        return cloned
+
+    def _augment_parallel_runtime_for_unified_spill(
+        self,
+        ctx: CompileContext,
+        plan: MemoryAllocationPlan,
+        pipeline_codegen_metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not self._has_parallel_runtime(pipeline_codegen_metadata):
+            return pipeline_codegen_metadata
+
+        cloned = self._clone_pipeline_codegen_metadata(pipeline_codegen_metadata)
+        runtime = cloned.get("parallel_runtime")
+        if not isinstance(runtime, dict):
+            return pipeline_codegen_metadata
+
+        steps_by_id = {
+            str(step["step_id"]): step
+            for step in tuple(runtime.get("steps", ()))
+        }
+        custom_declarations = list(runtime.get("custom_declarations", ()))
+        seen_declarations = set(custom_declarations)
+
+        def add_declaration(line: str) -> None:
+            if line in seen_declarations:
+                return
+            seen_declarations.add(line)
+            custom_declarations.append(line)
+
+        def get_saved_var(tensor_symbol: str) -> str:
+            name = self._parallel_tensor_saved_data_name(tensor_symbol)
+            add_declaration(f"static void* {name} = NULL;")
+            return name
+
+        def get_output_spill_points(node_idx: int) -> dict[str, SpillPoint]:
+            return {
+                point.tensor_name: point
+                for point in plan.get_spill_points_after(node_idx)
+            }
+
+        def get_move_points_at(node_idx: int) -> list[MovePoint]:
+            return sorted(
+                plan.get_move_points_at(node_idx),
+                key=lambda move: move.from_offset,
+            )
+
+        def get_internal_storage_expr(tensor_name: str) -> str | None:
+            alloc = plan.tensor_allocations.get(tensor_name)
+            if alloc is None:
+                return None
+            pool_name = "_nnc_slow_pool" if alloc.is_spilled else "_nnc_fast_pool"
+            return f"{pool_name} + {alloc.offset}"
+
+        def get_saved_input_binding_name(tensor_name: str) -> str:
+            symbol = ctx.tensor_symbols.get(tensor_name, tensor_name)
+            return f"_nnc_bound_input_{symbol}"
+
+        input_first_use: dict[str, int] = {}
+        liveness_map = ctx.metadata.get("tensor_liveness", {})
+        for tensor_name in ctx.graph.inputs:
+            liveness = liveness_map.get(tensor_name)
+            if liveness is None or not liveness.use_positions:
+                continue
+            input_first_use[tensor_name] = liveness.use_positions[0]
+
+        nodes = ctx.graph.topological_sort()
+        for node_idx, node in enumerate(nodes):
+            if node.op_type == OpType.CONSTANT:
+                continue
+
+            func_name = ctx.node_symbols.get(node.name, node.name)
+            spill_points_after = get_output_spill_points(node_idx)
+            move_points_at = get_move_points_at(node_idx)
+            move_points_by_tensor = {
+                move.tensor_name: move for move in move_points_at
+            }
+            reloads_before = plan.get_reload_points_before(node_idx)
+            inputs_need_reload: dict[str, Union[ReloadPoint, SpillPoint]] = {
+                rp.tensor_name: rp for rp in reloads_before
+            }
+
+            additional_inputs: list[tuple[str, TensorAllocation]] = []
+            for input_name in node.inputs:
+                if input_name in inputs_need_reload:
+                    continue
+                alloc = plan.tensor_allocations.get(input_name)
+                if alloc is None or not alloc.is_spilled:
+                    continue
+                existing_reload = next(
+                    (rp for rp in plan.reload_points if rp.tensor_name == input_name),
+                    None,
+                )
+                slow_offset = existing_reload.from_slow_offset if existing_reload else 0
+                additional_inputs.append((input_name, alloc))
+                inputs_need_reload[input_name] = ReloadPoint(
+                    tensor_name=input_name,
+                    before_node=node.name,
+                    before_node_idx=node_idx,
+                    from_slow_offset=slow_offset,
+                    to_buffer_id=alloc.buffer_id,
+                    to_fast_offset=0,
+                    size=alloc.size,
+                    reload_slot_id=-1,
+                )
+
+            current_slot = max(
+                [
+                    rp.reload_slot_id
+                    for rp in inputs_need_reload.values()
+                    if isinstance(rp, ReloadPoint)
+                ],
+                default=-1,
+            ) + 1
+            for input_name, _ in additional_inputs:
+                rp = inputs_need_reload[input_name]
+                if isinstance(rp, ReloadPoint):
+                    rp.reload_slot_id = current_slot
+                current_slot += 1
+
+            outputs_need_temp: dict[str, Union[ReloadPoint, SpillPoint]] = {}
+            for output_name in node.outputs:
+                spill_point = spill_points_after.get(output_name)
+                if spill_point is not None:
+                    outputs_need_temp[output_name] = spill_point
+                    continue
+
+                alloc = plan.tensor_allocations.get(output_name)
+                if alloc is None or not alloc.is_spilled:
+                    continue
+                existing_spill = next(
+                    (sp for sp in plan.spill_points if sp.tensor_name == output_name),
+                    None,
+                )
+                slow_offset = existing_spill.to_slow_offset if existing_spill else 0
+                outputs_need_temp[output_name] = SpillPoint(
+                    tensor_name=output_name,
+                    after_node=node.name,
+                    after_node_idx=node_idx,
+                    from_buffer_id=alloc.buffer_id,
+                    from_fast_offset=0,
+                    to_slow_offset=slow_offset,
+                    size=alloc.size,
+                )
+
+            output_slot_ids: dict[str, int] = {}
+            output_slot_idx = len(inputs_need_reload)
+            for output_name in node.outputs:
+                if output_name not in outputs_need_temp:
+                    continue
+                output_slot_ids[output_name] = output_slot_idx
+                output_slot_idx += 1
+
+            dma_in_lines: list[str] = []
+            moved_first_use_inputs = [
+                input_name
+                for input_name in node.inputs
+                if input_first_use.get(input_name) == node_idx
+                and input_name in move_points_by_tensor
+            ]
+            for input_name in moved_first_use_inputs:
+                alloc = plan.tensor_allocations.get(input_name)
+                move = move_points_by_tensor[input_name]
+                if alloc is None:
+                    continue
+                tensor_symbol = ctx.tensor_symbols.get(input_name, input_name)
+                from_expr = f"_nnc_fast_pool + {move.from_offset}"
+                dma_in_lines.extend(
+                    [
+                        f"memcpy({from_expr}, {get_saved_input_binding_name(input_name)}, {alloc.size});",
+                        f"{tensor_symbol}.data = {from_expr};",
+                    ]
+                )
+
+            for move in move_points_at:
+                tensor_symbol = ctx.tensor_symbols.get(move.tensor_name, move.tensor_name)
+                to_expr = f"_nnc_fast_pool + {move.to_offset}"
+                from_expr = f"_nnc_fast_pool + {move.from_offset}"
+                dma_in_lines.extend(
+                    [
+                        f"memmove({to_expr}, {from_expr}, {move.size});",
+                        f"{tensor_symbol}.data = {to_expr};",
+                    ]
+                )
+
+            for input_name in node.inputs:
+                if input_first_use.get(input_name) != node_idx:
+                    continue
+                if input_name in move_points_by_tensor:
+                    continue
+                alloc = plan.tensor_allocations.get(input_name)
+                target_expr = get_internal_storage_expr(input_name)
+                if alloc is None or target_expr is None:
+                    continue
+                tensor_symbol = ctx.tensor_symbols.get(input_name, input_name)
+                dma_in_lines.extend(
+                    [
+                        f"memcpy({target_expr}, {get_saved_input_binding_name(input_name)}, {alloc.size});",
+                        f"{tensor_symbol}.data = {target_expr};",
+                    ]
+                )
+
+            for input_name in node.inputs:
+                if input_name not in inputs_need_reload:
+                    continue
+                rp = inputs_need_reload[input_name]
+                if not isinstance(rp, ReloadPoint):
+                    continue
+                tensor_symbol = ctx.tensor_symbols.get(input_name, input_name)
+                saved_var = get_saved_var(tensor_symbol)
+                dma_in_lines.extend(
+                    [
+                        f"{saved_var} = {tensor_symbol}.data;",
+                        f"memcpy(_nnc_reload_buffer_{rp.reload_slot_id},",
+                        f"       _nnc_slow_pool + {rp.from_slow_offset}, {rp.size});",
+                        f"{tensor_symbol}.data = _nnc_reload_buffer_{rp.reload_slot_id};",
+                    ]
+                )
+
+            compute_lines: list[str] = []
+            for output_name in node.outputs:
+                if output_name not in outputs_need_temp:
+                    continue
+                tensor_symbol = ctx.tensor_symbols.get(output_name, output_name)
+                saved_var = get_saved_var(tensor_symbol)
+                slot_id = output_slot_ids[output_name]
+                compute_lines.extend(
+                    [
+                        f"{saved_var} = {tensor_symbol}.data;",
+                        f"{tensor_symbol}.data = _nnc_reload_buffer_{slot_id};",
+                    ]
+                )
+
+            compute_lines.append(f"{func_name}_body();")
+
+            for input_name in node.inputs:
+                if input_name not in inputs_need_reload:
+                    continue
+                tensor_symbol = ctx.tensor_symbols.get(input_name, input_name)
+                saved_var = get_saved_var(tensor_symbol)
+                compute_lines.extend(
+                    [
+                        f"if ({saved_var} != NULL) {{",
+                        f"    {tensor_symbol}.data = {saved_var};",
+                        "}",
+                    ]
+                )
+
+            dma_out_lines: list[str] = []
+            for output_name in node.outputs:
+                if output_name not in outputs_need_temp:
+                    continue
+                tensor_symbol = ctx.tensor_symbols.get(output_name, output_name)
+                saved_var = get_saved_var(tensor_symbol)
+                slot_id = output_slot_ids[output_name]
+                spill_value = outputs_need_temp[output_name]
+                if isinstance(spill_value, SpillPoint):
+                    dma_out_lines.extend(
+                        [
+                            f"memcpy(_nnc_slow_pool + {spill_value.to_slow_offset},",
+                            f"       _nnc_reload_buffer_{slot_id}, {spill_value.size});",
+                        ]
+                    )
+                dma_out_lines.extend(
+                    [
+                        f"if ({saved_var} != NULL) {{",
+                        f"    {tensor_symbol}.data = {saved_var};",
+                        "}",
+                    ]
+                )
+
+            dma_in_step = steps_by_id.get(f"{node.name}.dma_in")
+            if dma_in_step is not None and dma_in_lines:
+                dma_in_step["custom_body_lines"] = tuple(dma_in_lines)
+
+            compute_step = steps_by_id.get(f"{node.name}.compute")
+            if compute_step is not None:
+                compute_step["custom_body_lines"] = tuple(compute_lines)
+
+            dma_out_step = steps_by_id.get(f"{node.name}.dma_out")
+            if dma_out_step is not None and dma_out_lines:
+                dma_out_step["custom_body_lines"] = tuple(dma_out_lines)
+
+        runtime["custom_declarations"] = tuple(custom_declarations)
+        return cloned
+
+    def _collect_parallel_step_value_records(
+        self,
+        ctx: CompileContext,
+        value_names: tuple[str, ...],
+    ) -> tuple[dict[str, Any], ...]:
+        records: list[dict[str, Any]] = []
+        seen_keys: set[tuple[str, str]] = set()
+        for value_name in value_names:
+            graph_tensor_name = self._decode_schedule_value_graph_tensor_name(value_name)
+            if graph_tensor_name is None:
+                continue
+            tensor = ctx.graph.tensors.get(graph_tensor_name)
+            if tensor is None:
+                continue
+            symbol = ctx.tensor_symbols.get(graph_tensor_name, graph_tensor_name)
+            key = (value_name, symbol)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            records.append(
+                {
+                    "value_name": value_name,
+                    "graph_tensor_name": graph_tensor_name,
+                    "tensor_symbol": symbol,
+                    "is_staged": value_name.startswith("sram|node|"),
+                    "storage_symbol": self._parallel_value_storage_name(value_name),
+                    "size_bytes": max(int(tensor.byte_size()), 1),
+                }
+            )
+        return tuple(records)
+
+    def _append_parallel_runtime_includes(
+        self,
+        lines: list[str],
+        pipeline_codegen_metadata: dict[str, Any],
+    ) -> None:
+        """Append runtime headers needed by the parallel scheduler executor."""
+        if not self._has_parallel_runtime(pipeline_codegen_metadata):
+            return
+        lines.extend(
+            [
+                "#ifndef _GNU_SOURCE",
+                "#define _GNU_SOURCE",
+                "#endif",
+                "#include <string.h>",
+                "#include <pthread.h>",
+                "#include <stdint.h>",
+                "#include <unistd.h>",
+                "#if defined(__linux__)",
+                "#include <sched.h>",
+                "#endif",
+                "",
+            ]
+        )
+
+    def _render_parallel_runtime_block(
+        self,
+        pipeline_codegen_metadata: dict[str, Any],
+    ) -> list[str]:
+        """Render C helper code for dependency-driven 4-resource parallel execution."""
+        runtime = pipeline_codegen_metadata.get("parallel_runtime")
+        if not isinstance(runtime, dict) or runtime.get("enabled") is not True:
+            return []
+
+        steps = tuple(runtime.get("steps", ()))
+        predecessor_indices = tuple(runtime.get("predecessor_indices", ()))
+        successor_indices = tuple(runtime.get("successor_indices", ()))
+        step_count = len(steps)
+        if step_count == 0:
+            return []
+
+        dep_counts: list[int] = []
+        for deps in predecessor_indices:
+            deps_list = [int(dep) for dep in deps]
+            dep_counts.append(len(deps_list))
+
+        succ_offsets: list[int] = []
+        succ_counts: list[int] = []
+        succ_flat: list[int] = []
+        succ_offset = 0
+        for succs in successor_indices:
+            succ_list = [int(succ) for succ in succs]
+            succ_offsets.append(succ_offset)
+            succ_counts.append(len(succ_list))
+            succ_flat.extend(succ_list)
+            succ_offset += len(succ_list)
+        if not succ_flat:
+            succ_flat = [-1]
+
+        lines = [
+            "/* Pipeline parallel runtime */",
+            "#define NNC_PIPELINE_WORKER_COUNT 4",
+            f"#define NNC_PIPELINE_STEP_COUNT {step_count}",
+            f"#define NNC_PIPELINE_SUCC_INDEX_COUNT {len(succ_flat)}",
+            "",
+            "enum {",
+            "    NNC_PIPE_RES_DMA = 0,",
+            "    NNC_PIPE_RES_SHAPE = 1,",
+            "    NNC_PIPE_RES_MATMUL = 2,",
+            "    NNC_PIPE_RES_OTHER = 3,",
+            "};",
+            "",
+            "typedef void (*NncPipelineStepFn)(void);",
+            "typedef struct NncPipelineStepDesc {",
+            "    int resource_kind;",
+            "    int start_time;",
+            "    int end_time;",
+            "    NncPipelineStepFn invoke;",
+            "} NncPipelineStepDesc;",
+            "",
+            "typedef struct NncPipelineWorkerArg {",
+            "    int resource_kind;",
+            "    int worker_index;",
+            "} NncPipelineWorkerArg;",
+            "",
+            "static const NncPipelineStepDesc _nnc_pipeline_steps[NNC_PIPELINE_STEP_COUNT] = {",
+        ]
+        for step in steps:
+            step_id = self._sanitize_c_comment_text(str(step["step_id"]))
+            invoke_symbol = step["invoke_symbol"] if step["invoke_symbol"] is not None else "NULL"
+            lines.append(
+                f"    /* {step_id} */ {{{int(step['resource_index'])}, {int(step['start_time'])}, {int(step['end_time'])}, {invoke_symbol}}},"
+            )
+        lines.extend(
+            [
+                "};",
+                "",
+                "static const int _nnc_pipeline_dep_counts[NNC_PIPELINE_STEP_COUNT] = {"
+                + ", ".join(str(value) for value in dep_counts)
+                + "};",
+                "static const int _nnc_pipeline_succ_offsets[NNC_PIPELINE_STEP_COUNT] = {"
+                + ", ".join(str(value) for value in succ_offsets)
+                + "};",
+                "static const int _nnc_pipeline_succ_counts[NNC_PIPELINE_STEP_COUNT] = {"
+                + ", ".join(str(value) for value in succ_counts)
+                + "};",
+                "static const int _nnc_pipeline_succ_indices[NNC_PIPELINE_SUCC_INDEX_COUNT] = {"
+                + ", ".join(str(value) for value in succ_flat)
+                + "};",
+                "",
+                "static int _nnc_pipeline_remaining_deps[NNC_PIPELINE_STEP_COUNT];",
+                "static unsigned char _nnc_pipeline_started[NNC_PIPELINE_STEP_COUNT];",
+                "static int _nnc_pipeline_completed_count = 0;",
+                "static int _nnc_pipeline_start_flag = 0;",
+                "static pthread_mutex_t _nnc_pipeline_mutex = PTHREAD_MUTEX_INITIALIZER;",
+                "static pthread_cond_t _nnc_pipeline_cond = PTHREAD_COND_INITIALIZER;",
+                "",
+                "static void _nnc_pipeline_bind_worker_core(int worker_index) {",
+                "#if defined(__linux__)",
+                "    long cpu_count = sysconf(_SC_NPROCESSORS_ONLN);",
+                "    int cpu_index = worker_index;",
+                "    if (cpu_count > 0) {",
+                "        cpu_index = worker_index % (int)cpu_count;",
+                "    }",
+                "    cpu_set_t cpu_set;",
+                "    CPU_ZERO(&cpu_set);",
+                "    CPU_SET(cpu_index, &cpu_set);",
+                "    (void)pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpu_set);",
+                "#else",
+                "    (void)worker_index;",
+                "#endif",
+                "}",
+                "",
+                "static int _nnc_pipeline_pick_ready_step_locked(int resource_kind) {",
+                "    for (int step_index = 0; step_index < NNC_PIPELINE_STEP_COUNT; ++step_index) {",
+                "        if (_nnc_pipeline_steps[step_index].resource_kind != resource_kind) {",
+                "            continue;",
+                "        }",
+                "        if (_nnc_pipeline_started[step_index] != 0) {",
+                "            continue;",
+                "        }",
+                "        if (_nnc_pipeline_remaining_deps[step_index] != 0) {",
+                "            continue;",
+                "        }",
+                "        _nnc_pipeline_started[step_index] = 1;",
+                "        return step_index;",
+                "    }",
+                "    return -1;",
+                "}",
+                "",
+                "static void* _nnc_pipeline_worker_main(void* worker_arg_ptr) {",
+                "    NncPipelineWorkerArg* worker_arg = (NncPipelineWorkerArg*)worker_arg_ptr;",
+                "    _nnc_pipeline_bind_worker_core(worker_arg->worker_index);",
+                "",
+                "    pthread_mutex_lock(&_nnc_pipeline_mutex);",
+                "    while (_nnc_pipeline_start_flag == 0 && _nnc_pipeline_completed_count < NNC_PIPELINE_STEP_COUNT) {",
+                "        pthread_cond_wait(&_nnc_pipeline_cond, &_nnc_pipeline_mutex);",
+                "    }",
+                "    if (_nnc_pipeline_completed_count >= NNC_PIPELINE_STEP_COUNT) {",
+                "        pthread_mutex_unlock(&_nnc_pipeline_mutex);",
+                "        return NULL;",
+                "    }",
+                "    pthread_mutex_unlock(&_nnc_pipeline_mutex);",
+                "",
+                "    for (;;) {",
+                "        int step_index = -1;",
+                "",
+                "        pthread_mutex_lock(&_nnc_pipeline_mutex);",
+                "        while (step_index < 0) {",
+                "            if (_nnc_pipeline_completed_count >= NNC_PIPELINE_STEP_COUNT) {",
+                "                pthread_mutex_unlock(&_nnc_pipeline_mutex);",
+                "                return NULL;",
+                "            }",
+                "            step_index = _nnc_pipeline_pick_ready_step_locked(worker_arg->resource_kind);",
+                "            if (step_index < 0) {",
+                "                pthread_cond_wait(&_nnc_pipeline_cond, &_nnc_pipeline_mutex);",
+                "            }",
+                "        }",
+                "        pthread_mutex_unlock(&_nnc_pipeline_mutex);",
+                "",
+                "        NncPipelineStepFn invoke = _nnc_pipeline_steps[step_index].invoke;",
+                "        if (invoke != NULL) {",
+                "            invoke();",
+                "        }",
+                "",
+                "        pthread_mutex_lock(&_nnc_pipeline_mutex);",
+                "        int succ_offset = _nnc_pipeline_succ_offsets[step_index];",
+                "        int succ_count = _nnc_pipeline_succ_counts[step_index];",
+                "        for (int succ_i = 0; succ_i < succ_count; ++succ_i) {",
+                "            int succ_index = _nnc_pipeline_succ_indices[succ_offset + succ_i];",
+                "            if (_nnc_pipeline_remaining_deps[succ_index] > 0) {",
+                "                _nnc_pipeline_remaining_deps[succ_index] -= 1;",
+                "            }",
+                "        }",
+                "        _nnc_pipeline_completed_count += 1;",
+                "        pthread_cond_broadcast(&_nnc_pipeline_cond);",
+                "        pthread_mutex_unlock(&_nnc_pipeline_mutex);",
+                "    }",
+                "}",
+                "",
+                "static void nnc_pipeline_run_parallel(void) {",
+                "    pthread_t workers[NNC_PIPELINE_WORKER_COUNT];",
+                "    NncPipelineWorkerArg worker_args[NNC_PIPELINE_WORKER_COUNT] = {",
+                "        {NNC_PIPE_RES_DMA, 0},",
+                "        {NNC_PIPE_RES_SHAPE, 1},",
+                "        {NNC_PIPE_RES_MATMUL, 2},",
+                "        {NNC_PIPE_RES_OTHER, 3},",
+                "    };",
+                "",
+                "    pthread_mutex_lock(&_nnc_pipeline_mutex);",
+                "    _nnc_pipeline_completed_count = 0;",
+                "    _nnc_pipeline_start_flag = 0;",
+                "    for (int step_index = 0; step_index < NNC_PIPELINE_STEP_COUNT; ++step_index) {",
+                "        _nnc_pipeline_remaining_deps[step_index] = _nnc_pipeline_dep_counts[step_index];",
+                "        _nnc_pipeline_started[step_index] = 0;",
+                "    }",
+                "    pthread_mutex_unlock(&_nnc_pipeline_mutex);",
+                "",
+                "    int launched_count = 0;",
+                "    for (int worker_index = 0; worker_index < NNC_PIPELINE_WORKER_COUNT; ++worker_index) {",
+                "        if (pthread_create(",
+                "                &workers[worker_index],",
+                "                NULL,",
+                "                _nnc_pipeline_worker_main,",
+                "                &worker_args[worker_index]",
+                "            ) != 0) {",
+                "            break;",
+                "        }",
+                "        launched_count += 1;",
+                "    }",
+                "",
+                "    if (launched_count != NNC_PIPELINE_WORKER_COUNT) {",
+                "        pthread_mutex_lock(&_nnc_pipeline_mutex);",
+                "        _nnc_pipeline_completed_count = NNC_PIPELINE_STEP_COUNT;",
+                "        pthread_cond_broadcast(&_nnc_pipeline_cond);",
+                "        pthread_mutex_unlock(&_nnc_pipeline_mutex);",
+                "        for (int worker_index = 0; worker_index < launched_count; ++worker_index) {",
+                "            pthread_join(workers[worker_index], NULL);",
+                "        }",
+                "        for (int step_index = 0; step_index < NNC_PIPELINE_STEP_COUNT; ++step_index) {",
+                "            NncPipelineStepFn invoke = _nnc_pipeline_steps[step_index].invoke;",
+                "            if (invoke != NULL) {",
+                "                invoke();",
+                "            }",
+                "        }",
+                "        return;",
+                "    }",
+                "",
+                "    pthread_mutex_lock(&_nnc_pipeline_mutex);",
+                "    _nnc_pipeline_start_flag = 1;",
+                "    pthread_cond_broadcast(&_nnc_pipeline_cond);",
+                "    pthread_mutex_unlock(&_nnc_pipeline_mutex);",
+                "",
+                "    for (int worker_index = 0; worker_index < NNC_PIPELINE_WORKER_COUNT; ++worker_index) {",
+                "        pthread_join(workers[worker_index], NULL);",
+                "    }",
+                "}",
+            ]
+        )
+        return lines
+
+    def _render_parallel_step_helper_block(
+        self,
+        pipeline_codegen_metadata: dict[str, Any],
+    ) -> list[str]:
+        """Render per-step helper functions so each worker runs concrete C code."""
+        runtime = pipeline_codegen_metadata.get("parallel_runtime")
+        if not isinstance(runtime, dict) or runtime.get("enabled") is not True:
+            return []
+
+        steps = tuple(runtime.get("steps", ()))
+        if not steps:
+            return []
+
+        staged_value_records: dict[str, dict[str, Any]] = {}
+        for step in steps:
+            for record in tuple(step.get("input_value_records", ())):
+                if bool(record.get("is_staged")):
+                    staged_value_records.setdefault(str(record["value_name"]), dict(record))
+            for record in tuple(step.get("output_value_records", ())):
+                if bool(record.get("is_staged")):
+                    staged_value_records.setdefault(str(record["value_name"]), dict(record))
+
+        lines = [
+            "/* Pipeline step helper functions */",
+            "static volatile uint64_t _nnc_pipeline_touch_sink = 0;",
+            "",
+            "static void _nnc_pipeline_touch_tensor_read(const Tensor* tensor) {",
+            "    if (tensor == NULL || tensor->data == NULL || tensor->nbytes <= 0) {",
+            "        return;",
+            "    }",
+            "    const unsigned char* bytes = (const unsigned char*)tensor->data;",
+            "    uint64_t accum = 0;",
+            "    for (int64_t index = 0; index < tensor->nbytes; ++index) {",
+            "        accum += (uint64_t)bytes[index];",
+            "    }",
+            "    _nnc_pipeline_touch_sink ^= accum;",
+            "}",
+            "",
+            "static void _nnc_pipeline_touch_tensor_write(Tensor* tensor) {",
+            "    if (tensor == NULL || tensor->data == NULL || tensor->nbytes <= 0) {",
+            "        return;",
+            "    }",
+            "    volatile unsigned char* bytes = (volatile unsigned char*)tensor->data;",
+            "    for (int64_t index = 0; index < tensor->nbytes; ++index) {",
+            "        bytes[index] = bytes[index];",
+            "    }",
+            "}",
+            "",
+            "static void _nnc_pipeline_shape_touch_tensor(const Tensor* tensor) {",
+            "    if (tensor == NULL || tensor->shape == NULL || tensor->ndim <= 0) {",
+            "        return;",
+            "    }",
+            "    int64_t shape_accum = 0;",
+            "    for (int32_t dim = 0; dim < tensor->ndim; ++dim) {",
+            "        shape_accum += tensor->shape[dim] * (dim + 1);",
+            "    }",
+            "    _nnc_pipeline_touch_sink ^= (uint64_t)shape_accum;",
+            "}",
+            "",
+        ]
+
+        for value_name in sorted(staged_value_records):
+            record = staged_value_records[value_name]
+            storage_symbol = str(record["storage_symbol"])
+            size_bytes = int(record["size_bytes"])
+            lines.append(f"static unsigned char {storage_symbol}_buffer[{size_bytes}];")
+            lines.append(f"static void* {storage_symbol}_saved_data = NULL;")
+        if staged_value_records:
+            lines.append("")
+
+        for declaration in tuple(runtime.get("custom_declarations", ())):
+            lines.append(str(declaration))
+        if runtime.get("custom_declarations"):
+            lines.append("")
+
+        for step in steps:
+            invoke_symbol = step.get("invoke_symbol")
+            if not isinstance(invoke_symbol, str) or not invoke_symbol:
+                continue
+            input_tensor_symbols = tuple(step.get("input_tensor_symbols", ()))
+            output_tensor_symbols = tuple(step.get("output_tensor_symbols", ()))
+            input_value_records = tuple(step.get("input_value_records", ()))
+            output_value_records = tuple(step.get("output_value_records", ()))
+            step_kind = str(step.get("step_kind", ""))
+            invoke_node = bool(step.get("invoke_node"))
+            node_symbol = str(step.get("node_symbol", ""))
+
+            lines.append(f"static void {invoke_symbol}(void) {{")
+            custom_body_lines = step.get("custom_body_lines")
+            if custom_body_lines is not None:
+                for body_line in tuple(custom_body_lines):
+                    if body_line:
+                        lines.append(f"    {body_line}")
+                    else:
+                        lines.append("")
+            elif step_kind == "dma_in":
+                staged_outputs = [record for record in output_value_records if bool(record.get("is_staged"))]
+                direct_inputs_by_tensor = {
+                    str(record["graph_tensor_name"]): record
+                    for record in input_value_records
+                    if not bool(record.get("is_staged"))
+                }
+                if staged_outputs:
+                    for record in staged_outputs:
+                        tensor_symbol = str(record["tensor_symbol"])
+                        storage_symbol = str(record["storage_symbol"])
+                        size_bytes = int(record["size_bytes"])
+                        source_record = direct_inputs_by_tensor.get(str(record["graph_tensor_name"]))
+                        if source_record is not None:
+                            lines.append(
+                                f"    {storage_symbol}_saved_data = {tensor_symbol}.data;"
+                            )
+                            lines.append(
+                                f"    memcpy({storage_symbol}_buffer, {tensor_symbol}.data, {size_bytes});"
+                            )
+                            lines.append(
+                                f"    {tensor_symbol}.data = {storage_symbol}_buffer;"
+                            )
+                        else:
+                            lines.append(
+                                f"    _nnc_pipeline_touch_tensor_read(&{tensor_symbol});"
+                            )
+                elif input_tensor_symbols:
+                    for symbol in input_tensor_symbols:
+                        lines.append(f"    _nnc_pipeline_touch_tensor_read(&{symbol});")
+                else:
+                    lines.append("    _nnc_pipeline_touch_sink ^= 1u;")
+            elif step_kind == "dma_out":
+                staged_inputs = [record for record in input_value_records if bool(record.get("is_staged"))]
+                if staged_inputs:
+                    for record in staged_inputs:
+                        tensor_symbol = str(record["tensor_symbol"])
+                        storage_symbol = str(record["storage_symbol"])
+                        size_bytes = int(record["size_bytes"])
+                        lines.append(f"    if ({storage_symbol}_saved_data != NULL) {{")
+                        lines.append(
+                            f"        memcpy({storage_symbol}_saved_data, {storage_symbol}_buffer, {size_bytes});"
+                        )
+                        lines.append(
+                            f"        {tensor_symbol}.data = {storage_symbol}_saved_data;"
+                        )
+                        lines.append("    }")
+                else:
+                    dma_out_symbols = output_tensor_symbols or input_tensor_symbols
+                    if dma_out_symbols:
+                        for symbol in dma_out_symbols:
+                            lines.append(f"    _nnc_pipeline_touch_tensor_write(&{symbol});")
+                    else:
+                        lines.append("    _nnc_pipeline_touch_sink ^= 1u;")
+            elif step_kind == "shape_prep":
+                touched = False
+                for symbol in (*input_tensor_symbols, *output_tensor_symbols):
+                    lines.append(f"    _nnc_pipeline_shape_touch_tensor(&{symbol});")
+                    touched = True
+                if not touched:
+                    lines.append("    _nnc_pipeline_touch_sink ^= 1u;")
+                if invoke_node and node_symbol:
+                    lines.append(f"    {node_symbol}();")
+            elif step_kind == "compute":
+                staged_inputs = [record for record in input_value_records if bool(record.get("is_staged"))]
+                staged_outputs = [record for record in output_value_records if bool(record.get("is_staged"))]
+                for record in staged_inputs:
+                    tensor_symbol = str(record["tensor_symbol"])
+                    storage_symbol = str(record["storage_symbol"])
+                    lines.append(f"    {tensor_symbol}.data = {storage_symbol}_buffer;")
+                for record in staged_outputs:
+                    tensor_symbol = str(record["tensor_symbol"])
+                    storage_symbol = str(record["storage_symbol"])
+                    lines.append(f"    {storage_symbol}_saved_data = {tensor_symbol}.data;")
+                    lines.append(f"    {tensor_symbol}.data = {storage_symbol}_buffer;")
+                if node_symbol:
+                    lines.append(f"    {node_symbol}();")
+                else:
+                    lines.append("    _nnc_pipeline_touch_sink ^= 1u;")
+                for record in staged_inputs:
+                    tensor_symbol = str(record["tensor_symbol"])
+                    storage_symbol = str(record["storage_symbol"])
+                    lines.append(f"    if ({storage_symbol}_saved_data != NULL) {{")
+                    lines.append(
+                        f"        {tensor_symbol}.data = {storage_symbol}_saved_data;"
+                    )
+                    lines.append("    }")
+            else:
+                if node_symbol:
+                    lines.append(f"    {node_symbol}();")
+                else:
+                    lines.append("    _nnc_pipeline_touch_sink ^= 1u;")
+            lines.append("}")
+            lines.append("")
+
+        return lines
+
+    def _inject_parallel_runtime_into_emitted_source(
+        self,
+        source: str,
+        pipeline_codegen_metadata: dict[str, Any],
+    ) -> str:
+        """Inject parallel runtime helper and switch nnc_run to dependency-driven execution."""
+        if not self._has_parallel_runtime(pipeline_codegen_metadata):
+            return source
+
+        include_block = "\n".join(
+            [
+                "#ifndef _GNU_SOURCE",
+                "#define _GNU_SOURCE",
+                "#endif",
+                "#include <string.h>",
+                "#include <pthread.h>",
+                "#include <stdint.h>",
+                "#include <unistd.h>",
+                "#if defined(__linux__)",
+                "#include <sched.h>",
+                "#endif",
+                "",
+            ]
+        )
+        if "#include <pthread.h>" not in source:
+            include_anchor = '#include "model.h"\n'
+            if include_anchor in source:
+                source = source.replace(include_anchor, include_block + include_anchor, 1)
+
+        helper_block = "\n".join(self._render_parallel_step_helper_block(pipeline_codegen_metadata)).strip()
+        parallel_block = "\n".join(self._render_parallel_runtime_block(pipeline_codegen_metadata)).strip()
+        injected_blocks = "\n\n".join(block for block in (helper_block, parallel_block) if block)
+        if injected_blocks:
+            main_anchor = "/* Main inference entry point */"
+            if main_anchor in source:
+                source = source.replace(main_anchor, injected_blocks + "\n\n" + main_anchor, 1)
+            else:
+                source = source.rstrip() + "\n\n" + injected_blocks + "\n"
+
+        lines = source.split("\n")
+        run_start = None
+        run_end = None
+        for index, line in enumerate(lines):
+            if line.strip().startswith("void nnc_run(void) {"):
+                run_start = index
+                break
+        if run_start is None:
+            return source
+
+        brace_depth = 0
+        for index in range(run_start, len(lines)):
+            brace_depth += lines[index].count("{")
+            brace_depth -= lines[index].count("}")
+            if index > run_start and brace_depth == 0:
+                run_end = index
+                break
+        if run_end is None:
+            return source
+
+        new_function_lines = [
+            lines[run_start],
+            "    nnc_pipeline_run_parallel();",
+            "}",
+        ]
+        rewritten_lines = lines[:run_start] + new_function_lines + lines[run_end + 1 :]
+        return "\n".join(rewritten_lines)
 
     def _build_memory_plan_summary_line(
         self,
@@ -316,6 +1418,7 @@ class X86Backend(BackendBase):
         spill_plan = get_spill_plan(ctx)
 
         # Determine which plan to use
+        used_standard_emitter = False
         if alloc_plan is not None and (alloc_plan.has_spill or bool(alloc_plan.move_points)):
             # Use new MemoryAllocationPlan with reload code generation
             source = self._generate_source_with_unified_spill(
@@ -337,6 +1440,13 @@ class X86Backend(BackendBase):
                 pipeline_schedule_metadata=pipeline_codegen_metadata,
             )
             source = emitter.emit(ctx)
+            used_standard_emitter = True
+
+        if used_standard_emitter:
+            source = self._inject_parallel_runtime_into_emitted_source(
+                source,
+                pipeline_codegen_metadata,
+            )
 
         # Add debug macros if in debug mode
         source = self._add_debug_macros(source)
@@ -736,6 +1846,12 @@ extern FILE* debug_file;
         """Generate source file with spill/reload wrapper functions."""
         from nnc_py.codegen.c_emitter import CEmitter
 
+        pipeline_codegen_metadata = self._augment_parallel_runtime_for_legacy_spill(
+            ctx,
+            spill_plan,
+            pipeline_codegen_metadata,
+        )
+
         lines = [
             "/* Auto-generated by NNC - DO NOT EDIT */",
             "",
@@ -751,6 +1867,7 @@ extern FILE* debug_file;
             "",
             "/* Forward declarations for spill/reload functions */",
         ]
+        self._append_parallel_runtime_includes(lines, pipeline_codegen_metadata)
         self._append_pipeline_schedule_summary_block(lines, pipeline_codegen_metadata)
 
         # Generate forward declarations for node functions
@@ -838,23 +1955,34 @@ extern FILE* debug_file;
         # We need to modify the body_code to rename functions to _body
         # and remove the main entry point
         lines.append(self._process_body_code(body_code, ctx))
+        helper_block = self._render_parallel_step_helper_block(pipeline_codegen_metadata)
+        runtime_block = self._render_parallel_runtime_block(pipeline_codegen_metadata)
+        if helper_block:
+            lines.append("")
+            lines.extend(helper_block)
+        if runtime_block:
+            lines.append("")
+            lines.extend(runtime_block)
 
         # Generate main entry point
         lines.append("")
         lines.append("/* Main inference entry point */")
         lines.append("void nnc_run(void) {")
 
-        for node in nodes:
-            if node.op_type == OpType.CONSTANT:
-                continue
-            func_name = ctx.node_symbols.get(node.name, node.name)
-            self._append_pipeline_step_comment_lines(
-                lines,
-                pipeline_codegen_metadata,
-                node.name,
-                indent="    ",
-            )
-            lines.append(f"    {func_name}();")
+        if self._has_parallel_runtime(pipeline_codegen_metadata):
+            lines.append("    nnc_pipeline_run_parallel();")
+        else:
+            for node in nodes:
+                if node.op_type == OpType.CONSTANT:
+                    continue
+                func_name = ctx.node_symbols.get(node.name, node.name)
+                self._append_pipeline_step_comment_lines(
+                    lines,
+                    pipeline_codegen_metadata,
+                    node.name,
+                    indent="    ",
+                )
+                lines.append(f"    {func_name}();")
 
         lines.append("}")
 
@@ -906,6 +2034,12 @@ extern FILE* debug_file;
         """
         from nnc_py.codegen.c_emitter import CEmitter
 
+        pipeline_codegen_metadata = self._augment_parallel_runtime_for_unified_spill(
+            ctx,
+            plan,
+            pipeline_codegen_metadata,
+        )
+
         lines = [
             "/* Auto-generated by NNC - DO NOT EDIT */",
             "",
@@ -920,6 +2054,7 @@ extern FILE* debug_file;
             "extern uint8_t _nnc_slow_pool[];",
             "",
         ]
+        self._append_parallel_runtime_includes(lines, pipeline_codegen_metadata)
         self._append_pipeline_schedule_summary_block(lines, pipeline_codegen_metadata)
 
         def get_output_spill_points(node_idx: int) -> dict[str, SpillPoint]:
@@ -1014,6 +2149,7 @@ extern FILE* debug_file;
 
         # Generate forward declarations for node functions (only for those without spill/reload)
         nodes = ctx.graph.topological_sort()
+        parallel_runtime_enabled = self._has_parallel_runtime(pipeline_codegen_metadata)
         for node_idx, node in enumerate(nodes):
             if node.op_type == OpType.CONSTANT:
                 continue
@@ -1320,7 +2456,14 @@ extern FILE* debug_file;
                 for o in node.outputs
             )
 
-            if not has_spill and not has_move and not has_reload and not has_spilled_output:
+            if parallel_runtime_enabled:
+                lines.append(f"/* {func_name}: {node.op_type.value} */")
+                lines.append(f"static void {func_name}_body(void) {{")
+                op_call = self._generate_operator_call(ctx, node, use_temps=False)
+                lines.append(f"    {op_call}")
+                lines.append("}")
+                lines.append("")
+            elif not has_spill and not has_move and not has_reload and not has_spilled_output:
                 # No spill/reload needed, generate standard operator call
                 lines.append(f"/* {func_name}: {node.op_type.value} */")
                 lines.append(f"static void {func_name}_body(void) {{")
@@ -1333,6 +2476,15 @@ extern FILE* debug_file;
                 # The wrapper handles everything
                 pass
 
+        helper_block = self._render_parallel_step_helper_block(pipeline_codegen_metadata)
+        runtime_block = self._render_parallel_runtime_block(pipeline_codegen_metadata)
+        if helper_block:
+            lines.append("")
+            lines.extend(helper_block)
+        if runtime_block:
+            lines.append("")
+            lines.extend(runtime_block)
+
         # Generate main entry point
         lines.append("")
         lines.append("/* Main inference entry point */")
@@ -1344,17 +2496,20 @@ extern FILE* debug_file;
             var_name = ctx.tensor_symbols.get(tensor_name, tensor_name)
             lines.append(f"    {get_saved_input_binding_name(tensor_name)} = {var_name}.data;")
 
-        for node in nodes:
-            if node.op_type == OpType.CONSTANT:
-                continue
-            func_name = ctx.node_symbols.get(node.name, node.name)
-            self._append_pipeline_step_comment_lines(
-                lines,
-                pipeline_codegen_metadata,
-                node.name,
-                indent="    ",
-            )
-            lines.append(f"    {func_name}();")
+        if self._has_parallel_runtime(pipeline_codegen_metadata):
+            lines.append("    nnc_pipeline_run_parallel();")
+        else:
+            for node in nodes:
+                if node.op_type == OpType.CONSTANT:
+                    continue
+                func_name = ctx.node_symbols.get(node.name, node.name)
+                self._append_pipeline_step_comment_lines(
+                    lines,
+                    pipeline_codegen_metadata,
+                    node.name,
+                    indent="    ",
+                )
+                lines.append(f"    {func_name}();")
 
         for tensor_name in ctx.graph.inputs:
             if tensor_name not in plan.tensor_allocations:
@@ -2453,8 +3608,8 @@ extern FILE* debug_file;
             makefile_body = f"""# Auto-generated by NNC - DO NOT EDIT
 # Set NNC_RUNTIME_PATH to point to the runtime directory if not in dev tree
 CC = gcc
-CFLAGS = -std=c11 -O2 -Wall -Wextra
-LDFLAGS = -lm
+CFLAGS = -D_GNU_SOURCE -std=c11 -O2 -Wall -Wextra -pthread
+LDFLAGS = -lm -pthread
 
 # Runtime include path - can be overridden by environment
 NNC_RUNTIME ?= ../../runtime
@@ -2483,8 +3638,8 @@ run: model
             makefile_body = f"""# Auto-generated by NNC - DO NOT EDIT
 # Set NNC_RUNTIME_PATH to point to the runtime directory if not in dev tree
 CC = gcc
-CFLAGS = -std=c11 -O2 -Wall -Wextra
-LDFLAGS = -lm
+CFLAGS = -D_GNU_SOURCE -std=c11 -O2 -Wall -Wextra -pthread
+LDFLAGS = -lm -pthread
 
 # Runtime include path - can be overridden by environment
 NNC_RUNTIME ?= ../../runtime
