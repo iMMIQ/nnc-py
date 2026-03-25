@@ -7,6 +7,10 @@ from nnc_py.ir.graph import Graph
 
 if TYPE_CHECKING:
     from nnc_py.ir.execution_plan import NodeExecutionPlan
+    from nnc_py.ir.pipeline_schedule import (
+        PipelineScheduleProblem,
+        PipelineScheduleResult,
+    )
 
 
 @dataclass
@@ -48,3 +52,33 @@ class CompileContext:
         from nnc_py.ir.execution_plan import get_node_execution_plan
 
         return get_node_execution_plan(self, node_name)
+
+    @property
+    def pipeline_schedule_problem(self) -> "PipelineScheduleProblem | None":
+        """Read-only typed access to the pipeline schedule problem in metadata."""
+
+        from nnc_py.ir.pipeline_schedule import get_pipeline_schedule_problem
+
+        return get_pipeline_schedule_problem(self)
+
+    def get_pipeline_schedule_problem(self) -> "PipelineScheduleProblem | None":
+        """Return the pipeline schedule problem without mutating metadata."""
+
+        from nnc_py.ir.pipeline_schedule import get_pipeline_schedule_problem
+
+        return get_pipeline_schedule_problem(self)
+
+    @property
+    def pipeline_schedule_result(self) -> "PipelineScheduleResult | None":
+        """Read-only typed access to the pipeline schedule result in metadata."""
+
+        from nnc_py.ir.pipeline_schedule import get_pipeline_schedule_result
+
+        return get_pipeline_schedule_result(self)
+
+    def get_pipeline_schedule_result(self) -> "PipelineScheduleResult | None":
+        """Return the pipeline schedule result without mutating metadata."""
+
+        from nnc_py.ir.pipeline_schedule import get_pipeline_schedule_result
+
+        return get_pipeline_schedule_result(self)
