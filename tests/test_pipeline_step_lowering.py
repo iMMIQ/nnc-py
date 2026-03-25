@@ -460,10 +460,13 @@ def test_pipeline_step_lowering_keeps_staged_outputs_as_sram_values():
 
     problem = ctx.pipeline_schedule_problem
     staged = next(
-        value for value in problem.scheduled_values if value.name.startswith("sram|node|")
+        value
+        for value in problem.scheduled_values
+        if value.name == _staged_value_name("conv0", "conv_out")
     )
 
     assert staged.home_tier is ScheduledValueHomeTier.SRAM
+    assert staged.graph_tensor_name == "conv_out"
 
 
 def test_shared_graph_weight_stages_to_distinct_node_local_sram_values():
