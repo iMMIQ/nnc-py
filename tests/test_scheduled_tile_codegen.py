@@ -199,10 +199,90 @@ def _make_scheduled_conv_downsample_add_relu_model() -> onnx.ModelProto:
     return helper.make_model(graph, opset_imports=[helper.make_operatorsetid("", 13)])
 
 
-def _build_scheduled_codegen_context(*, max_memory: int) -> CompileContext:
+def _make_scheduled_global_avgpool_model() -> onnx.ModelProto:
+    input_info = helper.make_tensor_value_info("input", TensorProto.FLOAT, [1, 16, 14, 14])
+    output_info = helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 16, 1, 1])
+
+    avgpool = helper.make_node(
+        "GlobalAveragePool",
+        inputs=["input"],
+        outputs=["output"],
+        name="avgpool0",
+    )
+
+    graph = helper.make_graph(
+        [avgpool],
+        "scheduled_global_avgpool_tile_codegen",
+        [input_info],
+        [output_info],
+        [],
+    )
+    return helper.make_model(graph, opset_imports=[helper.make_operatorsetid("", 13)])
+
+
+def _make_scheduled_padded_maxpool_model() -> onnx.ModelProto:
+    input_info = helper.make_tensor_value_info("input", TensorProto.FLOAT, [1, 8, 15, 15])
+    output_info = helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 8, 8, 8])
+
+    maxpool = helper.make_node(
+        "MaxPool",
+        inputs=["input"],
+        outputs=["output"],
+        name="pool0",
+        kernel_shape=[3, 3],
+        strides=[2, 2],
+        pads=[1, 1, 1, 1],
+    )
+
+    graph = helper.make_graph(
+        [maxpool],
+        "scheduled_padded_maxpool_tile_codegen",
+        [input_info],
+        [output_info],
+        [],
+    )
+    return helper.make_model(graph, opset_imports=[helper.make_operatorsetid("", 13)])
+
+
+def _make_scheduled_gemm_model() -> onnx.ModelProto:
+    input_info = helper.make_tensor_value_info("input", TensorProto.FLOAT, [1, 128])
+    output_info = helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 64])
+
+    weight = helper.make_tensor(
+        "fc_weight",
+        TensorProto.FLOAT,
+        [64, 128],
+        (np.arange(64 * 128, dtype=np.float32) / 4096.0).reshape(-1).tolist(),
+    )
+    bias = helper.make_tensor(
+        "fc_bias",
+        TensorProto.FLOAT,
+        [64],
+        (np.arange(64, dtype=np.float32) / 1024.0).reshape(-1).tolist(),
+    )
+
+    gemm = helper.make_node(
+        "Gemm",
+        inputs=["input", "fc_weight", "fc_bias"],
+        outputs=["output"],
+        name="fc0",
+        transB=1,
+    )
+
+    graph = helper.make_graph(
+        [gemm],
+        "scheduled_gemm_tile_codegen",
+        [input_info],
+        [output_info],
+        [weight, bias],
+    )
+    return helper.make_model(graph, opset_imports=[helper.make_operatorsetid("", 13)])
+
+
+def _build_scheduled_model_codegen_context(model: onnx.ModelProto, *, max_memory: int) -> CompileContext:
     with tempfile.TemporaryDirectory() as tmpdir:
         model_path = Path(tmpdir) / "model.onnx"
-        onnx.save(_make_scheduled_conv_maxpool_model(), model_path)
+        onnx.save(model, model_path)
 
         graph = ONNXFrontend().load(str(model_path))
         ctx = CompileContext(graph=graph, target="x86", optimization_level=3)
@@ -214,57 +294,55 @@ def _build_scheduled_codegen_context(*, max_memory: int) -> CompileContext:
             pass_manager.register(pass_obj)
         pass_manager.run(ctx)
         return ctx
+
+
+def _build_scheduled_codegen_context(*, max_memory: int) -> CompileContext:
+    return _build_scheduled_model_codegen_context(
+        _make_scheduled_conv_maxpool_model(),
+        max_memory=max_memory,
+    )
 
 
 def _build_scheduled_conv_relu_codegen_context(*, max_memory: int) -> CompileContext:
-    with tempfile.TemporaryDirectory() as tmpdir:
-        model_path = Path(tmpdir) / "model.onnx"
-        onnx.save(_make_scheduled_conv_relu_model(), model_path)
-
-        graph = ONNXFrontend().load(str(model_path))
-        ctx = CompileContext(graph=graph, target="x86", optimization_level=3)
-        ctx.metadata["pipeline_scheduler_enabled"] = True
-        ctx.metadata["max_memory"] = max_memory
-
-        pass_manager = PassManager()
-        for pass_obj in PassManager.get_scheduled_o3_passes():
-            pass_manager.register(pass_obj)
-        pass_manager.run(ctx)
-        return ctx
+    return _build_scheduled_model_codegen_context(
+        _make_scheduled_conv_relu_model(),
+        max_memory=max_memory,
+    )
 
 
 def _build_scheduled_conv_add_relu_codegen_context(*, max_memory: int) -> CompileContext:
-    with tempfile.TemporaryDirectory() as tmpdir:
-        model_path = Path(tmpdir) / "model.onnx"
-        onnx.save(_make_scheduled_conv_add_relu_model(), model_path)
-
-        graph = ONNXFrontend().load(str(model_path))
-        ctx = CompileContext(graph=graph, target="x86", optimization_level=3)
-        ctx.metadata["pipeline_scheduler_enabled"] = True
-        ctx.metadata["max_memory"] = max_memory
-
-        pass_manager = PassManager()
-        for pass_obj in PassManager.get_scheduled_o3_passes():
-            pass_manager.register(pass_obj)
-        pass_manager.run(ctx)
-        return ctx
+    return _build_scheduled_model_codegen_context(
+        _make_scheduled_conv_add_relu_model(),
+        max_memory=max_memory,
+    )
 
 
 def _build_scheduled_conv_downsample_add_relu_codegen_context(*, max_memory: int) -> CompileContext:
-    with tempfile.TemporaryDirectory() as tmpdir:
-        model_path = Path(tmpdir) / "model.onnx"
-        onnx.save(_make_scheduled_conv_downsample_add_relu_model(), model_path)
+    return _build_scheduled_model_codegen_context(
+        _make_scheduled_conv_downsample_add_relu_model(),
+        max_memory=max_memory,
+    )
 
-        graph = ONNXFrontend().load(str(model_path))
-        ctx = CompileContext(graph=graph, target="x86", optimization_level=3)
-        ctx.metadata["pipeline_scheduler_enabled"] = True
-        ctx.metadata["max_memory"] = max_memory
 
-        pass_manager = PassManager()
-        for pass_obj in PassManager.get_scheduled_o3_passes():
-            pass_manager.register(pass_obj)
-        pass_manager.run(ctx)
-        return ctx
+def _build_scheduled_global_avgpool_codegen_context(*, max_memory: int) -> CompileContext:
+    return _build_scheduled_model_codegen_context(
+        _make_scheduled_global_avgpool_model(),
+        max_memory=max_memory,
+    )
+
+
+def _build_scheduled_padded_maxpool_codegen_context(*, max_memory: int) -> CompileContext:
+    return _build_scheduled_model_codegen_context(
+        _make_scheduled_padded_maxpool_model(),
+        max_memory=max_memory,
+    )
+
+
+def _build_scheduled_gemm_codegen_context(*, max_memory: int) -> CompileContext:
+    return _build_scheduled_model_codegen_context(
+        _make_scheduled_gemm_model(),
+        max_memory=max_memory,
+    )
 
 
 def _buffer_sizes_by_symbol(model_c: str) -> dict[str, int]:
@@ -273,6 +351,15 @@ def _buffer_sizes_by_symbol(model_c: str) -> dict[str, int]:
         model_c,
     )
     return {symbol: int(size) for symbol, size in matches}
+
+
+def _declared_symbol_names(model_c: str, pattern: str) -> list[str]:
+    return re.findall(pattern, model_c)
+
+
+def _assert_declared_symbols_are_referenced(model_c: str, symbols: list[str]) -> None:
+    unused = [symbol for symbol in symbols if model_c.count(symbol) <= 1]
+    assert unused == []
 
 
 def test_scheduled_parallel_codegen_keeps_tiled_buffers_within_scheduled_value_sizes():
@@ -347,6 +434,70 @@ def test_scheduled_parallel_codegen_streams_downsample_residual_add_group():
     assert "_nnc_pipeline_stage_nchw_tile(&tensor_skip_out" in model_c
 
 
+def test_scheduled_parallel_codegen_omits_unused_tile_stream_storage_declarations():
+    ctx = _build_scheduled_conv_add_relu_codegen_context(max_memory=1024 * 1024)
+    artifacts = X86Backend().generate(ctx)
+
+    model_c = _artifact_text(artifacts, "model.c")
+
+    sram_buffers = _declared_symbol_names(
+        model_c,
+        r"static unsigned char ([A-Za-z0-9_]+_buffer)\[\d+\];",
+    )
+    saved_data = _declared_symbol_names(
+        model_c,
+        r"static void\* ([A-Za-z0-9_]+_saved_data) = NULL;",
+    )
+
+    _assert_declared_symbols_are_referenced(model_c, sram_buffers)
+    _assert_declared_symbols_are_referenced(model_c, saved_data)
+
+
+def test_scheduled_parallel_codegen_streams_maxpool_without_home_fallback():
+    ctx = _build_scheduled_codegen_context(max_memory=1024 * 1024)
+    artifacts = X86Backend().generate(ctx)
+
+    model_c = _artifact_text(artifacts, "model.c")
+
+    assert "scheduled home execution" not in model_c
+    assert "nnc_pipeline_tile_stream_pool0" in model_c
+    assert "node_pool0();" not in model_c
+
+
+def test_scheduled_parallel_codegen_streams_padded_maxpool_without_home_fallback():
+    ctx = _build_scheduled_padded_maxpool_codegen_context(max_memory=1024 * 1024)
+    artifacts = X86Backend().generate(ctx)
+
+    model_c = _artifact_text(artifacts, "model.c")
+
+    assert "scheduled home execution" not in model_c
+    assert "nnc_pipeline_tile_stream_pool0" in model_c
+    assert "node_pool0();" not in model_c
+
+
+def test_scheduled_parallel_codegen_streams_global_avgpool_without_home_fallback():
+    ctx = _build_scheduled_global_avgpool_codegen_context(max_memory=1024 * 1024)
+    artifacts = X86Backend().generate(ctx)
+
+    model_c = _artifact_text(artifacts, "model.c")
+
+    assert "scheduled home execution" not in model_c
+    assert "nnc_pipeline_tile_stream_avgpool0" in model_c
+    assert "node_avgpool0();" not in model_c
+
+
+def test_scheduled_parallel_codegen_uses_default_parallel_steps_for_gemm():
+    ctx = _build_scheduled_gemm_codegen_context(max_memory=1024 * 1024)
+    artifacts = X86Backend().generate(ctx)
+
+    model_c = _artifact_text(artifacts, "model.c")
+
+    assert "scheduled home execution" not in model_c
+    assert "nnc_pipeline_step_fc0_dma_in" in model_c
+    assert "nnc_pipeline_step_fc0_compute" in model_c
+    assert "node_fc0();" in model_c
+
+
 def _compile_generated_sources_with_runner(tmpdir: Path, runner_name: str) -> Path:
     runtime_dir = Path(__file__).resolve().parents[1] / "runtime"
     runtime_include = runtime_dir / "include"
@@ -401,12 +552,19 @@ def _write_minimal_runner(
     runner_name: str,
     input_tensor_symbols: dict[str, str],
     output_tensor_symbol: str,
+    load_constants: bool,
 ) -> None:
     extern_inputs = "\n".join(f"extern Tensor {symbol};" for symbol in input_tensor_symbols.values())
     load_calls = "\n".join(
         f'    if (load_tensor("{input_name}.bin", &{tensor_symbol}) != 0) {{ return 3; }}'
         for input_name, tensor_symbol in input_tensor_symbols.items()
     )
+    constants_block = ""
+    if load_constants:
+        constants_block = """    if (nnc_load_constants("constants.bin") != 0) {
+        return 2;
+    }
+"""
     runner_source = f"""#include <stdio.h>
 #include <stdint.h>
 #include "model.h"
@@ -425,9 +583,7 @@ static int load_tensor(const char *path, Tensor *tensor) {{
 }}
 
 int main(void) {{
-    if (nnc_load_constants("constants.bin") != 0) {{
-        return 2;
-    }}
+{constants_block}\
 {load_calls}
     nnc_run();
     FILE *out = fopen("out.bin", "wb");
@@ -464,6 +620,7 @@ def _run_scheduled_runtime_case(
             runner_name="min_runner",
             input_tensor_symbols={name: f"tensor_{name}" for name in input_arrays},
             output_tensor_symbol="tensor_output",
+            load_constants=(tmpdir_path / "constants_loader.c").exists(),
         )
         exe_path = _compile_generated_sources_with_runner(tmpdir_path, "min_runner")
 
@@ -521,3 +678,67 @@ def test_scheduled_downsample_residual_runtime_matches_onnxruntime_for_add_group
     assert "node_fused_add_relu_1();" not in model_c
     assert "_nnc_pipeline_stage_nchw_tile(&tensor_skip_out" in model_c
     np.testing.assert_allclose(actual, expected, rtol=1e-3, atol=1e-4)
+
+
+def test_scheduled_conv_maxpool_runtime_matches_onnxruntime_without_home_fallback():
+    rng = np.random.default_rng(17)
+    input_arrays = {
+        "input": rng.standard_normal((1, 16, 96, 96), dtype=np.float32),
+    }
+
+    model_c, actual, expected = _run_scheduled_runtime_case(
+        _make_scheduled_conv_maxpool_model(),
+        input_arrays=input_arrays,
+        max_memory="1M",
+    )
+
+    assert "scheduled home execution" not in model_c
+    np.testing.assert_allclose(actual, expected, rtol=1e-3, atol=1e-4)
+
+
+def test_scheduled_padded_maxpool_runtime_matches_onnxruntime_without_home_fallback():
+    rng = np.random.default_rng(19)
+    input_arrays = {
+        "input": rng.standard_normal((1, 8, 15, 15), dtype=np.float32),
+    }
+
+    model_c, actual, expected = _run_scheduled_runtime_case(
+        _make_scheduled_padded_maxpool_model(),
+        input_arrays=input_arrays,
+        max_memory="1M",
+    )
+
+    assert "scheduled home execution" not in model_c
+    np.testing.assert_allclose(actual, expected, rtol=1e-4, atol=1e-5)
+
+
+def test_scheduled_global_avgpool_runtime_matches_onnxruntime_without_home_fallback():
+    rng = np.random.default_rng(23)
+    input_arrays = {
+        "input": rng.standard_normal((1, 16, 14, 14), dtype=np.float32),
+    }
+
+    model_c, actual, expected = _run_scheduled_runtime_case(
+        _make_scheduled_global_avgpool_model(),
+        input_arrays=input_arrays,
+        max_memory="1M",
+    )
+
+    assert "scheduled home execution" not in model_c
+    np.testing.assert_allclose(actual, expected, rtol=1e-4, atol=1e-5)
+
+
+def test_scheduled_gemm_runtime_matches_onnxruntime_without_home_fallback():
+    rng = np.random.default_rng(29)
+    input_arrays = {
+        "input": rng.standard_normal((1, 128), dtype=np.float32),
+    }
+
+    model_c, actual, expected = _run_scheduled_runtime_case(
+        _make_scheduled_gemm_model(),
+        input_arrays=input_arrays,
+        max_memory="1M",
+    )
+
+    assert "scheduled home execution" not in model_c
+    np.testing.assert_allclose(actual, expected, rtol=1e-4, atol=1e-5)
