@@ -1365,6 +1365,22 @@ class X86Backend(BackendBase):
             if include_anchor in source:
                 source = source.replace(include_anchor, include_block + include_anchor, 1)
 
+        pool_decl_block = "\n".join(
+            [
+                "extern uint8_t _nnc_fast_pool[];",
+                "extern uint8_t _nnc_slow_pool[];",
+                "",
+            ]
+        )
+        if "extern uint8_t _nnc_fast_pool[];" not in source:
+            decl_anchor = '#include "nnc_ops.h"\n'
+            if decl_anchor in source:
+                source = source.replace(decl_anchor, decl_anchor + "\n" + pool_decl_block, 1)
+            else:
+                include_anchor = '#include "model.h"\n'
+                if include_anchor in source:
+                    source = source.replace(include_anchor, include_anchor + "\n" + pool_decl_block, 1)
+
         helper_block = "\n".join(self._render_parallel_step_helper_block(pipeline_codegen_metadata)).strip()
         parallel_block = "\n".join(self._render_parallel_runtime_block(pipeline_codegen_metadata)).strip()
         injected_blocks = "\n\n".join(block for block in (helper_block, parallel_block) if block)

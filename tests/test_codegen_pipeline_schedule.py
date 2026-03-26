@@ -952,6 +952,11 @@ def test_codegen_emits_real_dma_spill_and_reload_worker_steps():
     assert "#define NNC_FAST_MEMORY_SIZE 32" in tensors_c
     assert "#define NNC_SLOW_MEMORY_SIZE 16" in tensors_c
 
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output_dir = Path(tmpdir)
+        _write_artifacts(output_dir, artifacts)
+        _compile_generated_sources(output_dir)
+
 
 def test_codegen_without_schedule_metadata_still_generates_compilable_output():
     ctx = _make_relu_context()
