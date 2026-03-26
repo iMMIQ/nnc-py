@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import subprocess
 import tempfile
 from pathlib import Path
@@ -313,6 +314,21 @@ def make_codegen_context_with_native_spill() -> CompileContext:
                 resident_value_name="mid.reload0.resident",
                 before_node_name="relu1",
             ),
+        ),
+    )
+    return ctx
+
+
+def make_codegen_context_with_missing_reload_graph_tensor_name() -> CompileContext:
+    ctx = make_codegen_context_with_native_spill()
+    problem = ctx.metadata["pipeline_schedule_problem"]
+    ctx.metadata["pipeline_schedule_problem"] = replace(
+        problem,
+        scheduled_values=tuple(
+            replace(value, graph_tensor_name="")
+            if value.name == "mid.reload0.resident"
+            else value
+            for value in problem.scheduled_values
         ),
     )
     return ctx
@@ -951,6 +967,40 @@ def test_codegen_emits_real_dma_spill_and_reload_worker_steps():
     assert "memcpy(_nnc_fast_pool + 16, _nnc_slow_pool + 0, 16);" in model_c
     assert "#define NNC_FAST_MEMORY_SIZE 32" in tensors_c
     assert "#define NNC_SLOW_MEMORY_SIZE 16" in tensors_c
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output_dir = Path(tmpdir)
+        _write_artifacts(output_dir, artifacts)
+        _compile_generated_sources(output_dir)
+
+
+def test_codegen_debug_mode_keeps_native_spill_and_reload_buildable():
+    ctx = make_codegen_context_with_native_spill()
+
+    artifacts = X86Backend(debug_mode=True).generate(ctx)
+    model_c = _artifact_text(artifacts, "model.c")
+
+    assert "spill_dma" in model_c
+    assert "reload_dma" in model_c
+    assert "nnc_pipeline_run_parallel" not in model_c
+    assert "memcpy(_nnc_slow_pool + 0, _nnc_fast_pool + 0, 16);" in model_c
+    assert "memcpy(_nnc_fast_pool + 16, _nnc_slow_pool + 0, 16);" in model_c
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output_dir = Path(tmpdir)
+        _write_artifacts(output_dir, artifacts)
+        _compile_generated_sources(output_dir)
+
+
+def test_codegen_missing_reload_graph_tensor_name_stays_buildable():
+    ctx = make_codegen_context_with_missing_reload_graph_tensor_name()
+
+    artifacts = X86Backend().generate(ctx)
+    model_c = _artifact_text(artifacts, "model.c")
+    tensors_c = _artifact_text(artifacts, "tensors.c")
+
+    assert "mid.reload0.resident.data" not in model_c
+    assert "mid.reload0.resident_shape" not in tensors_c
 
     with tempfile.TemporaryDirectory() as tmpdir:
         output_dir = Path(tmpdir)

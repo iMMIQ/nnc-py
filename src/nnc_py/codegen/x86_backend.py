@@ -378,10 +378,37 @@ class X86Backend(BackendBase):
         ctx: CompileContext,
         value_name: str,
     ) -> str | None:
+        candidates: list[str] = []
         graph_tensor_name = self._build_schedule_value_graph_tensor_map(ctx).get(value_name)
-        if graph_tensor_name:
-            return graph_tensor_name
-        return self._decode_schedule_value_graph_tensor_name(value_name)
+        if isinstance(graph_tensor_name, str) and graph_tensor_name:
+            candidates.append(graph_tensor_name)
+
+        decoded_name = self._decode_schedule_value_graph_tensor_name(value_name)
+        if isinstance(decoded_name, str) and decoded_name:
+            candidates.append(decoded_name)
+
+        inferred_name = self._infer_schedule_value_graph_tensor_name(value_name)
+        if isinstance(inferred_name, str) and inferred_name:
+            candidates.append(inferred_name)
+
+        seen: set[str] = set()
+        for candidate in candidates:
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            if candidate in ctx.graph.tensors:
+                return candidate
+        return None
+
+    def _infer_schedule_value_graph_tensor_name(self, value_name: str) -> str | None:
+        if not value_name:
+            return None
+        for marker in (".reload", ".spill"):
+            if marker in value_name:
+                candidate = value_name.split(marker, 1)[0]
+                if candidate:
+                    return candidate
+        return None
 
     def _decode_schedule_value_graph_tensor_name(self, value_name: str) -> str | None:
         if value_name.startswith("sram|node|") and "|tensor|" in value_name:
@@ -534,38 +561,79 @@ class X86Backend(BackendBase):
             if step is None:
                 continue
 
-            fast_expr = f"_nnc_fast_pool + {int(transfer_point.fast_offset)}"
-            slow_expr = f"_nnc_slow_pool + {int(transfer_point.slow_offset)}"
-            size_bytes = int(transfer_point.size_bytes)
-            tensor_value_name = transfer_point.resident_value_name or transfer_point.value_name
-            graph_tensor_name = self._resolve_schedule_value_graph_tensor_name(
+            custom_body_lines = self._build_scheduled_transfer_body_lines(
                 ctx,
-                str(tensor_value_name),
+                transfer_point,
             )
-            tensor_symbol = None
-            if graph_tensor_name is not None:
-                tensor_symbol = ctx.tensor_symbols.get(graph_tensor_name, graph_tensor_name)
-
-            transfer_kind = getattr(getattr(transfer_point, "transfer_kind", None), "value", "")
-            custom_body_lines: list[str] = [f"/* {transfer_kind} */"]
-            if transfer_kind == "spill_dma":
-                if tensor_symbol is not None:
-                    custom_body_lines.append(f"{tensor_symbol}.data = {fast_expr};")
-                custom_body_lines.append(
-                    f"memcpy({slow_expr}, {fast_expr}, {size_bytes});"
-                )
-            elif transfer_kind == "reload_dma":
-                custom_body_lines.append(
-                    f"memcpy({fast_expr}, {slow_expr}, {size_bytes});"
-                )
-                if tensor_symbol is not None:
-                    custom_body_lines.append(f"{tensor_symbol}.data = {fast_expr};")
-            else:
+            if not custom_body_lines:
                 continue
 
             step["custom_body_lines"] = tuple(custom_body_lines)
 
         return cloned
+
+    def _build_scheduled_transfer_body_lines(
+        self,
+        ctx: CompileContext,
+        transfer_point: Any,
+    ) -> list[str]:
+        fast_expr = f"_nnc_fast_pool + {int(transfer_point.fast_offset)}"
+        slow_expr = f"_nnc_slow_pool + {int(transfer_point.slow_offset)}"
+        size_bytes = int(transfer_point.size_bytes)
+        tensor_value_name = transfer_point.resident_value_name or transfer_point.value_name
+        graph_tensor_name = self._resolve_schedule_value_graph_tensor_name(
+            ctx,
+            str(tensor_value_name),
+        )
+        tensor_symbol = None
+        if graph_tensor_name is not None:
+            tensor_symbol = ctx.tensor_symbols.get(graph_tensor_name, graph_tensor_name)
+
+        transfer_kind = getattr(getattr(transfer_point, "transfer_kind", None), "value", "")
+        custom_body_lines: list[str] = [f"/* {transfer_kind} */"]
+        if transfer_kind == "spill_dma":
+            if tensor_symbol is not None:
+                custom_body_lines.append(f"{tensor_symbol}.data = {fast_expr};")
+            custom_body_lines.append(
+                f"memcpy({slow_expr}, {fast_expr}, {size_bytes});"
+            )
+        elif transfer_kind == "reload_dma":
+            custom_body_lines.append(
+                f"memcpy({fast_expr}, {slow_expr}, {size_bytes});"
+            )
+            if tensor_symbol is not None:
+                custom_body_lines.append(f"{tensor_symbol}.data = {fast_expr};")
+        else:
+            return []
+
+        return custom_body_lines
+
+    def _get_scheduled_transfer_points_for_node(
+        self,
+        scheduled_plan: Any,
+        *,
+        before_node_name: str | None = None,
+        after_node_name: str | None = None,
+        transfer_kind: str | None = None,
+    ) -> list[Any]:
+        transfer_points: list[Any] = []
+        for transfer_point in tuple(getattr(scheduled_plan, "transfer_points", ())):
+            kind_value = getattr(getattr(transfer_point, "transfer_kind", None), "value", "")
+            if transfer_kind is not None and kind_value != transfer_kind:
+                continue
+            if before_node_name is not None and getattr(transfer_point, "before_node_name", None) != before_node_name:
+                continue
+            if after_node_name is not None and getattr(transfer_point, "after_node_name", None) != after_node_name:
+                continue
+            transfer_points.append(transfer_point)
+        transfer_points.sort(
+            key=lambda item: (
+                int(getattr(item, "start_time", 0)),
+                int(getattr(item, "end_time", 0)),
+                str(getattr(item, "step_id", "")),
+            )
+        )
+        return transfer_points
 
     def _augment_parallel_runtime_for_unified_spill(
         self,
@@ -1605,7 +1673,18 @@ class X86Backend(BackendBase):
 
         # Determine which plan to use
         used_standard_emitter = False
-        if prefer_scheduled_plan:
+        if (
+            prefer_scheduled_plan
+            and self.debug_mode
+            and scheduled_plan is not None
+            and bool(getattr(scheduled_plan, "transfer_points", ()))
+        ):
+            source = self._generate_source_with_scheduled_spill(
+                ctx,
+                scheduled_plan,
+                pipeline_codegen_metadata,
+            )
+        elif prefer_scheduled_plan:
             emitter = CEmitter(
                 tile_aware_wrapper_nodes=tile_aware_runtime_plan.get("wrapper_nodes", {}),
                 pipeline_schedule_metadata=pipeline_codegen_metadata,
@@ -2177,6 +2256,102 @@ extern FILE* debug_file;
                 )
                 lines.append(f"    {func_name}();")
 
+        lines.append("}")
+
+        return "\n".join(lines)
+
+    def _generate_source_with_scheduled_spill(
+        self,
+        ctx: CompileContext,
+        scheduled_plan: Any,
+        pipeline_codegen_metadata: dict[str, Any],
+    ) -> str:
+        """Generate serial source with scheduled spill/reload wrappers."""
+        from nnc_py.codegen.c_emitter import CEmitter
+
+        lines = [
+            "/* Auto-generated by NNC - DO NOT EDIT */",
+            "",
+            "#include <stdio.h>",
+            "#include <stdlib.h>",
+            "#include <string.h>",
+            '#include "model.h"',
+            '#include "nnc_ops.h"',
+            "",
+            "/* External memory pools (defined in tensors.c) */",
+            "extern uint8_t _nnc_fast_pool[];",
+            "extern uint8_t _nnc_slow_pool[];",
+            "",
+        ]
+        self._append_pipeline_schedule_summary_block(lines, pipeline_codegen_metadata)
+
+        nodes = ctx.graph.topological_sort()
+        for node in nodes:
+            if node.op_type == OpType.CONSTANT:
+                continue
+            func_name = ctx.node_symbols.get(node.name, node.name)
+            lines.append(f"static void {func_name}_body(void);")
+
+        lines.append("")
+        lines.append("/* Scheduled spill/reload wrapper functions */")
+
+        for node in nodes:
+            if node.op_type == OpType.CONSTANT:
+                continue
+
+            func_name = ctx.node_symbols.get(node.name, node.name)
+            reload_points = self._get_scheduled_transfer_points_for_node(
+                scheduled_plan,
+                before_node_name=node.name,
+                transfer_kind="reload_dma",
+            )
+            spill_points = self._get_scheduled_transfer_points_for_node(
+                scheduled_plan,
+                after_node_name=node.name,
+                transfer_kind="spill_dma",
+            )
+
+            lines.append(f"/* {func_name}: {node.op_type.value} */")
+            lines.append(f"static void {func_name}(void) {{")
+            self._append_pipeline_step_comment_lines(
+                lines,
+                pipeline_codegen_metadata,
+                node.name,
+                indent="    ",
+            )
+
+            for transfer_point in reload_points:
+                for body_line in self._build_scheduled_transfer_body_lines(ctx, transfer_point):
+                    lines.append(f"    {body_line}")
+
+            lines.append(f"    {func_name}_body();")
+
+            for transfer_point in spill_points:
+                for body_line in self._build_scheduled_transfer_body_lines(ctx, transfer_point):
+                    lines.append(f"    {body_line}")
+
+            lines.append("}")
+            lines.append("")
+
+        lines.append("/* Node body functions */")
+        emitter = CEmitter(pipeline_schedule_metadata=pipeline_codegen_metadata)
+        body_code = emitter.emit(ctx)
+        lines.append(self._process_body_code(body_code, ctx))
+
+        lines.append("")
+        lines.append("/* Main inference entry point */")
+        lines.append("void nnc_run(void) {")
+        for node in nodes:
+            if node.op_type == OpType.CONSTANT:
+                continue
+            func_name = ctx.node_symbols.get(node.name, node.name)
+            self._append_pipeline_step_comment_lines(
+                lines,
+                pipeline_codegen_metadata,
+                node.name,
+                indent="    ",
+            )
+            lines.append(f"    {func_name}();")
         lines.append("}")
 
         return "\n".join(lines)
@@ -3882,12 +4057,14 @@ run: model
         ctx: CompileContext,
         scheduled_plan: Any,
     ) -> dict[str, tuple[str, int]]:
-        value_to_graph_tensor = self._build_schedule_value_graph_tensor_map(ctx)
         tensor_offsets: dict[str, tuple[str, int]] = {}
         best_fast_allocations: dict[str, tuple[tuple[int, int, str], int]] = {}
 
         for allocation in getattr(scheduled_plan, "fast_allocations", {}).values():
-            graph_tensor_name = value_to_graph_tensor.get(allocation.value_name)
+            graph_tensor_name = self._resolve_schedule_value_graph_tensor_name(
+                ctx,
+                str(allocation.value_name),
+            )
             if graph_tensor_name is None:
                 continue
             sort_key = (
@@ -3903,7 +4080,10 @@ run: model
             tensor_offsets[graph_tensor_name] = ("fast", offset)
 
         for value_name, allocation in getattr(scheduled_plan, "slow_allocations", {}).items():
-            graph_tensor_name = value_to_graph_tensor.get(value_name)
+            graph_tensor_name = self._resolve_schedule_value_graph_tensor_name(
+                ctx,
+                str(value_name),
+            )
             if graph_tensor_name is None or graph_tensor_name in tensor_offsets:
                 continue
             tensor_offsets[graph_tensor_name] = ("slow", int(allocation.offset))
