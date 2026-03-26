@@ -11,7 +11,7 @@ from nnc_py.ir.node import Node, OpType
 from nnc_py.ir.tensor import TensorShape, TensorType
 from nnc_py.ir.types import DataType, GenericBlockedLayoutKind, MemoryLayout
 from nnc_py.passes.layout_planning import GenericBlockedLayout, LayoutPlan
-from nnc_py.passes.schedule_analysis import ScheduleCandidate
+from nnc_py.passes.schedule_analysis import FAST_MEMORY_BUDGET_BYTES, ScheduleCandidate
 from nnc_py.passes.tiled_lowering import TiledLoweringPass
 
 
@@ -274,6 +274,45 @@ def make_partial_dynamic_conv_context() -> CompileContext:
     return CompileContext(graph=graph, target="x86", optimization_level=3)
 
 
+def make_resnet_stem_conv_context() -> CompileContext:
+    graph = Graph("conv_resnet_stem_tiled")
+    graph.inputs = ["input"]
+    graph.outputs = ["output"]
+
+    graph.add_tensor(
+        TensorType(
+            dtype=DataType.FLOAT32,
+            shape=TensorShape([1, 3, 224, 224], layout=MemoryLayout.NCHW),
+            name="input",
+        )
+    )
+    graph.add_tensor(
+        TensorType(
+            dtype=DataType.FLOAT32,
+            shape=TensorShape([64, 3, 7, 7], layout=MemoryLayout.OIHW),
+            name="weight",
+        )
+    )
+    graph.add_tensor(
+        TensorType(
+            dtype=DataType.FLOAT32,
+            shape=TensorShape([1, 64, 112, 112], layout=MemoryLayout.NCHW),
+            name="output",
+        )
+    )
+    graph.add_node(
+        Node(
+            op_type=OpType.CONV2D,
+            name="conv0",
+            inputs=["input", "weight"],
+            outputs=["output"],
+            attrs={"kernel_shape": [7, 7], "pads": [3, 3, 3, 3], "strides": [2, 2]},
+        )
+    )
+
+    return CompileContext(graph=graph, target="x86", optimization_level=3)
+
+
 def seed_schedule_and_layout(ctx: CompileContext, node_name: str, op_family: str) -> None:
     ctx.metadata["schedule_candidates"] = {
         node_name: ScheduleCandidate(
@@ -439,3 +478,21 @@ def test_tiled_lowering_skips_unresolved_tensor_hints_for_partial_dynamic_conv()
     assert region_sizes["tensor_bytes"]["output"] > 0
     assert "input" not in region_sizes["tensor_bytes"]
     assert region_sizes["region_bytes"]["scratch"] >= 0
+
+
+def test_tiled_lowering_accounts_for_persistent_weights_in_stem_working_set():
+    ctx = make_resnet_stem_conv_context()
+    seed_schedule_and_layout(ctx, node_name="conv0", op_family="conv2d")
+
+    TiledLoweringPass().run(ctx)
+
+    region_sizes = ctx.metadata["node_execution_plan_region_sizes"]["conv0"]
+    weight_bytes = ctx.graph.tensors["weight"].byte_size()
+    total_bytes = (
+        region_sizes["tensor_bytes"]["input"]
+        + region_sizes["tensor_bytes"]["output"]
+        + region_sizes["region_bytes"]["scratch"]
+        + weight_bytes
+    )
+
+    assert total_bytes <= FAST_MEMORY_BUDGET_BYTES

@@ -685,6 +685,567 @@ class X86Backend(BackendBase):
 
         return cloned
 
+    def _augment_parallel_runtime_for_scheduled_home_execution(
+        self,
+        ctx: CompileContext,
+        pipeline_codegen_metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not self._has_parallel_runtime(pipeline_codegen_metadata):
+            return pipeline_codegen_metadata
+        if not self._should_use_scheduled_home_execution(ctx):
+            return pipeline_codegen_metadata
+
+        cloned = self._clone_pipeline_codegen_metadata(pipeline_codegen_metadata)
+        runtime = cloned.get("parallel_runtime")
+        if not isinstance(runtime, dict):
+            return pipeline_codegen_metadata
+
+        for step in tuple(runtime.get("steps", ())):
+            if step.get("custom_body_lines") is not None:
+                continue
+            step_kind = str(step.get("step_kind", ""))
+            node_symbol = step.get("node_symbol")
+            if step_kind == "compute" and isinstance(node_symbol, str) and node_symbol:
+                step["custom_body_lines"] = (f"{node_symbol}();",)
+            elif (
+                step_kind == "shape_prep"
+                and bool(step.get("invoke_node"))
+                and isinstance(node_symbol, str)
+                and node_symbol
+            ):
+                step["custom_body_lines"] = (f"{node_symbol}();",)
+            else:
+                step["custom_body_lines"] = ("/* scheduled home execution */",)
+
+        return cloned
+
+    def _augment_parallel_runtime_for_scheduled_tile_streaming(
+        self,
+        ctx: CompileContext,
+        pipeline_codegen_metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not self._has_parallel_runtime(pipeline_codegen_metadata):
+            return pipeline_codegen_metadata
+
+        streaming_plan = self._build_scheduled_tile_streaming_plan(ctx, pipeline_codegen_metadata)
+        if not streaming_plan["groups"]:
+            return pipeline_codegen_metadata
+
+        cloned = self._clone_pipeline_codegen_metadata(pipeline_codegen_metadata)
+        runtime = cloned.get("parallel_runtime")
+        if not isinstance(runtime, dict):
+            return pipeline_codegen_metadata
+
+        steps_by_id = {
+            str(step["step_id"]): step
+            for step in tuple(runtime.get("steps", ()))
+        }
+
+        custom_declarations = list(runtime.get("custom_declarations", ()))
+        custom_declarations.extend(streaming_plan["helper_definitions"])
+        runtime["custom_declarations"] = tuple(custom_declarations)
+
+        for group in streaming_plan["groups"]:
+            for step_id in group["noop_step_ids"]:
+                step = steps_by_id.get(step_id)
+                if step is None:
+                    continue
+                step["custom_body_lines"] = ("/* scheduled tile streaming */",)
+            invoke_step = steps_by_id.get(group["invoke_step_id"])
+            if invoke_step is not None:
+                invoke_step["custom_body_lines"] = (f"{group['helper_name']}();",)
+
+        return cloned
+
+    def _build_scheduled_tile_streaming_plan(
+        self,
+        ctx: CompileContext,
+        pipeline_codegen_metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        runtime = pipeline_codegen_metadata.get("parallel_runtime")
+        if not isinstance(runtime, dict) or runtime.get("enabled") is not True:
+            return {"groups": [], "helper_definitions": [], "internal_tensor_names": set()}
+
+        execution_plans = ctx.metadata.get("node_execution_plans")
+        if not isinstance(execution_plans, dict) or not execution_plans:
+            return {"groups": [], "helper_definitions": [], "internal_tensor_names": set()}
+
+        node_by_name = {node.name: node for node in ctx.graph.topological_sort()}
+        step_records_by_node: dict[str, list[dict[str, Any]]] = {}
+        for step in tuple(runtime.get("steps", ())):
+            node_name = step.get("node_name")
+            if not isinstance(node_name, str) or not node_name:
+                continue
+            step_records_by_node.setdefault(node_name, []).append(step)
+
+        groups: list[dict[str, Any]] = []
+        helper_definitions: list[str] = []
+        internal_tensor_names: set[str] = set()
+        max_required_fast_memory = 0
+        for execution_group in self._collect_tile_aware_execution_groups(ctx, execution_plans):
+            group_plan = self._build_scheduled_tile_streaming_group_plan(
+                ctx,
+                execution_group,
+                execution_plans=execution_plans,
+                node_by_name=node_by_name,
+                step_records_by_node=step_records_by_node,
+            )
+            if group_plan is None:
+                continue
+            groups.append(group_plan)
+            helper_definitions.extend(group_plan["helper_definition"])
+            internal_tensor_names.update(group_plan["internal_tensor_names"])
+            max_required_fast_memory = max(
+                max_required_fast_memory,
+                int(group_plan["required_fast_memory"]),
+            )
+
+        return {
+            "groups": groups,
+            "helper_definitions": helper_definitions,
+            "internal_tensor_names": internal_tensor_names,
+            "required_fast_memory": max_required_fast_memory,
+        }
+
+    def _build_scheduled_tile_streaming_group_plan(
+        self,
+        ctx: CompileContext,
+        execution_group: dict[str, Any],
+        *,
+        execution_plans: dict[str, Any],
+        node_by_name: dict[str, Node],
+        step_records_by_node: dict[str, list[dict[str, Any]]],
+    ) -> dict[str, Any] | None:
+        node_names = tuple(execution_group.get("node_names", ()))
+        if not node_names:
+            return None
+
+        root_name = node_names[0]
+        root_node = node_by_name.get(root_name)
+        root_plan = execution_plans.get(root_name)
+        if root_node is None or root_plan is None or getattr(root_plan, "op_family", None) != "conv2d":
+            return None
+        if any(
+            node_by_name.get(node_name) is None
+            or node_by_name[node_name].op_type
+            not in {OpType.CONV2D, OpType.FUSED_CONV_RELU, OpType.RELU}
+            for node_name in node_names
+        ):
+            return None
+
+        root_compute_step = self._find_parallel_runtime_step(step_records_by_node, root_name, "compute")
+        if root_compute_step is None:
+            return None
+        conv_input_record = self._find_value_record(
+            tuple(root_compute_step.get("input_value_records", ())),
+            tensor_name=root_node.inputs[0],
+            staged_only=True,
+        )
+        conv_output_record = self._find_value_record(
+            tuple(root_compute_step.get("output_value_records", ())),
+            tensor_name=root_node.outputs[0],
+            staged_only=True,
+        )
+        if conv_input_record is None or conv_output_record is None:
+            return None
+
+        final_node = node_by_name[node_names[-1]]
+        final_compute_step = self._find_parallel_runtime_step(
+            step_records_by_node,
+            final_node.name,
+            "compute",
+        )
+        if final_compute_step is None:
+            return None
+        final_output_record = self._find_value_record(
+            tuple(final_compute_step.get("output_value_records", ())),
+            tensor_name=final_node.outputs[0],
+            staged_only=True,
+        )
+        if final_output_record is None:
+            return None
+
+        primary_buffer_size = self._align_c_buffer_size(int(conv_input_record["size_bytes"]))
+        secondary_buffer_size = self._align_c_buffer_size(
+            max(int(conv_output_record["size_bytes"]), int(final_output_record["size_bytes"]))
+        )
+        required_fast_memory = primary_buffer_size + secondary_buffer_size
+        max_memory = ctx.metadata.get("max_memory")
+        if isinstance(max_memory, int) and max_memory > 0 and required_fast_memory > max_memory:
+            return None
+
+        extra_stage_record = conv_input_record
+        helper_lines = self._render_scheduled_tile_streaming_helper(
+            ctx,
+            execution_group=execution_group,
+            node_by_name=node_by_name,
+            execution_plans=execution_plans,
+            step_records_by_node=step_records_by_node,
+            conv_input_record=conv_input_record,
+            conv_output_record=conv_output_record,
+            extra_stage_record=extra_stage_record,
+            primary_buffer_offset=0,
+            secondary_buffer_offset=primary_buffer_size,
+        )
+        if not helper_lines:
+            return None
+
+        noop_step_ids: list[str] = []
+        for node_name in node_names:
+            for step in step_records_by_node.get(node_name, ()):
+                step_id = str(step.get("step_id", ""))
+                if not step_id:
+                    continue
+                if node_name == root_name and step_id == str(root_compute_step.get("step_id", "")):
+                    continue
+                noop_step_ids.append(step_id)
+
+        internal_tensor_names = {
+            tensor_name
+            for tensor_name in execution_group.get("fast_tensors", ())
+            if tensor_name in ctx.graph.tensors and tensor_name not in ctx.graph.outputs
+        }
+        final_output_names = set(node_by_name[node_names[-1]].outputs)
+        internal_tensor_names.difference_update(final_output_names)
+
+        return {
+            "invoke_step_id": str(root_compute_step["step_id"]),
+            "noop_step_ids": tuple(dict.fromkeys(noop_step_ids)),
+            "helper_name": helper_lines[0].removeprefix("static void ").split("(")[0],
+            "helper_definition": helper_lines,
+            "internal_tensor_names": internal_tensor_names,
+            "required_fast_memory": required_fast_memory,
+        }
+
+    def _align_c_buffer_size(self, size_bytes: int) -> int:
+        alignment = 16
+        return ((max(size_bytes, 1) + alignment - 1) // alignment) * alignment
+
+    def _scheduled_tile_streaming_internal_tensor_names(
+        self,
+        ctx: CompileContext,
+    ) -> set[str]:
+        execution_plans = ctx.metadata.get("node_execution_plans")
+        if not isinstance(execution_plans, dict) or not execution_plans:
+            return set()
+
+        node_by_name = {node.name: node for node in ctx.graph.topological_sort()}
+        internal_tensor_names: set[str] = set()
+        for execution_group in self._collect_tile_aware_execution_groups(ctx, execution_plans):
+            node_names = tuple(execution_group.get("node_names", ()))
+            if not node_names:
+                continue
+            root_plan = execution_plans.get(node_names[0])
+            if root_plan is None or getattr(root_plan, "op_family", None) != "conv2d":
+                continue
+            if any(
+                node_by_name.get(node_name) is None
+                or node_by_name[node_name].op_type
+                not in {
+                    OpType.CONV2D,
+                    OpType.FUSED_CONV_RELU,
+                    OpType.RELU,
+                }
+                for node_name in node_names
+            ):
+                continue
+            final_outputs = set(node_by_name[node_names[-1]].outputs)
+            internal_tensor_names.update(
+                tensor_name
+                for tensor_name in execution_group.get("fast_tensors", ())
+                if tensor_name in ctx.graph.tensors and tensor_name not in final_outputs
+            )
+        return internal_tensor_names
+
+    def _scheduled_tile_streaming_required_fast_memory(
+        self,
+        ctx: CompileContext,
+    ) -> int:
+        schedule_problem = ctx.pipeline_schedule_problem
+        schedule_result = ctx.pipeline_schedule_result
+        if schedule_problem is None or schedule_result is None or not schedule_result.feasible:
+            return 0
+        runtime = self._build_pipeline_parallel_runtime_metadata(
+            ctx,
+            schedule_problem=schedule_problem,
+            schedule_result=schedule_result,
+            scheduled_plan=self._get_scheduled_memory_plan(ctx),
+        )
+        if runtime is None:
+            return 0
+        plan = self._build_scheduled_tile_streaming_plan(
+            ctx,
+            {"parallel_runtime": runtime},
+        )
+        return int(plan.get("required_fast_memory", 0) or 0)
+
+    def _find_parallel_runtime_step(
+        self,
+        step_records_by_node: dict[str, list[dict[str, Any]]],
+        node_name: str,
+        step_kind: str,
+    ) -> dict[str, Any] | None:
+        for step in step_records_by_node.get(node_name, ()):
+            if str(step.get("step_kind", "")) == step_kind:
+                return step
+        return None
+
+    def _find_value_record(
+        self,
+        records: tuple[dict[str, Any], ...],
+        *,
+        tensor_name: str,
+        staged_only: bool = False,
+    ) -> dict[str, Any] | None:
+        for record in records:
+            if str(record.get("graph_tensor_name", "")) != tensor_name:
+                continue
+            if staged_only and not bool(record.get("is_staged")):
+                continue
+            return dict(record)
+        return None
+
+    def _record_buffer_expr(self, record: dict[str, Any]) -> str | None:
+        fast_expr = record.get("fast_expr")
+        if isinstance(fast_expr, str) and fast_expr:
+            return fast_expr
+        if bool(record.get("is_staged")):
+            return f"{record['storage_symbol']}_buffer"
+        return None
+
+    def _sanitize_c_ident(self, value: str) -> str:
+        chars = []
+        for char in value:
+            if char.isalnum():
+                chars.append(char)
+            else:
+                chars.append("_")
+        return "".join(chars)
+
+    def _render_scheduled_tile_streaming_helper(
+        self,
+        ctx: CompileContext,
+        *,
+        execution_group: dict[str, Any],
+        node_by_name: dict[str, Node],
+        execution_plans: dict[str, Any],
+        step_records_by_node: dict[str, list[dict[str, Any]]],
+        conv_input_record: dict[str, Any],
+        conv_output_record: dict[str, Any],
+        extra_stage_record: dict[str, Any],
+        primary_buffer_offset: int,
+        secondary_buffer_offset: int,
+    ) -> list[str]:
+        node_names = tuple(execution_group.get("node_names", ()))
+        if not node_names:
+            return []
+        root_node = node_by_name[node_names[0]]
+        root_plan = execution_plans[node_names[0]]
+        output_access = root_plan.output_accesses[0]
+        output_tile_extents = tuple(output_access.tile_region.logical_extents)
+        if len(output_tile_extents) != 2:
+            return []
+        input_access = root_plan.input_accesses[0]
+        input_tile_extents = tuple(input_access.tile_region.logical_extents)
+        if len(input_tile_extents) != 2:
+            return []
+
+        conv_input_stage_expr = f"_nnc_fast_pool + {int(primary_buffer_offset)}"
+        conv_output_stage_expr = f"_nnc_fast_pool + {int(secondary_buffer_offset)}"
+        extra_stage_expr = f"_nnc_fast_pool + {int(primary_buffer_offset)}"
+
+        root_output_symbol = ctx.tensor_symbols.get(root_node.outputs[0], root_node.outputs[0])
+        final_node = node_by_name[node_names[-1]]
+        final_output_symbol = ctx.tensor_symbols.get(final_node.outputs[0], final_node.outputs[0])
+        final_compute_step = self._find_parallel_runtime_step(
+            step_records_by_node,
+            final_node.name,
+            "compute",
+        )
+        if final_compute_step is None:
+            return []
+        final_output_record = self._find_value_record(
+            tuple(final_compute_step.get("output_value_records", ())),
+            tensor_name=final_node.outputs[0],
+            staged_only=True,
+        )
+        final_output_stage_expr = f"_nnc_fast_pool + {int(primary_buffer_offset)}"
+        if final_output_record is None:
+            return []
+
+        helper_name = f"nnc_pipeline_tile_stream_{self._sanitize_c_ident(node_names[0])}"
+        input_symbol = ctx.tensor_symbols.get(root_node.inputs[0], root_node.inputs[0])
+        weight_symbol = ctx.tensor_symbols.get(root_node.inputs[1], root_node.inputs[1])
+        bias_expr = "NULL"
+        if len(root_node.inputs) >= 3:
+            bias_symbol = ctx.tensor_symbols.get(root_node.inputs[2], root_node.inputs[2])
+            bias_expr = f"&{bias_symbol}"
+
+        kernel_shape = root_node.attrs.get("kernel_shape", [1, 1])
+        strides = root_node.attrs.get("strides", [1, 1])
+        pads = root_node.attrs.get("pads", [0, 0, 0, 0])
+        kernel_h = int(kernel_shape[0]) if len(kernel_shape) >= 1 else 1
+        kernel_w = int(kernel_shape[1]) if len(kernel_shape) >= 2 else kernel_h
+        stride_h = int(strides[0]) if len(strides) >= 1 else 1
+        stride_w = int(strides[1]) if len(strides) >= 2 else stride_h
+        pad_h = int(pads[0]) if len(pads) >= 1 else 0
+        pad_w = int(pads[1]) if len(pads) >= 2 else pad_h
+
+        follower_lines: list[str] = []
+        current_stage_tensor_name = root_node.outputs[0]
+        current_stage_expr = conv_output_stage_expr
+        for index, node_name in enumerate(node_names[1:], start=1):
+            follower = node_by_name[node_name]
+            follower_plan = execution_plans[node_name]
+            follower_output_access = follower_plan.output_accesses[0]
+            follower_tile_extents = tuple(follower_output_access.tile_region.logical_extents)
+            if len(follower_tile_extents) != 2:
+                return []
+            tile_h_expr = f"_nnc_tile_h_{index}"
+            tile_w_expr = f"_nnc_tile_w_{index}"
+            follower_lines.extend(
+                [
+                    f"            int64_t {tile_h_expr} = _nnc_min_i64({follower_tile_extents[0]}, {ctx.tensor_symbols.get(follower.outputs[0], follower.outputs[0])}.shape[2] - _nnc_h0);",
+                    f"            int64_t {tile_w_expr} = _nnc_min_i64({follower_tile_extents[1]}, {ctx.tensor_symbols.get(follower.outputs[0], follower.outputs[0])}.shape[3] - _nnc_w0);",
+                ]
+            )
+            lhs_symbol = f"_nnc_group_{self._sanitize_c_ident(follower.inputs[0])}"
+            rhs_symbol = f"_nnc_group_{self._sanitize_c_ident(follower.inputs[1])}" if len(follower.inputs) > 1 else None
+            out_symbol = f"_nnc_group_{self._sanitize_c_ident(follower.outputs[0])}"
+            follower_lines.extend(
+                [
+                    f"            int64_t {lhs_symbol}_shape[4] = {{1, {root_output_symbol}.shape[1], {tile_h_expr}, {tile_w_expr}}};",
+                    f"            Tensor {lhs_symbol} = {{",
+                    f"                .data = {current_stage_expr},",
+                    f"                .dtype = {root_output_symbol}.dtype,",
+                    f"                .shape = {lhs_symbol}_shape,",
+                    "                .ndim = 4,",
+                    f"                .nbytes = _nnc_pipeline_tile_nbytes(&{root_output_symbol}, {tile_h_expr}, {tile_w_expr}),",
+                    "            };",
+                ]
+            )
+            follower_output_expr = final_output_stage_expr
+            follower_output_symbol = ctx.tensor_symbols.get(follower.outputs[0], follower.outputs[0])
+            if len(follower.inputs) > 1:
+                other_input_name = next(
+                    input_name for input_name in follower.inputs if input_name != current_stage_tensor_name
+                )
+                other_input_symbol = ctx.tensor_symbols.get(other_input_name, other_input_name)
+                follower_lines.extend(
+                    [
+                        f"            _nnc_pipeline_stage_nchw_tile(&{other_input_symbol}, {extra_stage_expr}, _nnc_n, _nnc_h0, _nnc_w0, {tile_h_expr}, {tile_w_expr});",
+                        f"            int64_t {rhs_symbol}_shape[4] = {{1, {other_input_symbol}.shape[1], {tile_h_expr}, {tile_w_expr}}};",
+                        f"            Tensor {rhs_symbol} = {{",
+                        f"                .data = {extra_stage_expr},",
+                        f"                .dtype = {other_input_symbol}.dtype,",
+                        f"                .shape = {rhs_symbol}_shape,",
+                        "                .ndim = 4,",
+                        f"                .nbytes = _nnc_pipeline_tile_nbytes(&{other_input_symbol}, {tile_h_expr}, {tile_w_expr}),",
+                        "            };",
+                    ]
+                )
+            follower_lines.extend(
+                [
+                    f"            int64_t {out_symbol}_shape[4] = {{1, {follower_output_symbol}.shape[1], {tile_h_expr}, {tile_w_expr}}};",
+                    f"            Tensor {out_symbol} = {{",
+                    f"                .data = {follower_output_expr},",
+                    f"                .dtype = {follower_output_symbol}.dtype,",
+                    f"                .shape = {out_symbol}_shape,",
+                    "                .ndim = 4,",
+                    f"                .nbytes = _nnc_pipeline_tile_nbytes(&{follower_output_symbol}, {tile_h_expr}, {tile_w_expr}),",
+                    "            };",
+                ]
+            )
+            if follower.op_type == OpType.FUSED_ADD_RELU:
+                follower_lines.append(f"            nnc_add_relu(&{lhs_symbol}, &{rhs_symbol}, &{out_symbol});")
+            elif follower.op_type == OpType.ADD:
+                follower_lines.append(f"            nnc_add(&{lhs_symbol}, &{rhs_symbol}, &{out_symbol});")
+            elif follower.op_type == OpType.RELU:
+                follower_lines.append(f"            nnc_relu(&{lhs_symbol}, &{out_symbol});")
+            else:
+                return []
+            current_stage_tensor_name = follower.outputs[0]
+            current_stage_expr = follower_output_expr
+
+        terminal_tensor_symbol = ctx.tensor_symbols.get(current_stage_tensor_name, current_stage_tensor_name)
+        terminal_tensor = ctx.graph.tensors.get(current_stage_tensor_name)
+        if terminal_tensor is None:
+            return []
+        root_conv_entry = "nnc_conv_relu" if root_node.op_type == OpType.FUSED_CONV_RELU else "nnc_conv"
+        helper_lines = [
+            f"static void {helper_name}(void) {{",
+            f"    Tensor* _nnc_group_input = &{input_symbol};",
+            f"    Tensor* _nnc_group_weight = &{weight_symbol};",
+            f"    Tensor* _nnc_group_terminal = &{terminal_tensor_symbol};",
+            f"    uint8_t* _nnc_conv_input_stage = (uint8_t*)({conv_input_stage_expr});",
+            f"    uint8_t* _nnc_conv_output_stage = (uint8_t*)({conv_output_stage_expr});",
+            f"    uint8_t* _nnc_extra_stage = (uint8_t*)({extra_stage_expr});",
+            f"    uint8_t* _nnc_terminal_stage = (uint8_t*)({final_output_stage_expr});",
+            f"    for (int64_t _nnc_n = 0; _nnc_n < {input_symbol}.shape[0]; ++_nnc_n) {{",
+            f"        for (int64_t _nnc_h0 = 0; _nnc_h0 < {root_output_symbol}.shape[2]; _nnc_h0 += {output_tile_extents[0]}) {{",
+            f"            int64_t _nnc_tile_h_0 = _nnc_min_i64({output_tile_extents[0]}, {root_output_symbol}.shape[2] - _nnc_h0);",
+            f"            for (int64_t _nnc_w0 = 0; _nnc_w0 < {root_output_symbol}.shape[3]; _nnc_w0 += {output_tile_extents[1]}) {{",
+            f"                int64_t _nnc_tile_w_0 = _nnc_min_i64({output_tile_extents[1]}, {root_output_symbol}.shape[3] - _nnc_w0);",
+            f"                int64_t _nnc_input_h = (_nnc_tile_h_0 - 1) * {stride_h} + {kernel_h};",
+            f"                int64_t _nnc_input_w = (_nnc_tile_w_0 - 1) * {stride_w} + {kernel_w};",
+            f"                _nnc_pipeline_stage_nchw_tile_with_origin(_nnc_group_input, _nnc_conv_input_stage, _nnc_n, _nnc_h0 * {stride_h} - {pad_h}, _nnc_w0 * {stride_w} - {pad_w}, _nnc_input_h, _nnc_input_w);",
+            f"                int64_t _nnc_conv_input_shape[4] = {{1, {input_symbol}.shape[1], _nnc_input_h, _nnc_input_w}};",
+            f"                int64_t _nnc_conv_output_shape[4] = {{1, {root_output_symbol}.shape[1], _nnc_tile_h_0, _nnc_tile_w_0}};",
+            "                Tensor _nnc_conv_input = {",
+            "                    .data = _nnc_conv_input_stage,",
+            f"                    .dtype = {input_symbol}.dtype,",
+            "                    .shape = _nnc_conv_input_shape,",
+            "                    .ndim = 4,",
+            f"                    .nbytes = _nnc_pipeline_tile_nbytes(&{input_symbol}, _nnc_input_h, _nnc_input_w),",
+            "                };",
+            "                Tensor _nnc_conv_output = {",
+            "                    .data = _nnc_conv_output_stage,",
+            f"                    .dtype = {root_output_symbol}.dtype,",
+            "                    .shape = _nnc_conv_output_shape,",
+            "                    .ndim = 4,",
+            f"                    .nbytes = _nnc_pipeline_tile_nbytes(&{root_output_symbol}, _nnc_tile_h_0, _nnc_tile_w_0),",
+            "                };",
+            f"                {root_conv_entry}(&_nnc_conv_input, _nnc_group_weight, {bias_expr}, &_nnc_conv_output, {kernel_h}, {kernel_w}, {stride_h}, {stride_w}, 0, 0);",
+        ]
+        helper_lines.extend(follower_lines)
+        helper_lines.extend(
+            [
+                f"                _nnc_pipeline_commit_nchw_tile(_nnc_terminal_stage, _nnc_group_terminal, _nnc_n, _nnc_h0, _nnc_w0, _nnc_tile_h_{len(node_names) - 1 if len(node_names) > 1 else 0}, _nnc_tile_w_{len(node_names) - 1 if len(node_names) > 1 else 0});",
+                "            }",
+                "        }",
+                "    }",
+                "}",
+                "",
+            ]
+        )
+        if len(node_names) == 1:
+            helper_lines = helper_lines[:-5] + [
+                "                _nnc_pipeline_commit_nchw_tile(_nnc_conv_output_stage, _nnc_group_terminal, _nnc_n, _nnc_h0, _nnc_w0, _nnc_tile_h_0, _nnc_tile_w_0);",
+                "            }",
+                "        }",
+                "    }",
+                "}",
+                "",
+            ]
+        return helper_lines
+
+    def _should_use_scheduled_home_execution(self, ctx: CompileContext) -> bool:
+        execution_plans = ctx.metadata.get("node_execution_plans", {})
+        if not isinstance(execution_plans, dict):
+            return False
+        return any(
+            bool(getattr(plan, "tile_axes", ()))
+            or any(
+                bool(access.tile_region.logical_extents)
+                for access in getattr(plan, "input_accesses", ())
+            )
+            or any(
+                bool(access.tile_region.logical_extents)
+                for access in getattr(plan, "output_accesses", ())
+            )
+            for plan in execution_plans.values()
+        )
+
     def _build_scheduled_transfer_body_lines(
         self,
         ctx: CompileContext,
@@ -1067,6 +1628,10 @@ class X86Backend(BackendBase):
             if fast_allocation is not None:
                 fast_expr = f"_nnc_fast_pool + {int(getattr(fast_allocation, 'offset', 0))}"
             storage_symbol = self._parallel_value_storage_name(value_name)
+            scheduled_value = self._build_schedule_value_map(ctx).get(value_name)
+            size_bytes = int(getattr(scheduled_value, "size_bytes", 0))
+            if size_bytes <= 0:
+                size_bytes = int(tensor.byte_size())
             records.append(
                 {
                     "value_name": value_name,
@@ -1075,7 +1640,7 @@ class X86Backend(BackendBase):
                     "is_staged": value_name.startswith("sram|node|"),
                     "storage_symbol": storage_symbol,
                     "saved_data_symbol": f"{storage_symbol}_saved_data",
-                    "size_bytes": max(int(tensor.byte_size()), 1),
+                    "size_bytes": max(size_bytes, 1),
                     "home_tier": home_tier,
                     "needs_restore": home_tier in {"input", "const", "slow"},
                     "fast_expr": fast_expr,
@@ -1368,6 +1933,117 @@ class X86Backend(BackendBase):
         lines = [
             "/* Pipeline step helper functions */",
             "static volatile uint64_t _nnc_pipeline_touch_sink = 0;",
+            "",
+            "static int64_t _nnc_min_i64(int64_t lhs, int64_t rhs) {",
+            "    return lhs < rhs ? lhs : rhs;",
+            "}",
+            "",
+            "static int64_t _nnc_pipeline_dtype_size(nnc_dtype_t dtype) {",
+            "    switch (dtype) {",
+            "        case NNC_DTYPE_FLOAT16: return 2;",
+            "        case NNC_DTYPE_INT8: return 1;",
+            "        case NNC_DTYPE_UINT8: return 1;",
+            "        case NNC_DTYPE_BOOL: return 1;",
+            "        case NNC_DTYPE_INT64: return 8;",
+            "        case NNC_DTYPE_FLOAT32:",
+            "        case NNC_DTYPE_INT32:",
+            "        default: return 4;",
+            "    }",
+            "}",
+            "",
+            "static int64_t _nnc_pipeline_tile_nbytes(const Tensor* tensor, int64_t tile_h, int64_t tile_w) {",
+            "    if (tensor == NULL || tensor->shape == NULL || tensor->ndim != 4) {",
+            "        return 0;",
+            "    }",
+            "    return _nnc_pipeline_dtype_size(tensor->dtype) * tensor->shape[1] * tile_h * tile_w;",
+            "}",
+            "",
+            "static void _nnc_pipeline_stage_nchw_tile_with_origin(",
+            "    const Tensor* src,",
+            "    void* dst,",
+            "    int64_t batch_index,",
+            "    int64_t h_origin,",
+            "    int64_t w_origin,",
+            "    int64_t tile_h,",
+            "    int64_t tile_w",
+            ") {",
+            "    if (src == NULL || dst == NULL || src->data == NULL || src->shape == NULL || src->ndim != 4) {",
+            "        return;",
+            "    }",
+            "    int64_t elem_size = _nnc_pipeline_dtype_size(src->dtype);",
+            "    int64_t channels = src->shape[1];",
+            "    int64_t full_h = src->shape[2];",
+            "    int64_t full_w = src->shape[3];",
+            "    uint8_t* dst_bytes = (uint8_t*)dst;",
+            "    const uint8_t* src_bytes = (const uint8_t*)src->data;",
+            "    memset(dst_bytes, 0, (size_t)(elem_size * channels * tile_h * tile_w));",
+            "    for (int64_t channel = 0; channel < channels; ++channel) {",
+            "        for (int64_t tile_row = 0; tile_row < tile_h; ++tile_row) {",
+            "            int64_t src_row = h_origin + tile_row;",
+            "            if (src_row < 0 || src_row >= full_h) {",
+            "                continue;",
+            "            }",
+            "            for (int64_t tile_col = 0; tile_col < tile_w; ++tile_col) {",
+            "                int64_t src_col = w_origin + tile_col;",
+            "                if (src_col < 0 || src_col >= full_w) {",
+            "                    continue;",
+            "                }",
+            "                int64_t src_offset = ((((batch_index * channels) + channel) * full_h + src_row) * full_w + src_col) * elem_size;",
+            "                int64_t dst_offset = (((channel * tile_h) + tile_row) * tile_w + tile_col) * elem_size;",
+            "                memcpy(dst_bytes + dst_offset, src_bytes + src_offset, (size_t)elem_size);",
+            "            }",
+            "        }",
+            "    }",
+            "}",
+            "",
+            "static void _nnc_pipeline_stage_nchw_tile(",
+            "    const Tensor* src,",
+            "    void* dst,",
+            "    int64_t batch_index,",
+            "    int64_t h_origin,",
+            "    int64_t w_origin,",
+            "    int64_t tile_h,",
+            "    int64_t tile_w",
+            ") {",
+            "    _nnc_pipeline_stage_nchw_tile_with_origin(src, dst, batch_index, h_origin, w_origin, tile_h, tile_w);",
+            "}",
+            "",
+            "static void _nnc_pipeline_commit_nchw_tile(",
+            "    const void* src,",
+            "    Tensor* dst,",
+            "    int64_t batch_index,",
+            "    int64_t h_origin,",
+            "    int64_t w_origin,",
+            "    int64_t tile_h,",
+            "    int64_t tile_w",
+            ") {",
+            "    if (src == NULL || dst == NULL || dst->data == NULL || dst->shape == NULL || dst->ndim != 4) {",
+            "        return;",
+            "    }",
+            "    int64_t elem_size = _nnc_pipeline_dtype_size(dst->dtype);",
+            "    int64_t channels = dst->shape[1];",
+            "    int64_t full_h = dst->shape[2];",
+            "    int64_t full_w = dst->shape[3];",
+            "    const uint8_t* src_bytes = (const uint8_t*)src;",
+            "    uint8_t* dst_bytes = (uint8_t*)dst->data;",
+            "    for (int64_t channel = 0; channel < channels; ++channel) {",
+            "        for (int64_t tile_row = 0; tile_row < tile_h; ++tile_row) {",
+            "            int64_t dst_row = h_origin + tile_row;",
+            "            if (dst_row < 0 || dst_row >= full_h) {",
+            "                continue;",
+            "            }",
+            "            for (int64_t tile_col = 0; tile_col < tile_w; ++tile_col) {",
+            "                int64_t dst_col = w_origin + tile_col;",
+            "                if (dst_col < 0 || dst_col >= full_w) {",
+            "                    continue;",
+            "                }",
+            "                int64_t src_offset = (((channel * tile_h) + tile_row) * tile_w + tile_col) * elem_size;",
+            "                int64_t dst_offset = ((((batch_index * channels) + channel) * full_h + dst_row) * full_w + dst_col) * elem_size;",
+            "                memcpy(dst_bytes + dst_offset, src_bytes + src_offset, (size_t)elem_size);",
+            "            }",
+            "        }",
+            "    }",
+            "}",
             "",
             "static void _nnc_pipeline_touch_tensor_read(const Tensor* tensor) {",
             "    if (tensor == NULL || tensor->data == NULL || tensor->nbytes <= 0) {",
@@ -1884,6 +2560,15 @@ class X86Backend(BackendBase):
                 scheduled_plan,
                 pipeline_codegen_metadata,
             )
+            if not bool(getattr(scheduled_plan, "transfer_points", ())):
+                pipeline_codegen_metadata = self._augment_parallel_runtime_for_scheduled_tile_streaming(
+                    ctx,
+                    pipeline_codegen_metadata,
+                )
+                pipeline_codegen_metadata = self._augment_parallel_runtime_for_scheduled_home_execution(
+                    ctx,
+                    pipeline_codegen_metadata,
+                )
 
         # Check for legacy spill plan
         spill_plan = get_spill_plan(ctx)
@@ -4331,6 +5016,9 @@ run: model
         prefer_scheduled_plan = self._prefer_scheduled_memory_plan(ctx, scheduled_plan)
         tile_aware_runtime_plan = self._get_tile_aware_runtime_plan(ctx, alloc_plan)
         tile_aware_tensor_bindings = tile_aware_runtime_plan.get("tensor_bindings", {})
+        scheduled_tile_streaming_internal_tensors = self._scheduled_tile_streaming_internal_tensor_names(
+            ctx
+        )
         fallback_to_linear_storage = (
             not prefer_scheduled_plan
             and alloc_plan is not None
@@ -4441,7 +5129,13 @@ run: model
             shape_init = ", ".join(str(d) if isinstance(d, (int, float)) else "-1" for d in shape_list)
 
             data_init = "NULL"
-            if tensor_name in tile_aware_tensor_bindings:
+            force_detached_home_tensor = (
+                prefer_scheduled_plan
+                and self._should_use_scheduled_home_execution(ctx)
+                and tensor_name not in ctx.graph.inputs
+                and tensor_name not in scheduled_tile_streaming_internal_tensors
+            )
+            if not force_detached_home_tensor and tensor_name in tile_aware_tensor_bindings:
                 binding = tile_aware_tensor_bindings[tensor_name]
                 if binding["kind"] in {"input_staging", "static_buffer"}:
                     buffer_name = binding["symbol"]
@@ -4461,7 +5155,7 @@ run: model
                     data_init = buffer_name
                 elif binding["kind"] == "fast_pool":
                     data_init = f"{fast_pool_name} + {binding['offset']}"
-            elif tensor_name in tensor_offsets:
+            elif not force_detached_home_tensor and tensor_name in tensor_offsets:
                 pool_type, offset = tensor_offsets[tensor_name]
                 if uses_unified_runtime and tensor_name in ctx.graph.inputs:
                     input_buffer_name = f"_nnc_input_buffer_{var_name}"
@@ -4522,6 +5216,14 @@ run: model
 
         if prefer_scheduled_plan and scheduled_plan is not None:
             fast_memory_size = max(int(scheduled_plan.total_fast_memory), 1)
+            fast_memory_size = max(
+                fast_memory_size,
+                self._scheduled_tile_streaming_required_fast_memory(ctx),
+            )
+            if self._should_use_scheduled_home_execution(ctx):
+                requested_max_memory = ctx.metadata.get("max_memory")
+                if isinstance(requested_max_memory, int) and requested_max_memory > 0:
+                    fast_memory_size = min(fast_memory_size, requested_max_memory)
             transfer_count = len(getattr(scheduled_plan, "transfer_points", ()))
             lines = [
                 "/* Scheduled Native Memory Pools */",

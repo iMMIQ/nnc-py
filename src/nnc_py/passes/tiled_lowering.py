@@ -12,6 +12,7 @@ from nnc_py.ir.execution_plan import (
     TensorAccessPlan,
     TileRegion,
 )
+from nnc_py.ir.node import OpType
 from nnc_py.ir.tensor import TensorType
 from nnc_py.ir.types import DataType
 from nnc_py.ir.types import GenericBlockedLayoutKind
@@ -145,7 +146,110 @@ def lower_phase1_nodes(
             execution_plans[node.name],
         )
 
+    _propagate_tile_execution_groups(ctx, execution_plans, region_sizes)
     return execution_plans, region_sizes
+
+
+def _propagate_tile_execution_groups(
+    ctx: CompileContext,
+    execution_plans: dict[str, NodeExecutionPlan],
+    region_sizes: dict[str, dict[str, dict[str, int]]],
+) -> None:
+    for node in ctx.graph.topological_sort():
+        if node.name in execution_plans:
+            continue
+        if node.op_type not in {OpType.RELU, OpType.ADD, OpType.FUSED_ADD_RELU}:
+            continue
+        if len(node.outputs) != 1:
+            continue
+
+        producer_plan, flow_tensor_name = _find_tiled_flow_producer_plan(ctx, execution_plans, node)
+        if producer_plan is None or flow_tensor_name is None:
+            continue
+
+        producer_output_access = next(
+            (
+                access
+                for access in producer_plan.output_accesses
+                if access.tensor_name == flow_tensor_name
+            ),
+            None,
+        )
+        if producer_output_access is None:
+            continue
+
+        tile_region = producer_output_access.tile_region
+        layout_class = producer_output_access.layout_class
+        if not tile_region.logical_extents:
+            continue
+
+        input_accesses: list[TensorAccessPlan] = []
+        for input_name in node.inputs:
+            tensor = _get_tensor(ctx, input_name)
+            output_tensor = _get_tensor(ctx, node.outputs[0])
+            if tensor is None or output_tensor is None:
+                input_accesses = []
+                break
+            if tensor.dtype != output_tensor.dtype or tensor.byte_size() != output_tensor.byte_size():
+                input_accesses = []
+                break
+            input_accesses.append(
+                TensorAccessPlan(
+                    tensor_name=input_name,
+                    layout_class=layout_class,
+                    tile_region=tile_region,
+                    memory_region=MemoryRegionKind.TILE,
+                )
+            )
+        if not input_accesses:
+            continue
+
+        output_accesses = (
+            TensorAccessPlan(
+                tensor_name=node.outputs[0],
+                layout_class=layout_class,
+                tile_region=tile_region,
+                memory_region=MemoryRegionKind.TILE,
+            ),
+        )
+        execution_plans[node.name] = NodeExecutionPlan(
+            node_name=node.name,
+            op_family=node.op_type.name.lower(),
+            tile_axes=producer_plan.tile_axes,
+            layout_class=layout_class,
+            memory_regions=(MemoryRegionKind.TILE,),
+            input_accesses=tuple(input_accesses),
+            output_accesses=output_accesses,
+        )
+        region_sizes[node.name] = {
+            "tensor_bytes": {
+                access.tensor_name: _estimate_tile_tensor_bytes(
+                    ctx,
+                    access.tensor_name,
+                    tile_region.logical_extents,
+                )
+                or 0
+                for access in (*input_accesses, *output_accesses)
+            },
+            "region_bytes": {},
+        }
+
+
+def _find_tiled_flow_producer_plan(
+    ctx: CompileContext,
+    execution_plans: dict[str, NodeExecutionPlan],
+    node,
+) -> tuple[NodeExecutionPlan | None, str | None]:
+    for input_name in node.inputs:
+        producers = ctx.graph.get_producers(input_name)
+        if len(producers) != 1:
+            continue
+        producer_plan = execution_plans.get(producers[0].name)
+        if producer_plan is None:
+            continue
+        if any(access.tensor_name == input_name for access in producer_plan.output_accesses):
+            return producer_plan, input_name
+    return None, None
 
 
 def _layout_class_for(layout: object | None) -> LayoutClass:
@@ -434,7 +538,7 @@ def _estimate_node_working_set_bytes(
     output_tile_extents: tuple[int, int],
     scratch_bytes: int,
 ) -> int | None:
-    total_bytes = scratch_bytes
+    total_bytes = scratch_bytes + _estimate_persistent_tensor_bytes(ctx, node)
     input_tile_extents = _input_tile_extents_for(node.attrs, output_tile_extents)
 
     activation_input = _get_tensor(ctx, node.inputs[0]) if node.inputs else None
@@ -452,6 +556,18 @@ def _estimate_node_working_set_bytes(
                 return None
             total_bytes += output_tile_bytes
 
+    return total_bytes
+
+
+def _estimate_persistent_tensor_bytes(ctx: CompileContext, node) -> int:
+    total_bytes = 0
+    for input_name in node.inputs[1:]:
+        tensor = _get_tensor(ctx, input_name)
+        if tensor is None:
+            continue
+        tensor_bytes = tensor.byte_size()
+        if tensor_bytes > 0:
+            total_bytes += tensor_bytes
     return total_bytes
 
 

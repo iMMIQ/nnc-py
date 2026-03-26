@@ -102,7 +102,11 @@ def lower_execution_plans_to_schedule_problem(
     for node in ctx.graph.topological_sort():
         plan = ctx.get_node_execution_plan(node.name) or _synthesize_execution_plan(ctx, node)
         for input_access in plan.input_accesses:
-            external_spec = _external_value_spec_for_access(ctx, input_access)
+            external_spec = _external_value_spec_for_access(
+                ctx,
+                input_access,
+                node_name=plan.node_name,
+            )
             existing_spec = external_values_by_name.get(external_spec.name)
             if existing_spec is None or external_spec.size_bytes > existing_spec.size_bytes:
                 external_values_by_name[external_spec.name] = external_spec
@@ -205,7 +209,8 @@ def _build_large_op_steps(
     node_name = plan.node_name
     dma_in_step_id = f"{node_name}.dma_in"
     dma_input_specs = tuple(
-        _external_value_spec_for_access(ctx, access) for access in plan.input_accesses
+        _external_value_spec_for_access(ctx, access, node_name=plan.node_name)
+        for access in plan.input_accesses
     )
     staged_inputs: list[_ValueSpec] = []
     node_input_specs: list[_ValueSpec] = []
@@ -214,6 +219,7 @@ def _build_large_op_steps(
             staged_spec = _value_spec_for_access(
                 ctx,
                 access,
+                node_name=plan.node_name,
                 staged_name=_staged_value_name(node_name, access.tensor_name),
                 producer_step_id=dma_in_step_id,
                 include_halo=True,
@@ -262,6 +268,7 @@ def _build_large_op_steps(
         _value_spec_for_access(
             ctx,
             access,
+            node_name=plan.node_name,
             staged_name=_staged_value_name(node_name, access.tensor_name),
             producer_step_id=compute_step_id,
         )
@@ -308,12 +315,14 @@ def _build_shape_step(
 ) -> _NodeLowering:
     step_id = f"{plan.node_name}.shape"
     input_specs = tuple(
-        _external_value_spec_for_access(ctx, access) for access in plan.input_accesses
+        _external_value_spec_for_access(ctx, access, node_name=plan.node_name)
+        for access in plan.input_accesses
     )
     output_specs = tuple(
         _value_spec_for_access(
             ctx,
             access,
+            node_name=plan.node_name,
             staged_name=_staged_value_name(plan.node_name, access.tensor_name),
             producer_step_id=step_id,
         )
@@ -345,12 +354,14 @@ def _build_single_compute_step(
 ) -> _NodeLowering:
     step_id = f"{plan.node_name}.compute"
     input_specs = tuple(
-        _external_value_spec_for_access(ctx, access) for access in plan.input_accesses
+        _external_value_spec_for_access(ctx, access, node_name=plan.node_name)
+        for access in plan.input_accesses
     )
     output_specs = tuple(
         _value_spec_for_access(
             ctx,
             access,
+            node_name=plan.node_name,
             staged_name=_staged_value_name(plan.node_name, access.tensor_name),
             producer_step_id=step_id,
         )
@@ -580,13 +591,16 @@ def _normalize_op_family(node: Node) -> str:
 
 
 def _external_value_spec_for_access(
-    ctx: CompileContext, access: TensorAccessPlan
+    ctx: CompileContext,
+    access: TensorAccessPlan,
+    *,
+    node_name: str | None = None,
 ) -> _ValueSpec:
     tensor = ctx.graph.get_tensor(access.tensor_name)
     return _ValueSpec(
         name=access.tensor_name,
-        size_bytes=_access_size_bytes(ctx, access),
-        shape=_access_shape(ctx, access),
+        size_bytes=_access_size_bytes(ctx, access, node_name=node_name),
+        shape=_access_shape(ctx, access, node_name=node_name),
         dtype=tensor.dtype.value,
         graph_tensor_name=access.tensor_name,
         producer_step_id=None,
@@ -597,6 +611,7 @@ def _value_spec_for_access(
     ctx: CompileContext,
     access: TensorAccessPlan,
     *,
+    node_name: str | None = None,
     staged_name: str,
     producer_step_id: str,
     include_halo: bool = False,
@@ -604,8 +619,18 @@ def _value_spec_for_access(
     tensor = ctx.graph.get_tensor(access.tensor_name)
     return _ValueSpec(
         name=staged_name,
-        size_bytes=_access_size_bytes(ctx, access, include_halo=include_halo),
-        shape=_access_shape(ctx, access, include_halo=include_halo),
+        size_bytes=_access_size_bytes(
+            ctx,
+            access,
+            node_name=node_name,
+            include_halo=include_halo,
+        ),
+        shape=_access_shape(
+            ctx,
+            access,
+            node_name=node_name,
+            include_halo=include_halo,
+        ),
         dtype=tensor.dtype.value,
         graph_tensor_name=access.tensor_name,
         producer_step_id=producer_step_id,
@@ -640,17 +665,28 @@ def _access_shape(
     ctx: CompileContext,
     access: TensorAccessPlan,
     *,
+    node_name: str | None = None,
     include_halo: bool = False,
 ) -> tuple[int, ...]:
+    tensor = ctx.graph.get_tensor(access.tensor_name)
     if access.tile_region.logical_extents:
         extents = [int(max(dim, 0)) for dim in access.tile_region.logical_extents]
-        if include_halo and len(access.tile_region.halo_extents) == len(extents):
+        if (
+            include_halo
+            and tensor is not None
+            and len(access.tile_region.halo_extents) == len(extents) == len(tensor.shape.dims)
+        ):
             extents = [
                 extent + (2 * max(int(halo), 0))
                 for extent, halo in zip(extents, access.tile_region.halo_extents)
             ]
+        if tensor is not None and len(extents) < len(tensor.shape.dims):
+            prefix = tuple(
+                int(dim) if isinstance(dim, int) else 1
+                for dim in tensor.shape.dims[: len(tensor.shape.dims) - len(extents)]
+            )
+            return prefix + tuple(extents)
         return tuple(extents)
-    tensor = ctx.graph.get_tensor(access.tensor_name)
     dims: list[int] = []
     for dim in tensor.shape.dims:
         dims.append(int(dim) if isinstance(dim, int) else 1)
@@ -661,10 +697,14 @@ def _access_size_bytes(
     ctx: CompileContext,
     access: TensorAccessPlan,
     *,
+    node_name: str | None = None,
     include_halo: bool = False,
 ) -> int:
     tensor = ctx.graph.get_tensor(access.tensor_name)
     elem_size = _DTYPE_SIZES[tensor.dtype]
+    hinted_bytes = _access_region_hint_bytes(ctx, access, node_name=node_name)
+    if hinted_bytes is not None:
+        return max(hinted_bytes, elem_size)
     shape = _access_shape(ctx, access, include_halo=include_halo)
     if access.tile_region.logical_extents:
         elements = _shape_elements(shape)
@@ -674,6 +714,40 @@ def _access_size_bytes(
     if tensor_bytes > 0:
         return tensor_bytes
     return elem_size
+
+
+def _access_region_hint_bytes(
+    ctx: CompileContext,
+    access: TensorAccessPlan,
+    *,
+    node_name: str | None = None,
+) -> int | None:
+    region_hints_by_node = ctx.metadata.get("node_execution_plan_region_sizes", {})
+    if not isinstance(region_hints_by_node, dict):
+        return None
+    node_hint_items: list[dict[str, object]] = []
+    if node_name is not None:
+        node_hints = region_hints_by_node.get(node_name)
+        if isinstance(node_hints, dict):
+            node_hint_items.append(node_hints)
+    else:
+        node_hint_items.extend(
+            node_hints
+            for node_hints in region_hints_by_node.values()
+            if isinstance(node_hints, dict)
+        )
+    for node_hints in node_hint_items:
+        if not isinstance(node_hints, dict):
+            continue
+        tensor_bytes = node_hints.get("tensor_bytes", {})
+        if not isinstance(tensor_bytes, dict):
+            continue
+        hinted_bytes = tensor_bytes.get(access.tensor_name)
+        if isinstance(hinted_bytes, int) and hinted_bytes > 0:
+            return hinted_bytes
+    return None
+
+
 def _scratch_bytes(ctx: CompileContext, plan: NodeExecutionPlan) -> int:
     region_hints_by_node = ctx.metadata.get("node_execution_plan_region_sizes", {})
     if isinstance(region_hints_by_node, dict):

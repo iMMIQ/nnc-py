@@ -317,6 +317,89 @@ def _make_two_conv_shared_weight_context() -> CompileContext:
     return ctx
 
 
+def _make_conv_with_2d_tile_extents_context() -> CompileContext:
+    graph = Graph("conv_2d_tile_extents")
+    graph.inputs = ["input"]
+    graph.outputs = ["conv_out"]
+
+    graph.add_tensor(
+        TensorType(
+            name="input",
+            dtype=DataType.FLOAT32,
+            shape=TensorShape([1, 16, 64, 64], layout=MemoryLayout.NCHW),
+        )
+    )
+    graph.add_tensor(
+        TensorType(
+            name="conv_weight",
+            dtype=DataType.FLOAT32,
+            shape=TensorShape([16, 16, 3, 3], layout=MemoryLayout.OIHW),
+        )
+    )
+    graph.add_tensor(
+        TensorType(
+            name="conv_out",
+            dtype=DataType.FLOAT32,
+            shape=TensorShape([1, 16, 64, 64], layout=MemoryLayout.NCHW),
+        )
+    )
+
+    graph.add_node(
+        Node(
+            op_type=OpType.CONV2D,
+            name="conv0",
+            inputs=["input", "conv_weight"],
+            outputs=["conv_out"],
+            attrs={"kernel_shape": [3, 3], "pads": [1, 1, 1, 1], "strides": [1, 1]},
+        )
+    )
+
+    ctx = CompileContext(graph=graph, target="x86", optimization_level=3)
+    set_node_execution_plan(
+        ctx,
+        NodeExecutionPlan(
+            node_name="conv0",
+            op_family="conv2d",
+            tile_axes=("h", "w"),
+            layout_class=LayoutClass.BLOCKED_ACTIVATION,
+            memory_regions=(MemoryRegionKind.PERSISTENT, MemoryRegionKind.TILE, MemoryRegionKind.SCRATCH),
+            input_accesses=(
+                TensorAccessPlan(
+                    tensor_name="input",
+                    layout_class=LayoutClass.BLOCKED_ACTIVATION,
+                    tile_region=TileRegion(logical_extents=(17, 34), halo_extents=(1, 1)),
+                    memory_region=MemoryRegionKind.TILE,
+                ),
+                TensorAccessPlan(
+                    tensor_name="conv_weight",
+                    layout_class=LayoutClass.BLOCKED_WEIGHT,
+                    memory_region=MemoryRegionKind.PERSISTENT,
+                ),
+            ),
+            output_accesses=(
+                TensorAccessPlan(
+                    tensor_name="conv_out",
+                    layout_class=LayoutClass.BLOCKED_ACTIVATION,
+                    tile_region=TileRegion(logical_extents=(16, 32)),
+                    memory_region=MemoryRegionKind.TILE,
+                ),
+            ),
+        ),
+    )
+    ctx.metadata["node_execution_plan_region_sizes"] = {
+        "conv0": {
+            "tensor_bytes": {
+                "input": 1 * 16 * 17 * 34 * 4,
+                "conv_out": 1 * 16 * 16 * 32 * 4,
+            },
+            "region_bytes": {
+                "scratch": 2048,
+            },
+        },
+    }
+    return ctx
+
+
 def test_tiled_conv_lowers_to_mixed_granularity_schedule_problem():
     ctx = _make_conv_relu_context()
 
@@ -564,6 +647,23 @@ def test_tiled_conv_prefers_region_size_hint_for_scratch_bytes():
         if step.id == "conv0.compute"
     )
     assert conv_compute.sram_temp_bytes == 4242
+
+
+def test_tiled_conv_with_2d_extents_preserves_tile_bytes_for_scheduled_values():
+    ctx = _make_conv_with_2d_tile_extents_context()
+
+    _run_pipeline_step_lowering(ctx)
+
+    problem = ctx.pipeline_schedule_problem
+    assert problem is not None
+
+    scheduled_values = {value.name: value for value in problem.scheduled_values}
+    conv_input_name = _staged_value_name("conv0", "input")
+    conv_output_name = _staged_value_name("conv0", "conv_out")
+
+    assert scheduled_values[conv_input_name].size_bytes == 1 * 16 * 17 * 34 * 4
+    assert scheduled_values[conv_output_name].size_bytes == 1 * 16 * 16 * 32 * 4
+    assert scheduled_values["input"].size_bytes == 1 * 16 * 17 * 34 * 4
 
 
 def test_shared_graph_weight_stages_to_distinct_node_local_sram_values():

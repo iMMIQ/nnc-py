@@ -128,6 +128,14 @@ def test_tile_execution_group_allows_conv_add_relu_coverage_for_memory_planning_
     assert plan is not None
     assert plan.strategy_name == "tile_regions_v3"
 
+    execution_plans = ctx.metadata.get("node_execution_plans", {})
+    assert "conv0" in execution_plans
+    assert "fused_add_relu_1" in execution_plans
+    assert execution_plans["fused_add_relu_1"].tile_axes == ("h", "w")
+    assert execution_plans["fused_add_relu_1"].output_accesses[0].tile_region.logical_extents == (
+        execution_plans["conv0"].output_accesses[0].tile_region.logical_extents
+    )
+
     runtime_plan = X86Backend()._get_tile_aware_runtime_plan(ctx, plan)
     assert set(runtime_plan["wrapper_nodes"]) == {"conv0", "fused_add_relu_1"}
     assert runtime_plan["tensor_bindings"]["conv_out"]["kind"] == "fast_pool"
