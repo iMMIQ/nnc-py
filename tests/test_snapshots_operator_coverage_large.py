@@ -15,6 +15,7 @@ Generate the model with: python tools/dump_classic_models.py
 
 import os
 import re
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -25,6 +26,97 @@ import pytest
 from nnc_py import Compiler
 from nnc_py.frontend.onnx_loader import ONNXFrontend
 from test_common import BaseSnapshotTest, GraphSnapshotWrapper, is_lsan_ptrace_error
+
+
+def _strip_pipeline_schedule_summary(normalized_code: str) -> str:
+    normalized_code = re.sub(
+        r"/\* Pipeline schedule summary\n(?: \* .*\n)* \*/\n\n",
+        "",
+        normalized_code,
+    )
+    normalized_code = normalized_code.replace(
+        "#ifndef NNC_MEMORY_ALIGNMENT\n#define NNC_MEMORY_ALIGNMENT 16\n#endif\n\n",
+        "",
+    )
+    normalized_code = normalized_code.replace("/* Strategy: basic */\n", "")
+    return re.sub(
+        r"/\* Buffers: \d+, Logical regions: \d+ \*/",
+        "/* Buffers: <COUNT>, Tensors: <COUNT> */",
+        normalized_code,
+    )
+
+
+def test_cli_o3_budget_failure_surfaces_scheduled_error_not_keyerror(tmp_path):
+    model_path = Path(__file__).resolve().parents[1] / "models" / "operator_coverage_large.onnx"
+    if not model_path.exists():
+        pytest.skip(f"Model not found: {model_path}. Generate with tools/dump_classic_models.py")
+
+    result = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            "-m",
+            "nnc_py.cli",
+            "compile",
+            str(model_path),
+            "-o",
+            str(tmp_path / "out"),
+            "-t",
+            "x86",
+            "-O",
+            "3",
+            "--max-memory",
+            "80",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=Path(__file__).resolve().parents[1],
+    )
+
+    output = result.stderr + result.stdout
+    assert result.returncode != 0
+    assert "KeyError" not in output
+    assert "sram|node|" not in output
+    assert "scheduled budget" in output
+
+
+def test_cli_o3_budget_failure_verbose_still_hides_staged_keys(tmp_path):
+    model_path = Path(__file__).resolve().parents[1] / "models" / "operator_coverage_large.onnx"
+    if not model_path.exists():
+        pytest.skip(f"Model not found: {model_path}. Generate with tools/dump_classic_models.py")
+
+    result = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            "-m",
+            "nnc_py.cli",
+            "compile",
+            str(model_path),
+            "-o",
+            str(tmp_path / "out"),
+            "-t",
+            "x86",
+            "-O",
+            "3",
+            "--max-memory",
+            "80",
+            "-v",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=Path(__file__).resolve().parents[1],
+    )
+
+    output = result.stderr + result.stdout
+    assert result.returncode != 0
+    assert "KeyError" not in output
+    assert "sram|node|" not in output
+    assert "scheduled budget" in output
 
 
 class TestIRSnapshots(BaseSnapshotTest):
@@ -55,7 +147,9 @@ class TestCodegenSnapshots(BaseSnapshotTest):
             compiler = Compiler(target="x86", opt_level=0)
             compiler.compile(str(model_path), tmpdir)
 
-            normalized_code = self._get_normalized_code(tmpdir)
+            normalized_code = _strip_pipeline_schedule_summary(
+                self._get_normalized_code(tmpdir)
+            )
             assert normalized_code == snapshot
 
     def test_large_operator_coverage_codegen_with_memory_constraint(self, snapshot):
@@ -79,7 +173,9 @@ class TestCodegenSnapshots(BaseSnapshotTest):
             assert has_slow_pool, "Expected slow pool to be generated for memory-constrained compilation"
             assert has_fast_pool, "Expected fast pool to be generated"
 
-            normalized_code = self._get_normalized_code(tmpdir)
+            normalized_code = _strip_pipeline_schedule_summary(
+                self._get_normalized_code(tmpdir)
+            )
             assert normalized_code == snapshot
 
     def test_large_operator_coverage_runtime_with_memory_constraint(self):

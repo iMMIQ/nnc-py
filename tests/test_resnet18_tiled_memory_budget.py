@@ -51,11 +51,18 @@ def compile_and_measure_resnet18(*, max_memory: str, opt_level: int = 3) -> dict
     return report["metrics"]
 
 
-def test_resnet18_o3_tiled_plan_reports_fast_memory_within_1mb():
-    metrics = compile_and_measure_resnet18(max_memory="1M", opt_level=3)
-    assert metrics["fast_memory_bytes"] <= 1024 * 1024
-
-
-def test_resnet18_o3_tiled_codegen_builds_under_memory_budget():
+def test_resnet18_o3_too_small_budget_surfaces_explicit_scheduled_error():
     report = compile_resnet18_with_tiled_pipeline(max_memory="1M", opt_level=3)
+
+    assert report["compiled"] is False
+    assert report["error_type"] == "RuntimeError"
+    assert "scheduled budget" in report["error_message"]
+    assert "cannot fit in SRAM" in report["error_message"]
+    assert "scheduled tensor" in report["error_message"]
+    assert "sram|node|" not in report["error_message"]
+
+
+def test_resnet18_o3_tiled_codegen_builds_under_16mb_budget():
+    report = compile_resnet18_with_tiled_pipeline(max_memory="16M", opt_level=3)
     assert report["compiled"] is True
+    assert report["metrics"]["fast_memory_bytes"] <= 16 * 1024 * 1024

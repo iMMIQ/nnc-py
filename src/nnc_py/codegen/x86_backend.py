@@ -95,6 +95,8 @@ class X86Backend(BackendBase):
         self,
         ctx: CompileContext,
         alloc_plan: "MemoryAllocationPlan | None",
+        *,
+        scheduled_plan: Any | None = None,
     ) -> dict[str, Any]:
         """Build schedule-visible metadata for generated simulation code."""
         try:
@@ -105,7 +107,11 @@ class X86Backend(BackendBase):
                 "summary_lines": [
                     "schedule_metadata=invalid",
                     f"schedule_metadata_error={self._sanitize_c_comment_text(str(exc))}",
-                    self._build_memory_plan_summary_line(alloc_plan, ctx),
+                    self._build_memory_plan_summary_line(
+                        alloc_plan,
+                        ctx,
+                        scheduled_plan=scheduled_plan,
+                    ),
                 ],
                 "node_comments": {},
                 "parallel_runtime": None,
@@ -120,7 +126,13 @@ class X86Backend(BackendBase):
                 summary_lines.append(
                     f"fallback={self._sanitize_c_comment_text(str(fallback_reason))}"
                 )
-            summary_lines.append(self._build_memory_plan_summary_line(alloc_plan, ctx))
+            summary_lines.append(
+                self._build_memory_plan_summary_line(
+                    alloc_plan,
+                    ctx,
+                    scheduled_plan=scheduled_plan,
+                )
+            )
             return {
                 "summary_lines": summary_lines,
                 "node_comments": node_comments,
@@ -133,7 +145,11 @@ class X86Backend(BackendBase):
             f"feasible={'yes' if schedule_result.feasible else 'no'}",
             f"makespan={schedule_result.makespan}",
             f"scheduled_steps={len(schedule_result.scheduled_steps)}",
-            self._build_memory_plan_summary_line(alloc_plan, ctx),
+            self._build_memory_plan_summary_line(
+                alloc_plan,
+                ctx,
+                scheduled_plan=scheduled_plan,
+            ),
         ]
         diagnostics_summary = self._format_json_mapping(schedule_result.diagnostics)
         if diagnostics_summary:
@@ -157,7 +173,12 @@ class X86Backend(BackendBase):
             }
 
         problem_steps = {step.id: step for step in schedule_problem.steps}
-        value_bindings = self._build_schedule_value_bindings(alloc_plan, schedule_result)
+        value_bindings = self._build_schedule_value_bindings(
+            ctx,
+            alloc_plan,
+            schedule_result,
+            scheduled_plan=scheduled_plan,
+        )
 
         for scheduled_step in sorted(
             schedule_result.scheduled_steps,
@@ -312,6 +333,56 @@ class X86Backend(BackendBase):
                 sanitized.append("_")
         return "nnc_pipeline_step_" + "".join(sanitized)
 
+    def _get_scheduled_memory_plan(self, ctx: CompileContext) -> Any | None:
+        plan = ctx.metadata.get("scheduled_memory_plan")
+        if plan is None:
+            return None
+        if not hasattr(plan, "fast_allocations") or not hasattr(plan, "transfer_points"):
+            return None
+        return plan
+
+    def _prefer_scheduled_memory_plan(
+        self,
+        ctx: CompileContext,
+        scheduled_plan: Any | None = None,
+    ) -> bool:
+        if scheduled_plan is None:
+            scheduled_plan = self._get_scheduled_memory_plan(ctx)
+        return (
+            scheduled_plan is not None
+            and ctx.optimization_level >= 3
+            and bool(ctx.metadata.get("pipeline_scheduler_enabled"))
+        )
+
+    def _build_schedule_value_graph_tensor_map(
+        self,
+        ctx: CompileContext,
+    ) -> dict[str, str]:
+        mapping: dict[str, str] = {}
+        for values in (
+            getattr(ctx.metadata.get("pipeline_schedule_result"), "scheduled_values", ()),
+            getattr(ctx.metadata.get("pipeline_schedule_problem"), "scheduled_values", ()),
+        ):
+            for value in values or ():
+                value_name = getattr(value, "name", None)
+                graph_tensor_name = getattr(value, "graph_tensor_name", None)
+                if not isinstance(value_name, str) or not isinstance(graph_tensor_name, str):
+                    continue
+                if not graph_tensor_name:
+                    continue
+                mapping.setdefault(value_name, graph_tensor_name)
+        return mapping
+
+    def _resolve_schedule_value_graph_tensor_name(
+        self,
+        ctx: CompileContext,
+        value_name: str,
+    ) -> str | None:
+        graph_tensor_name = self._build_schedule_value_graph_tensor_map(ctx).get(value_name)
+        if graph_tensor_name:
+            return graph_tensor_name
+        return self._decode_schedule_value_graph_tensor_name(value_name)
+
     def _decode_schedule_value_graph_tensor_name(self, value_name: str) -> str | None:
         if value_name.startswith("sram|node|") and "|tensor|" in value_name:
             encoded_tensor = value_name.split("|tensor|", 1)[1]
@@ -330,7 +401,10 @@ class X86Backend(BackendBase):
     ) -> tuple[str, ...]:
         symbols: list[str] = []
         for value_name in value_names:
-            graph_tensor_name = self._decode_schedule_value_graph_tensor_name(value_name)
+            graph_tensor_name = self._resolve_schedule_value_graph_tensor_name(
+                ctx,
+                value_name,
+            )
             if graph_tensor_name is None:
                 continue
             if graph_tensor_name not in ctx.graph.tensors:
@@ -432,6 +506,64 @@ class X86Backend(BackendBase):
             dma_out_step = steps_by_id.get(f"{node.name}.dma_out")
             if dma_out_step is not None and dma_out_lines:
                 dma_out_step["custom_body_lines"] = tuple(dma_out_lines)
+
+        return cloned
+
+    def _augment_parallel_runtime_for_scheduled_spill(
+        self,
+        ctx: CompileContext,
+        scheduled_plan: Any,
+        pipeline_codegen_metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not self._has_parallel_runtime(pipeline_codegen_metadata):
+            return pipeline_codegen_metadata
+        if not getattr(scheduled_plan, "transfer_points", ()):
+            return pipeline_codegen_metadata
+
+        cloned = self._clone_pipeline_codegen_metadata(pipeline_codegen_metadata)
+        runtime = cloned.get("parallel_runtime")
+        if not isinstance(runtime, dict):
+            return pipeline_codegen_metadata
+
+        steps_by_id = {
+            str(step["step_id"]): step
+            for step in tuple(runtime.get("steps", ()))
+        }
+        for transfer_point in tuple(getattr(scheduled_plan, "transfer_points", ())):
+            step = steps_by_id.get(str(getattr(transfer_point, "step_id", "")))
+            if step is None:
+                continue
+
+            fast_expr = f"_nnc_fast_pool + {int(transfer_point.fast_offset)}"
+            slow_expr = f"_nnc_slow_pool + {int(transfer_point.slow_offset)}"
+            size_bytes = int(transfer_point.size_bytes)
+            tensor_value_name = transfer_point.resident_value_name or transfer_point.value_name
+            graph_tensor_name = self._resolve_schedule_value_graph_tensor_name(
+                ctx,
+                str(tensor_value_name),
+            )
+            tensor_symbol = None
+            if graph_tensor_name is not None:
+                tensor_symbol = ctx.tensor_symbols.get(graph_tensor_name, graph_tensor_name)
+
+            transfer_kind = getattr(getattr(transfer_point, "transfer_kind", None), "value", "")
+            custom_body_lines: list[str] = [f"/* {transfer_kind} */"]
+            if transfer_kind == "spill_dma":
+                if tensor_symbol is not None:
+                    custom_body_lines.append(f"{tensor_symbol}.data = {fast_expr};")
+                custom_body_lines.append(
+                    f"memcpy({slow_expr}, {fast_expr}, {size_bytes});"
+                )
+            elif transfer_kind == "reload_dma":
+                custom_body_lines.append(
+                    f"memcpy({fast_expr}, {slow_expr}, {size_bytes});"
+                )
+                if tensor_symbol is not None:
+                    custom_body_lines.append(f"{tensor_symbol}.data = {fast_expr};")
+            else:
+                continue
+
+            step["custom_body_lines"] = tuple(custom_body_lines)
 
         return cloned
 
@@ -726,7 +858,10 @@ class X86Backend(BackendBase):
         records: list[dict[str, Any]] = []
         seen_keys: set[tuple[str, str]] = set()
         for value_name in value_names:
-            graph_tensor_name = self._decode_schedule_value_graph_tensor_name(value_name)
+            graph_tensor_name = self._resolve_schedule_value_graph_tensor_name(
+                ctx,
+                value_name,
+            )
             if graph_tensor_name is None:
                 continue
             tensor = ctx.graph.tensors.get(graph_tensor_name)
@@ -1272,8 +1407,12 @@ class X86Backend(BackendBase):
         self,
         alloc_plan: "MemoryAllocationPlan | None",
         ctx: CompileContext,
+        *,
+        scheduled_plan: Any | None = None,
     ) -> str:
         """Return a compact summary line for memory planning metadata."""
+        if scheduled_plan is not None:
+            return "memory_plan_strategy=scheduled_native"
         if alloc_plan is not None:
             return f"memory_plan_strategy={alloc_plan.strategy_name}"
         if "memory_plan" in ctx.metadata:
@@ -1282,11 +1421,27 @@ class X86Backend(BackendBase):
 
     def _build_schedule_value_bindings(
         self,
+        ctx: CompileContext,
         alloc_plan: "MemoryAllocationPlan | None",
         schedule_result: Any,
+        *,
+        scheduled_plan: Any | None = None,
     ) -> dict[str, dict[str, Any]]:
         """Collect SRAM binding details keyed by scheduled value name."""
         value_bindings: dict[str, dict[str, Any]] = {}
+        if scheduled_plan is not None:
+            for allocation in sorted(
+                getattr(scheduled_plan, "fast_allocations", {}).values(),
+                key=lambda item: (
+                    getattr(item, "start_time", 0),
+                    getattr(item, "end_time", 0),
+                    getattr(item, "residency_id", ""),
+                ),
+            ):
+                binding = value_bindings.setdefault(allocation.value_name, {})
+                binding["offset"] = allocation.offset
+                binding["region"] = allocation.residency_id
+                binding["source"] = "scheduled_memory_plan"
         if alloc_plan is not None:
             for value_name, allocation in alloc_plan.tensor_allocations.items():
                 binding = value_bindings.setdefault(value_name, {})
@@ -1346,6 +1501,7 @@ class X86Backend(BackendBase):
 
         parts = [
             f"step_id={scheduled_step.step_id}",
+            f"kind={problem_step.step_kind.value}",
             f"resource={scheduled_step.resource_kind.value}",
             f"start={scheduled_step.start_time}",
             f"end={scheduled_step.end_time}",
@@ -1413,15 +1569,34 @@ class X86Backend(BackendBase):
 
         # Check for new MemoryAllocationPlan
         alloc_plan = get_memory_allocation_plan(ctx)
+        scheduled_plan = self._get_scheduled_memory_plan(ctx)
+        prefer_scheduled_plan = self._prefer_scheduled_memory_plan(ctx, scheduled_plan)
         tile_aware_runtime_plan = self._get_tile_aware_runtime_plan(ctx, alloc_plan)
-        pipeline_codegen_metadata = self._build_pipeline_codegen_metadata(ctx, alloc_plan)
+        pipeline_codegen_metadata = self._build_pipeline_codegen_metadata(
+            ctx,
+            alloc_plan,
+            scheduled_plan=scheduled_plan if prefer_scheduled_plan else None,
+        )
+        if prefer_scheduled_plan and scheduled_plan is not None:
+            pipeline_codegen_metadata = self._augment_parallel_runtime_for_scheduled_spill(
+                ctx,
+                scheduled_plan,
+                pipeline_codegen_metadata,
+            )
 
         # Check for legacy spill plan
         spill_plan = get_spill_plan(ctx)
 
         # Determine which plan to use
         used_standard_emitter = False
-        if alloc_plan is not None and (alloc_plan.has_spill or bool(alloc_plan.move_points)):
+        if prefer_scheduled_plan:
+            emitter = CEmitter(
+                tile_aware_wrapper_nodes=tile_aware_runtime_plan.get("wrapper_nodes", {}),
+                pipeline_schedule_metadata=pipeline_codegen_metadata,
+            )
+            source = emitter.emit(ctx)
+            used_standard_emitter = True
+        elif alloc_plan is not None and (alloc_plan.has_spill or bool(alloc_plan.move_points)):
             # Use new MemoryAllocationPlan with reload code generation
             source = self._generate_source_with_unified_spill(
                 ctx,
@@ -3686,6 +3861,39 @@ run: model
         for tensor_name in dead_tensor_names:
             ctx.graph.tensors.pop(tensor_name, None)
 
+    def _build_tensor_offsets_from_scheduled_plan(
+        self,
+        ctx: CompileContext,
+        scheduled_plan: Any,
+    ) -> dict[str, tuple[str, int]]:
+        value_to_graph_tensor = self._build_schedule_value_graph_tensor_map(ctx)
+        tensor_offsets: dict[str, tuple[str, int]] = {}
+        best_fast_allocations: dict[str, tuple[tuple[int, int, str], int]] = {}
+
+        for allocation in getattr(scheduled_plan, "fast_allocations", {}).values():
+            graph_tensor_name = value_to_graph_tensor.get(allocation.value_name)
+            if graph_tensor_name is None:
+                continue
+            sort_key = (
+                int(getattr(allocation, "start_time", 0)),
+                int(getattr(allocation, "end_time", 0)),
+                str(getattr(allocation, "residency_id", "")),
+            )
+            current = best_fast_allocations.get(graph_tensor_name)
+            if current is None or sort_key < current[0]:
+                best_fast_allocations[graph_tensor_name] = (sort_key, int(allocation.offset))
+
+        for graph_tensor_name, (_, offset) in best_fast_allocations.items():
+            tensor_offsets[graph_tensor_name] = ("fast", offset)
+
+        for value_name, allocation in getattr(scheduled_plan, "slow_allocations", {}).items():
+            graph_tensor_name = value_to_graph_tensor.get(value_name)
+            if graph_tensor_name is None or graph_tensor_name in tensor_offsets:
+                continue
+            tensor_offsets[graph_tensor_name] = ("slow", int(allocation.offset))
+
+        return tensor_offsets
+
     def _generate_tensors(self, ctx: CompileContext) -> str:
         """Generate tensors definition file."""
         lines = [
@@ -3701,35 +3909,58 @@ run: model
         # Check for new memory allocation plan
         from nnc_py.passes.memory_planning import get_memory_allocation_plan
         alloc_plan = get_memory_allocation_plan(ctx)
+        scheduled_plan = self._get_scheduled_memory_plan(ctx)
+        prefer_scheduled_plan = self._prefer_scheduled_memory_plan(ctx, scheduled_plan)
         tile_aware_runtime_plan = self._get_tile_aware_runtime_plan(ctx, alloc_plan)
         tile_aware_tensor_bindings = tile_aware_runtime_plan.get("tensor_bindings", {})
         fallback_to_linear_storage = (
-            alloc_plan is not None
+            not prefer_scheduled_plan
+            and alloc_plan is not None
             and alloc_plan.strategy_name == "tile_regions_v3"
             and not tile_aware_runtime_plan
         )
 
         has_slow_memory_tensors = False
         has_logical_regions = False
-        if alloc_plan is not None:
+        if prefer_scheduled_plan and scheduled_plan is not None:
+            has_slow_memory_tensors = bool(scheduled_plan.slow_allocations)
+        elif alloc_plan is not None:
             has_slow_memory_tensors = any(
                 alloc.is_spilled for alloc in alloc_plan.tensor_allocations.values()
             )
             has_logical_regions = bool(alloc_plan.logical_regions) and bool(tile_aware_runtime_plan)
-        has_spill = alloc_plan is not None and alloc_plan.has_spill
-        has_moves = alloc_plan is not None and bool(alloc_plan.move_points)
-        uses_unified_runtime = alloc_plan is not None and (
-            has_spill or has_slow_memory_tensors or has_moves
+        has_spill = (
+            bool(getattr(scheduled_plan, "transfer_points", ()))
+            if prefer_scheduled_plan and scheduled_plan is not None
+            else alloc_plan is not None and alloc_plan.has_spill
         )
-        uses_fast_pool_symbol = alloc_plan is not None and (
-            has_spill or has_slow_memory_tensors or has_moves or has_logical_regions
+        has_moves = False if prefer_scheduled_plan else alloc_plan is not None and bool(alloc_plan.move_points)
+        uses_unified_runtime = (
+            bool(scheduled_plan.fast_allocations)
+            or has_slow_memory_tensors
+            or has_spill
+        ) if prefer_scheduled_plan and scheduled_plan is not None else (
+            alloc_plan is not None and (has_spill or has_slow_memory_tensors or has_moves)
+        )
+        uses_fast_pool_symbol = (
+            bool(scheduled_plan.fast_allocations)
+            or has_slow_memory_tensors
+            or has_spill
+        ) if prefer_scheduled_plan and scheduled_plan is not None else (
+            alloc_plan is not None and (
+                has_spill or has_slow_memory_tensors or has_moves or has_logical_regions
+            )
         )
 
         # Generate slow pool if we have spill points OR slow memory tensors
         needs_slow_pool = has_spill or has_slow_memory_tensors
 
         # Check if memory planning was performed
-        has_memory_plan = alloc_plan is not None or "memory_plan" in ctx.metadata
+        has_memory_plan = (
+            prefer_scheduled_plan
+            or alloc_plan is not None
+            or "memory_plan" in ctx.metadata
+        )
 
         if has_memory_plan:
             # Generate static memory pool(s)
@@ -3746,9 +3977,13 @@ run: model
 
         # Get tensor offsets from allocation plan
         tensor_offsets = {}
-        spilled_tensors = set()
 
-        if fallback_to_linear_storage:
+        if prefer_scheduled_plan and scheduled_plan is not None:
+            tensor_offsets = self._build_tensor_offsets_from_scheduled_plan(
+                ctx,
+                scheduled_plan,
+            )
+        elif fallback_to_linear_storage:
             tensor_offsets, _ = self._build_linear_tensor_fallback(ctx)
         elif alloc_plan is not None:
             # Use new MemoryAllocationPlan
@@ -3756,7 +3991,6 @@ run: model
                 if alloc.is_spilled:
                     # Spilled tensors go to slow memory
                     tensor_offsets[tensor_name] = ("slow", alloc.offset)
-                    spilled_tensors.add(tensor_name)
                 else:
                     # Non-spilled tensors go to fast memory
                     # Use alloc.offset which is the tensor's offset within the buffer
@@ -3768,6 +4002,7 @@ run: model
             plan = get_memory_plan(ctx)
             spill_plan = get_spill_plan(ctx)
 
+            spilled_tensors: set[str] = set()
             if spill_plan is not None and spill_plan.has_overflow:
                 # Has spill from legacy plan
                 spilled_tensors = set(spill_plan.spilled_tensors)
@@ -3863,7 +4098,36 @@ run: model
 
         # Check for new memory allocation plan first
         alloc_plan = get_memory_allocation_plan(ctx)
+        scheduled_plan = self._get_scheduled_memory_plan(ctx)
+        prefer_scheduled_plan = self._prefer_scheduled_memory_plan(ctx, scheduled_plan)
         tile_aware_runtime_plan = self._get_tile_aware_runtime_plan(ctx, alloc_plan)
+
+        if prefer_scheduled_plan and scheduled_plan is not None:
+            fast_memory_size = max(int(scheduled_plan.total_fast_memory), 1)
+            transfer_count = len(getattr(scheduled_plan, "transfer_points", ()))
+            lines = [
+                "/* Scheduled Native Memory Pools */",
+                f"/* Fast memory: {fast_memory_size} bytes ({fast_memory_size / 1024:.2f} KB) */",
+                f"/* Slow memory: {scheduled_plan.total_slow_memory} bytes ({scheduled_plan.total_slow_memory / 1024:.2f} KB) */",
+                f"/* Fast allocations: {len(scheduled_plan.fast_allocations)}, Transfer points: {transfer_count} */",
+                "",
+                "/* Fast Memory Pool (SRAM/On-chip) */",
+                f"#define NNC_FAST_MEMORY_SIZE {fast_memory_size}",
+                "#define NNC_MEMORY_ALIGNMENT 16",
+                f"uint8_t _nnc_fast_pool[NNC_FAST_MEMORY_SIZE] "
+                f"__attribute__((aligned(NNC_MEMORY_ALIGNMENT))) = {{0}};",
+                "",
+            ]
+            if scheduled_plan.total_slow_memory > 0:
+                slow_memory_size = max(int(scheduled_plan.total_slow_memory), 1)
+                lines.extend([
+                    "/* Slow Memory Pool (DRAM/External) */",
+                    f"#define NNC_SLOW_MEMORY_SIZE {slow_memory_size}",
+                    f"uint8_t _nnc_slow_pool[NNC_SLOW_MEMORY_SIZE] "
+                    f"__attribute__((aligned(NNC_MEMORY_ALIGNMENT))) = {{0}};",
+                    "",
+                ])
+            return lines
 
         if alloc_plan is not None:
             if alloc_plan.strategy_name == "tile_regions_v3" and not tile_aware_runtime_plan:

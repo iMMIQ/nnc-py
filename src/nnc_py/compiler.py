@@ -14,6 +14,10 @@ from nnc_py.ir.context import CompileContext
 from nnc_py.ir.pipeline_schedule import PipelineScheduleResult, set_pipeline_schedule_result
 from nnc_py.passes.base import PassManager
 
+_STAGED_VALUE_PATTERN = re.compile(
+    r"sram\|node\|\d+:(?P<node>[^|]+)\|tensor\|\d+:(?P<tensor>[^'\"\s)]+)"
+)
+
 
 def parse_memory_size(size_str: str) -> int:
     """Parse a memory size string to bytes.
@@ -61,6 +65,35 @@ def parse_memory_size(size_str: str) -> int:
 
     multiplier = multipliers.get(unit, 1)
     return int(value * multiplier)
+
+
+def sanitize_compile_error_message(message: str) -> str:
+    """Make scheduled-O3 failures readable for both API and CLI surfaces."""
+    if not message:
+        return "Compilation failed."
+
+    def _replace(match: re.Match[str]) -> str:
+        node_name = match.group("node")
+        tensor_name = match.group("tensor")
+        return f"scheduled tensor '{tensor_name}' at node '{node_name}'"
+
+    sanitized = _STAGED_VALUE_PATTERN.sub(_replace, message)
+    if sanitized.startswith("'") and sanitized.endswith("'"):
+        sanitized = sanitized[1:-1]
+    if "unknown step id:" in sanitized:
+        sanitized = (
+            "Scheduled pipeline metadata was inconsistent: "
+            + sanitized.replace("unknown step id:", "missing schedule step", 1)
+        )
+    return sanitized
+
+
+def _raise_sanitized_compile_error(exc: Exception) -> None:
+    """Re-raise scheduled compile failures without leaking staged SRAM keys."""
+    sanitized = sanitize_compile_error_message(str(exc))
+    if sanitized == str(exc):
+        raise exc
+    raise RuntimeError(sanitized).with_traceback(exc.__traceback__) from None
 
 
 class Compiler:
@@ -208,29 +241,32 @@ class Compiler:
             enable_pipeline_scheduler=scheduler_enabled
         )
 
-        if self.pass_manager.passes:
-            with self.console.status(
-                "[bold yellow]Running optimization passes..."
-            ):
-                self.pass_manager.run(ctx)
-                self._validate_scheduled_o3_result(ctx)
+        try:
+            if self.pass_manager.passes:
+                with self.console.status(
+                    "[bold yellow]Running optimization passes..."
+                ):
+                    self.pass_manager.run(ctx)
+                    self._validate_scheduled_o3_result(ctx)
+                    self.console.print(
+                        f"✓ Applied {len(self.pass_manager.applied_passes)} passes"
+                    )
+            else:
+                self.console.print("ℹ No passes registered")
+
+            # Stage 4: Code generation
+            with self.console.status("[bold blue]Generating C code..."):
+                artifacts = self.backend.generate(ctx)
                 self.console.print(
-                    f"✓ Applied {len(self.pass_manager.applied_passes)} passes"
+                    f"✓ Generated {len(artifacts.files)} files"
                 )
-        else:
-            self.console.print("ℹ No passes registered")
 
-        # Stage 4: Code generation
-        with self.console.status("[bold blue]Generating C code..."):
-            artifacts = self.backend.generate(ctx)
-            self.console.print(
-                f"✓ Generated {len(artifacts.files)} files"
-            )
-
-        # Stage 5: Write output files
-        with self.console.status("[bold cyan]Writing output files..."):
-            self._write_output(artifacts, output_dir, entry_point)
-            self.console.print(f"✓ Output written to {output_dir}")
+            # Stage 5: Write output files
+            with self.console.status("[bold cyan]Writing output files..."):
+                self._write_output(artifacts, output_dir, entry_point)
+                self.console.print(f"✓ Output written to {output_dir}")
+        except Exception as exc:
+            _raise_sanitized_compile_error(exc)
 
         self.console.print()
         self.console.print(

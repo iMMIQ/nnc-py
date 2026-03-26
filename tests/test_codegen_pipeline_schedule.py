@@ -22,6 +22,8 @@ from nnc_py.ir.pipeline_schedule import (
     ScheduledStep,
     ScheduleStep,
     ScheduleStepKind,
+    TransferStep,
+    TransferStepKind,
 )
 from nnc_py.ir.tensor import TensorShape, TensorType
 from nnc_py.ir.types import DataType
@@ -32,6 +34,12 @@ from nnc_py.passes.memory_strategy import (
     ReloadPoint,
     SpillPoint,
     TensorAllocation,
+)
+from nnc_py.passes.scheduled_memory_planning import (
+    ScheduledFastAllocation,
+    ScheduledMemoryPlan,
+    ScheduledSlowAllocation,
+    ScheduledTransferPoint,
 )
 
 
@@ -73,6 +81,241 @@ def _make_relu_context() -> CompileContext:
         )
     )
     return CompileContext(graph=graph, target="x86", optimization_level=3)
+
+
+def make_codegen_context_with_native_spill() -> CompileContext:
+    graph = Graph("schedule_native_spill_codegen")
+    graph.inputs = ["input"]
+    graph.outputs = ["output"]
+    graph.add_tensor(
+        TensorType(
+            name="input",
+            dtype=DataType.FLOAT32,
+            shape=TensorShape([1, 4]),
+        )
+    )
+    graph.add_tensor(
+        TensorType(
+            name="mid",
+            dtype=DataType.FLOAT32,
+            shape=TensorShape([1, 4]),
+        )
+    )
+    graph.add_tensor(
+        TensorType(
+            name="output",
+            dtype=DataType.FLOAT32,
+            shape=TensorShape([1, 4]),
+        )
+    )
+    graph.add_node(
+        Node(
+            op_type=OpType.RELU,
+            name="relu0",
+            inputs=["input"],
+            outputs=["mid"],
+        )
+    )
+    graph.add_node(
+        Node(
+            op_type=OpType.RELU,
+            name="relu1",
+            inputs=["mid"],
+            outputs=["output"],
+        )
+    )
+
+    ctx = CompileContext(graph=graph, target="x86", optimization_level=3)
+    ctx.metadata["pipeline_scheduler_enabled"] = True
+    ctx.metadata["pipeline_schedule_problem"] = PipelineScheduleProblem(
+        steps=(
+            ScheduleStep(
+                id="relu0.compute",
+                node_name="relu0",
+                step_kind=ScheduleStepKind.COMPUTE,
+                resource_kind=PipelineResourceKind.OTHER,
+                duration=2,
+                sram_input_names=("input",),
+                sram_output_names=("mid",),
+                attrs={"cost_model": "unit_test_cost_model"},
+            ),
+            TransferStep(
+                id="mid.spill0",
+                node_name="spill:mid",
+                transfer_kind=TransferStepKind.SPILL_DMA,
+                moved_value_name="mid",
+                bytes=16,
+                duration=1,
+                sram_input_names=("mid",),
+            ),
+            TransferStep(
+                id="mid.reload0",
+                node_name="reload:mid",
+                transfer_kind=TransferStepKind.RELOAD_DMA,
+                moved_value_name="mid",
+                bytes=16,
+                duration=1,
+                sram_output_names=("mid.reload0.resident",),
+            ),
+            ScheduleStep(
+                id="relu1.compute",
+                node_name="relu1",
+                step_kind=ScheduleStepKind.COMPUTE,
+                resource_kind=PipelineResourceKind.OTHER,
+                duration=2,
+                sram_input_names=("mid.reload0.resident",),
+                sram_output_names=("output",),
+                attrs={"cost_model": "unit_test_cost_model"},
+            ),
+        ),
+        edges=(
+            ScheduleEdge("relu0.compute", "mid.spill0", ScheduleDependencyKind.DATA),
+            ScheduleEdge("mid.spill0", "mid.reload0", ScheduleDependencyKind.ORDER),
+            ScheduleEdge("mid.reload0", "relu1.compute", ScheduleDependencyKind.DATA),
+        ),
+        scheduled_values=(
+            ScheduledValue(
+                name="input",
+                graph_tensor_name="input",
+                size_bytes=16,
+                producer_step_id=None,
+                consumer_step_ids=("relu0.compute",),
+                must_reside_in_sram=False,
+                can_alias=True,
+                home_tier=ScheduledValueHomeTier.INPUT,
+            ),
+            ScheduledValue(
+                name="mid",
+                graph_tensor_name="mid",
+                size_bytes=16,
+                producer_step_id="relu0.compute",
+                consumer_step_ids=("mid.spill0",),
+                must_reside_in_sram=False,
+                can_alias=True,
+                home_tier=ScheduledValueHomeTier.SRAM,
+            ),
+            ScheduledValue(
+                name="mid.reload0.resident",
+                graph_tensor_name="mid",
+                size_bytes=16,
+                producer_step_id="mid.reload0",
+                consumer_step_ids=("relu1.compute",),
+                must_reside_in_sram=False,
+                can_alias=True,
+                home_tier=ScheduledValueHomeTier.SRAM,
+            ),
+            ScheduledValue(
+                name="output",
+                graph_tensor_name="output",
+                size_bytes=16,
+                producer_step_id="relu1.compute",
+                consumer_step_ids=(),
+                must_reside_in_sram=False,
+                can_alias=True,
+                home_tier=ScheduledValueHomeTier.SRAM,
+            ),
+        ),
+        resources=(PipelineResourceKind.DMA, PipelineResourceKind.OTHER),
+        sram_capacity_bytes=16,
+        metadata={"origin": "test"},
+    )
+    ctx.metadata["pipeline_schedule_result"] = PipelineScheduleResult(
+        scheduled_steps=(
+            ScheduledStep(
+                step_id="relu0.compute",
+                resource_kind=PipelineResourceKind.OTHER,
+                resource_slot=0,
+                start_time=0,
+                end_time=2,
+            ),
+            ScheduledStep(
+                step_id="mid.spill0",
+                resource_kind=PipelineResourceKind.DMA,
+                resource_slot=0,
+                start_time=2,
+                end_time=3,
+            ),
+            ScheduledStep(
+                step_id="mid.reload0",
+                resource_kind=PipelineResourceKind.DMA,
+                resource_slot=0,
+                start_time=3,
+                end_time=4,
+            ),
+            ScheduledStep(
+                step_id="relu1.compute",
+                resource_kind=PipelineResourceKind.OTHER,
+                resource_slot=0,
+                start_time=4,
+                end_time=6,
+            ),
+        ),
+        feasible=True,
+        makespan=6,
+        solver_name="list",
+        diagnostics={"strategy": "scheduled"},
+    )
+    ctx.metadata["scheduled_memory_plan"] = ScheduledMemoryPlan(
+        total_fast_memory=32,
+        total_slow_memory=16,
+        fast_allocations={
+            "mid@spill0": ScheduledFastAllocation(
+                residency_id="mid@spill0",
+                value_name="mid",
+                buffer_id=0,
+                offset=0,
+                size_bytes=16,
+                start_time=2,
+                end_time=3,
+                opened_by_step_id="relu0.compute",
+                closed_by_step_id="mid.spill0",
+            ),
+            "mid.reload0.resident@0": ScheduledFastAllocation(
+                residency_id="mid.reload0.resident@0",
+                value_name="mid.reload0.resident",
+                buffer_id=1,
+                offset=16,
+                size_bytes=16,
+                start_time=4,
+                end_time=6,
+                opened_by_step_id="mid.reload0",
+                closed_by_step_id="relu1.compute",
+            ),
+        },
+        slow_allocations={
+            "mid": ScheduledSlowAllocation(
+                value_name="mid",
+                offset=0,
+                size_bytes=16,
+            )
+        },
+        transfer_points=(
+            ScheduledTransferPoint(
+                step_id="mid.spill0",
+                transfer_kind=TransferStepKind.SPILL_DMA,
+                value_name="mid",
+                size_bytes=16,
+                start_time=2,
+                end_time=3,
+                fast_offset=0,
+                slow_offset=0,
+                after_node_name="relu0",
+            ),
+            ScheduledTransferPoint(
+                step_id="mid.reload0",
+                transfer_kind=TransferStepKind.RELOAD_DMA,
+                value_name="mid",
+                size_bytes=16,
+                start_time=3,
+                end_time=4,
+                fast_offset=16,
+                slow_offset=0,
+                resident_value_name="mid.reload0.resident",
+                before_node_name="relu1",
+            ),
+        ),
+    )
+    return ctx
 
 
 def _attach_schedule_metadata(
@@ -690,6 +933,24 @@ def test_schedule_codegen_moves_unified_spill_transfers_onto_dma_workers():
         output_dir = Path(tmpdir)
         _write_artifacts(output_dir, artifacts)
         _compile_generated_sources(output_dir)
+
+
+def test_codegen_emits_real_dma_spill_and_reload_worker_steps():
+    ctx = make_codegen_context_with_native_spill()
+
+    artifacts = X86Backend().generate(ctx)
+    model_c = _artifact_text(artifacts, "model.c")
+    tensors_c = _artifact_text(artifacts, "tensors.c")
+
+    assert "spill_dma" in model_c
+    assert "reload_dma" in model_c
+    assert "nnc_pipeline_run_parallel" in model_c
+    assert "static void nnc_pipeline_step_mid_spill0(void)" in model_c
+    assert "static void nnc_pipeline_step_mid_reload0(void)" in model_c
+    assert "memcpy(_nnc_slow_pool + 0, _nnc_fast_pool + 0, 16);" in model_c
+    assert "memcpy(_nnc_fast_pool + 16, _nnc_slow_pool + 0, 16);" in model_c
+    assert "#define NNC_FAST_MEMORY_SIZE 32" in tensors_c
+    assert "#define NNC_SLOW_MEMORY_SIZE 16" in tensors_c
 
 
 def test_codegen_without_schedule_metadata_still_generates_compilable_output():

@@ -5,6 +5,7 @@ from rich.console import Console
 from rich.table import Table
 
 from nnc_py import Compiler
+from nnc_py.compiler import sanitize_compile_error_message
 
 console = Console()
 
@@ -143,10 +144,11 @@ def compile(
         )
 
     except Exception as e:
-        console.print(f"[bold red]✗ Compilation failed:[/bold red] {e}")
+        message = sanitize_compile_error_message(str(e))
+        console.print(f"[bold red]✗ Compilation failed:[/bold red] {message}")
         if verbose:
             console.print_exception()
-        raise click.ClickException(str(e))
+        raise click.ClickException(message)
 
 
 @main.command()
