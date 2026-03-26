@@ -754,6 +754,8 @@ class X86Backend(BackendBase):
             invoke_step = steps_by_id.get(group["invoke_step_id"])
             if invoke_step is not None:
                 invoke_step["custom_body_lines"] = (f"{group['helper_name']}();",)
+                if "invoke_resource_kind" in group:
+                    invoke_step["resource_kind"] = group["invoke_resource_kind"]
 
         return cloned
 
@@ -828,7 +830,13 @@ class X86Backend(BackendBase):
         if any(
             node_by_name.get(node_name) is None
             or node_by_name[node_name].op_type
-            not in {OpType.CONV2D, OpType.FUSED_CONV_RELU, OpType.RELU}
+            not in {
+                OpType.CONV2D,
+                OpType.FUSED_CONV_RELU,
+                OpType.ADD,
+                OpType.FUSED_ADD_RELU,
+                OpType.RELU,
+            }
             for node_name in node_names
         ):
             return None
@@ -890,13 +898,18 @@ class X86Backend(BackendBase):
         if not helper_lines:
             return None
 
+        invoke_step = root_compute_step
+        invoke_resource_kind = root_compute_step.get("resource_kind")
+        if len(node_names) > 1:
+            invoke_step = final_compute_step
+
         noop_step_ids: list[str] = []
         for node_name in node_names:
             for step in step_records_by_node.get(node_name, ()):
                 step_id = str(step.get("step_id", ""))
                 if not step_id:
                     continue
-                if node_name == root_name and step_id == str(root_compute_step.get("step_id", "")):
+                if step_id == str(invoke_step.get("step_id", "")):
                     continue
                 noop_step_ids.append(step_id)
 
@@ -909,7 +922,8 @@ class X86Backend(BackendBase):
         internal_tensor_names.difference_update(final_output_names)
 
         return {
-            "invoke_step_id": str(root_compute_step["step_id"]),
+            "invoke_step_id": str(invoke_step["step_id"]),
+            "invoke_resource_kind": invoke_resource_kind,
             "noop_step_ids": tuple(dict.fromkeys(noop_step_ids)),
             "helper_name": helper_lines[0].removeprefix("static void ").split("(")[0],
             "helper_definition": helper_lines,
@@ -944,6 +958,8 @@ class X86Backend(BackendBase):
                 not in {
                     OpType.CONV2D,
                     OpType.FUSED_CONV_RELU,
+                    OpType.ADD,
+                    OpType.FUSED_ADD_RELU,
                     OpType.RELU,
                 }
                 for node_name in node_names
@@ -2734,8 +2750,13 @@ class X86Backend(BackendBase):
         supported_families = {"conv2d", "maxpool"}
         execution_groups: list[dict[str, Any]] = []
         visited_node_names: set[str] = set()
+        topo_nodes = ctx.graph.topological_sort()
+        node_order_by_name = {
+            node.name: index
+            for index, node in enumerate(topo_nodes)
+        }
 
-        for node in ctx.graph.topological_sort():
+        for node in topo_nodes:
             if not node.is_computational():
                 continue
             if node.name in visited_node_names:
@@ -2757,6 +2778,7 @@ class X86Backend(BackendBase):
                     flow_tensor_name,
                     execution_plans,
                     visited_node_names,
+                    node_order_by_name=node_order_by_name,
                 )
                 if successor is None:
                     break
@@ -2829,6 +2851,8 @@ class X86Backend(BackendBase):
         flow_tensor_name: str,
         execution_plans: dict[str, Any],
         visited_node_names: set[str],
+        *,
+        node_order_by_name: dict[str, int],
     ) -> Node | None:
         consumers = [
             consumer
@@ -2857,6 +2881,31 @@ class X86Backend(BackendBase):
             other_input_name = next(
                 input_name for input_name in consumer.inputs if input_name != flow_tensor_name
             )
+            other_producers = [
+                producer
+                for producer in ctx.graph.get_producers(other_input_name)
+                if producer.is_computational() and producer.name != consumer.name
+            ]
+            if other_producers:
+                current_producer = next(
+                    iter(ctx.graph.get_producers(flow_tensor_name)),
+                    None,
+                )
+                if current_producer is None:
+                    return None
+                current_priority = self._tile_aware_group_root_priority(
+                    current_producer,
+                    node_order_by_name=node_order_by_name,
+                )
+                best_other_priority = max(
+                    self._tile_aware_group_root_priority(
+                        producer,
+                        node_order_by_name=node_order_by_name,
+                    )
+                    for producer in other_producers
+                )
+                if current_priority < best_other_priority:
+                    return None
             if not self._tile_aware_tensors_match(ctx, flow_tensor_name, consumer.outputs[0]):
                 return None
             if not self._tile_aware_tensors_match(ctx, flow_tensor_name, other_input_name):
@@ -2864,6 +2913,24 @@ class X86Backend(BackendBase):
             return consumer
 
         return None
+
+    def _tile_aware_group_root_priority(
+        self,
+        node: Node,
+        *,
+        node_order_by_name: dict[str, int],
+    ) -> tuple[int, int]:
+        kernel_shape = tuple(int(v) for v in node.attrs.get("kernel_shape", ()) if isinstance(v, int))
+        kernel_area = 1
+        if kernel_shape:
+            for extent in kernel_shape:
+                kernel_area *= max(extent, 1)
+        else:
+            kernel_area = 0
+        return (
+            kernel_area,
+            node_order_by_name.get(node.name, -1),
+        )
 
     def _tile_aware_tensors_match(
         self,
