@@ -334,6 +334,194 @@ def make_codegen_context_with_missing_reload_graph_tensor_name() -> CompileConte
     return ctx
 
 
+def make_codegen_context_with_scheduled_native_fast_bindings() -> CompileContext:
+    graph = Graph("schedule_native_fast_bindings")
+    graph.inputs = ["input"]
+    graph.outputs = ["output"]
+    graph.add_tensor(
+        TensorType(
+            name="input",
+            dtype=DataType.FLOAT32,
+            shape=TensorShape([1, 4]),
+        )
+    )
+    graph.add_tensor(
+        TensorType(
+            name="output",
+            dtype=DataType.FLOAT32,
+            shape=TensorShape([1, 4]),
+        )
+    )
+    graph.add_node(
+        Node(
+            op_type=OpType.RELU,
+            name="relu0",
+            inputs=["input"],
+            outputs=["output"],
+        )
+    )
+
+    staged_input = _staged_value_name("relu0", "input")
+    staged_output = _staged_value_name("relu0", "output")
+
+    ctx = CompileContext(graph=graph, target="x86", optimization_level=3)
+    ctx.metadata["pipeline_scheduler_enabled"] = True
+    ctx.metadata["pipeline_schedule_problem"] = PipelineScheduleProblem(
+        steps=(
+            ScheduleStep(
+                id="relu0.dma_in",
+                node_name="relu0",
+                step_kind=ScheduleStepKind.DMA_IN,
+                resource_kind=PipelineResourceKind.DMA,
+                duration=2,
+                sram_input_names=("input",),
+                sram_output_names=(staged_input,),
+                attrs={"cost_model": "unit_test_cost_model"},
+            ),
+            ScheduleStep(
+                id="relu0.compute",
+                node_name="relu0",
+                step_kind=ScheduleStepKind.COMPUTE,
+                resource_kind=PipelineResourceKind.OTHER,
+                duration=3,
+                sram_input_names=(staged_input,),
+                sram_output_names=(staged_output,),
+                attrs={"cost_model": "unit_test_cost_model"},
+            ),
+            ScheduleStep(
+                id="relu0.dma_out",
+                node_name="relu0",
+                step_kind=ScheduleStepKind.DMA_OUT,
+                resource_kind=PipelineResourceKind.DMA,
+                duration=2,
+                sram_input_names=(staged_output,),
+                sram_output_names=("output",),
+                attrs={"cost_model": "unit_test_cost_model"},
+            ),
+        ),
+        edges=(
+            ScheduleEdge("relu0.dma_in", "relu0.compute", ScheduleDependencyKind.DATA),
+            ScheduleEdge("relu0.compute", "relu0.dma_out", ScheduleDependencyKind.DATA),
+        ),
+        scheduled_values=(
+            ScheduledValue(
+                name="input",
+                graph_tensor_name="input",
+                size_bytes=16,
+                producer_step_id=None,
+                consumer_step_ids=("relu0.dma_in",),
+                must_reside_in_sram=False,
+                can_alias=True,
+                home_tier=ScheduledValueHomeTier.INPUT,
+            ),
+            ScheduledValue(
+                name=staged_input,
+                graph_tensor_name="input",
+                size_bytes=16,
+                producer_step_id="relu0.dma_in",
+                consumer_step_ids=("relu0.compute",),
+                must_reside_in_sram=False,
+                can_alias=True,
+                home_tier=ScheduledValueHomeTier.INPUT,
+            ),
+            ScheduledValue(
+                name=staged_output,
+                graph_tensor_name="output",
+                size_bytes=16,
+                producer_step_id="relu0.compute",
+                consumer_step_ids=("relu0.dma_out",),
+                must_reside_in_sram=False,
+                can_alias=True,
+                home_tier=ScheduledValueHomeTier.SRAM,
+            ),
+            ScheduledValue(
+                name="output",
+                graph_tensor_name="output",
+                size_bytes=16,
+                producer_step_id="relu0.dma_out",
+                consumer_step_ids=(),
+                must_reside_in_sram=True,
+                can_alias=True,
+                home_tier=ScheduledValueHomeTier.SRAM,
+            ),
+        ),
+        resources=(PipelineResourceKind.DMA, PipelineResourceKind.OTHER),
+        sram_capacity_bytes=64,
+        metadata={"origin": "test"},
+    )
+    ctx.metadata["pipeline_schedule_result"] = PipelineScheduleResult(
+        scheduled_steps=(
+            ScheduledStep(
+                step_id="relu0.dma_in",
+                resource_kind=PipelineResourceKind.DMA,
+                resource_slot=0,
+                start_time=0,
+                end_time=2,
+            ),
+            ScheduledStep(
+                step_id="relu0.compute",
+                resource_kind=PipelineResourceKind.OTHER,
+                resource_slot=0,
+                start_time=2,
+                end_time=5,
+            ),
+            ScheduledStep(
+                step_id="relu0.dma_out",
+                resource_kind=PipelineResourceKind.DMA,
+                resource_slot=0,
+                start_time=5,
+                end_time=7,
+            ),
+        ),
+        feasible=True,
+        makespan=7,
+        solver_name="list",
+        diagnostics={"strategy": "scheduled_native"},
+    )
+    ctx.metadata["scheduled_memory_plan"] = ScheduledMemoryPlan(
+        total_fast_memory=64,
+        total_slow_memory=0,
+        fast_allocations={
+            f"{staged_input}@0": ScheduledFastAllocation(
+                residency_id=f"{staged_input}@0",
+                value_name=staged_input,
+                buffer_id=0,
+                offset=0,
+                size_bytes=16,
+                start_time=2,
+                end_time=5,
+                opened_by_step_id="relu0.dma_in",
+                closed_by_step_id="relu0.compute",
+            ),
+            f"{staged_output}@0": ScheduledFastAllocation(
+                residency_id=f"{staged_output}@0",
+                value_name=staged_output,
+                buffer_id=1,
+                offset=16,
+                size_bytes=16,
+                start_time=5,
+                end_time=7,
+                opened_by_step_id="relu0.compute",
+                closed_by_step_id="relu0.dma_out",
+            ),
+            "output@0": ScheduledFastAllocation(
+                residency_id="output@0",
+                value_name="output",
+                buffer_id=2,
+                offset=32,
+                size_bytes=16,
+                start_time=7,
+                end_time=7,
+                opened_by_step_id="relu0.dma_out",
+                closed_by_step_id=None,
+            ),
+        },
+        slow_allocations={},
+        transfer_points=(),
+    )
+    return ctx
+
+
 def _attach_schedule_metadata(
     ctx: CompileContext,
     *,
@@ -488,6 +676,34 @@ def test_generated_x86_code_contains_pipeline_schedule_annotations():
     assert "region=output" in model_c
     assert "buffer=buf_conflict" not in model_c
     assert "sram_bindings=output@0[region=output]" in model_c
+
+
+def test_debug_schedule_annotation_output_stays_buildable():
+    ctx = _make_relu_context()
+    _attach_schedule_metadata(
+        ctx,
+        sram_intervals=(
+            SramAllocationInterval(
+                value_name="output",
+                buffer_id="buf_conflict",
+                start_time=2,
+                end_time=5,
+                size_bytes=16,
+            ),
+        ),
+    )
+
+    artifacts = X86Backend(debug_mode=True).generate(ctx)
+    model_c = _artifact_text(artifacts, "model.c")
+
+    assert "Pipeline schedule summary" in model_c
+    assert "solver=list" in model_c
+    assert "feasible=yes" in model_c
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output_dir = Path(tmpdir)
+        _write_artifacts(output_dir, artifacts)
+        _compile_generated_sources(output_dir)
 
 
 def test_schedule_annotation_uses_scheduler_binding_only_without_v4_plan():
@@ -749,13 +965,11 @@ def test_schedule_codegen_materializes_staged_dma_buffers_and_memcpy_flow():
     assert "memcpy(_nnc_pipeline_value_sram_node_5_relu0_tensor_5_input_buffer, tensor_input.data, 16);" in model_c
     assert "tensor_input.data = _nnc_pipeline_value_sram_node_5_relu0_tensor_5_input_buffer;" in model_c
     assert "tensor_output.data = _nnc_pipeline_value_sram_node_5_relu0_tensor_6_output_buffer;" in model_c
+    assert "_nnc_pipeline_value_sram_node_5_relu0_tensor_6_output_saved_data" in model_c
     assert (
         "memcpy(_nnc_pipeline_value_sram_node_5_relu0_tensor_6_output_saved_data, "
         "_nnc_pipeline_value_sram_node_5_relu0_tensor_6_output_buffer, 16);"
-    ) in model_c
-    assert (
-        "tensor_output.data = _nnc_pipeline_value_sram_node_5_relu0_tensor_6_output_saved_data;"
-    ) in model_c
+    ) not in model_c
 
     with tempfile.TemporaryDirectory() as tmpdir:
         output_dir = Path(tmpdir)
@@ -985,6 +1199,56 @@ def test_codegen_debug_mode_keeps_native_spill_and_reload_buildable():
     assert "nnc_pipeline_run_parallel" not in model_c
     assert "memcpy(_nnc_slow_pool + 0, _nnc_fast_pool + 0, 16);" in model_c
     assert "memcpy(_nnc_fast_pool + 16, _nnc_slow_pool + 0, 16);" in model_c
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output_dir = Path(tmpdir)
+        _write_artifacts(output_dir, artifacts)
+        _compile_generated_sources(output_dir)
+
+
+def test_scheduled_native_test_runner_avoids_dynamic_tensor_allocation():
+    ctx = make_codegen_context_with_native_spill()
+
+    artifacts = X86Backend().generate(ctx)
+    test_runner_c = _artifact_text(artifacts, "test_runner.c")
+
+    assert "malloc(" not in test_runner_c
+    assert "calloc(" not in test_runner_c
+    assert "free(" not in test_runner_c
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output_dir = Path(tmpdir)
+        _write_artifacts(output_dir, artifacts)
+        _compile_generated_sources(output_dir)
+        result = subprocess.run(
+            [str(output_dir / "model")],
+            capture_output=True,
+            text=True,
+            cwd=output_dir,
+            timeout=30,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr or result.stdout
+
+
+def test_scheduled_native_fast_bindings_use_real_fast_pool_offsets():
+    ctx = make_codegen_context_with_scheduled_native_fast_bindings()
+
+    artifacts = X86Backend().generate(ctx)
+    model_c = _artifact_text(artifacts, "model.c")
+
+    assert "_nnc_pipeline_value_sram_node_5_relu0_tensor_5_input_buffer[16]" in model_c
+    assert "_nnc_pipeline_value_sram_node_5_relu0_tensor_6_output_buffer[16]" in model_c
+    assert (
+        "memcpy(_nnc_pipeline_value_sram_node_5_relu0_tensor_5_input_buffer, tensor_input.data, 16);"
+    ) in model_c
+    assert "tensor_input.data = _nnc_pipeline_value_sram_node_5_relu0_tensor_5_input_buffer;" in model_c
+    assert "tensor_output.data = _nnc_pipeline_value_sram_node_5_relu0_tensor_6_output_buffer;" in model_c
+    assert (
+        "memcpy(_nnc_fast_pool + 32, "
+        "_nnc_pipeline_value_sram_node_5_relu0_tensor_6_output_buffer, 16);"
+    ) in model_c
+    assert "tensor_output.data = _nnc_fast_pool + 32;" in model_c
 
     with tempfile.TemporaryDirectory() as tmpdir:
         output_dir = Path(tmpdir)

@@ -159,6 +159,7 @@ class X86Backend(BackendBase):
             ctx,
             schedule_problem=schedule_problem,
             schedule_result=schedule_result,
+            scheduled_plan=scheduled_plan,
         )
         if parallel_runtime is not None:
             summary_lines.append("parallel_runtime=enabled(workers=4)")
@@ -207,6 +208,7 @@ class X86Backend(BackendBase):
         *,
         schedule_problem: Any,
         schedule_result: Any,
+        scheduled_plan: Any | None = None,
     ) -> dict[str, Any] | None:
         """Build structured metadata used to emit a true parallel C simulation runtime."""
         if self.debug_mode:
@@ -267,10 +269,14 @@ class X86Backend(BackendBase):
             input_value_records = self._collect_parallel_step_value_records(
                 ctx,
                 tuple(getattr(problem_step, "sram_input_names", ())),
+                step_id=str(problem_step.id),
+                scheduled_plan=scheduled_plan,
             )
             output_value_records = self._collect_parallel_step_value_records(
                 ctx,
                 tuple(getattr(problem_step, "sram_output_names", ())),
+                step_id=str(problem_step.id),
+                scheduled_plan=scheduled_plan,
             )
 
             step_records.append(
@@ -353,6 +359,21 @@ class X86Backend(BackendBase):
             and ctx.optimization_level >= 3
             and bool(ctx.metadata.get("pipeline_scheduler_enabled"))
         )
+
+    def _build_schedule_value_map(
+        self,
+        ctx: CompileContext,
+    ) -> dict[str, Any]:
+        values_by_name: dict[str, Any] = {}
+        for values in (
+            getattr(ctx.metadata.get("pipeline_schedule_problem"), "scheduled_values", ()),
+            getattr(ctx.metadata.get("pipeline_schedule_result"), "scheduled_values", ()),
+        ):
+            for value in values or ():
+                value_name = getattr(value, "name", None)
+                if isinstance(value_name, str) and value_name:
+                    values_by_name[value_name] = value
+        return values_by_name
 
     def _build_schedule_value_graph_tensor_map(
         self,
@@ -452,6 +473,98 @@ class X86Backend(BackendBase):
 
     def _parallel_tensor_saved_data_name(self, tensor_symbol: str) -> str:
         return f"_nnc_pipeline_saved_{tensor_symbol}_data"
+
+    def _resolve_schedule_value_home_tier(
+        self,
+        ctx: CompileContext,
+        value_name: str,
+    ) -> str:
+        value = self._build_schedule_value_map(ctx).get(value_name)
+        if value is not None:
+            tier = getattr(getattr(value, "home_tier", None), "value", None)
+            if isinstance(tier, str) and tier:
+                return tier
+
+        graph_tensor_name = self._resolve_schedule_value_graph_tensor_name(ctx, value_name)
+        if graph_tensor_name in ctx.graph.inputs:
+            return "input"
+        if graph_tensor_name in ctx.graph.constants:
+            return "const"
+        return "sram"
+
+    def _resolve_scheduled_fast_allocation_for_step(
+        self,
+        ctx: CompileContext,
+        scheduled_plan: Any | None,
+        *,
+        value_name: str,
+        step_id: str,
+    ) -> Any | None:
+        if scheduled_plan is None:
+            return None
+
+        candidates = [
+            allocation
+            for allocation in getattr(scheduled_plan, "fast_allocations", {}).values()
+            if getattr(allocation, "value_name", None) == value_name
+        ]
+        if not candidates:
+            return None
+        if len(candidates) == 1:
+            return candidates[0]
+
+        schedule_result = ctx.metadata.get("pipeline_schedule_result")
+        step_placement = next(
+            (
+                scheduled_step
+                for scheduled_step in getattr(schedule_result, "scheduled_steps", ())
+                if getattr(scheduled_step, "step_id", None) == step_id
+            ),
+            None,
+        )
+
+        exact_matches = [
+            allocation
+            for allocation in candidates
+            if getattr(allocation, "opened_by_step_id", None) == step_id
+            or getattr(allocation, "closed_by_step_id", None) == step_id
+        ]
+        if exact_matches:
+            exact_matches.sort(
+                key=lambda allocation: (
+                    0 if getattr(allocation, "opened_by_step_id", None) == step_id else 1,
+                    int(getattr(allocation, "start_time", 0)),
+                    int(getattr(allocation, "end_time", 0)),
+                    str(getattr(allocation, "residency_id", "")),
+                )
+            )
+            return exact_matches[0]
+
+        if step_placement is not None:
+            overlapping = [
+                allocation
+                for allocation in candidates
+                if int(getattr(allocation, "start_time", 0)) <= int(getattr(step_placement, "end_time", 0))
+                and int(getattr(allocation, "end_time", 0)) >= int(getattr(step_placement, "start_time", 0))
+            ]
+            if overlapping:
+                overlapping.sort(
+                    key=lambda allocation: (
+                        abs(int(getattr(allocation, "start_time", 0)) - int(getattr(step_placement, "start_time", 0))),
+                        abs(int(getattr(allocation, "end_time", 0)) - int(getattr(step_placement, "end_time", 0))),
+                        str(getattr(allocation, "residency_id", "")),
+                    )
+                )
+                return overlapping[0]
+
+        candidates.sort(
+            key=lambda allocation: (
+                int(getattr(allocation, "start_time", 0)),
+                int(getattr(allocation, "end_time", 0)),
+                str(getattr(allocation, "residency_id", "")),
+            )
+        )
+        return candidates[0]
 
     def _clone_pipeline_codegen_metadata(
         self,
@@ -922,6 +1035,9 @@ class X86Backend(BackendBase):
         self,
         ctx: CompileContext,
         value_names: tuple[str, ...],
+        *,
+        step_id: str,
+        scheduled_plan: Any | None = None,
     ) -> tuple[dict[str, Any], ...]:
         records: list[dict[str, Any]] = []
         seen_keys: set[tuple[str, str]] = set()
@@ -940,14 +1056,29 @@ class X86Backend(BackendBase):
             if key in seen_keys:
                 continue
             seen_keys.add(key)
+            home_tier = self._resolve_schedule_value_home_tier(ctx, value_name)
+            fast_allocation = self._resolve_scheduled_fast_allocation_for_step(
+                ctx,
+                scheduled_plan,
+                value_name=value_name,
+                step_id=step_id,
+            )
+            fast_expr = None
+            if fast_allocation is not None:
+                fast_expr = f"_nnc_fast_pool + {int(getattr(fast_allocation, 'offset', 0))}"
+            storage_symbol = self._parallel_value_storage_name(value_name)
             records.append(
                 {
                     "value_name": value_name,
                     "graph_tensor_name": graph_tensor_name,
                     "tensor_symbol": symbol,
                     "is_staged": value_name.startswith("sram|node|"),
-                    "storage_symbol": self._parallel_value_storage_name(value_name),
+                    "storage_symbol": storage_symbol,
+                    "saved_data_symbol": f"{storage_symbol}_saved_data",
                     "size_bytes": max(int(tensor.byte_size()), 1),
+                    "home_tier": home_tier,
+                    "needs_restore": home_tier in {"input", "const", "slow"},
+                    "fast_expr": fast_expr,
                 }
             )
         return tuple(records)
@@ -1228,10 +1359,10 @@ class X86Backend(BackendBase):
         staged_value_records: dict[str, dict[str, Any]] = {}
         for step in steps:
             for record in tuple(step.get("input_value_records", ())):
-                if bool(record.get("is_staged")):
+                if bool(record.get("is_staged")) or bool(record.get("needs_restore")):
                     staged_value_records.setdefault(str(record["value_name"]), dict(record))
             for record in tuple(step.get("output_value_records", ())):
-                if bool(record.get("is_staged")):
+                if bool(record.get("is_staged")) or bool(record.get("needs_restore")):
                     staged_value_records.setdefault(str(record["value_name"]), dict(record))
 
         lines = [
@@ -1276,9 +1407,15 @@ class X86Backend(BackendBase):
         for value_name in sorted(staged_value_records):
             record = staged_value_records[value_name]
             storage_symbol = str(record["storage_symbol"])
+            saved_data_symbol = str(record["saved_data_symbol"])
             size_bytes = int(record["size_bytes"])
-            lines.append(f"static unsigned char {storage_symbol}_buffer[{size_bytes}];")
-            lines.append(f"static void* {storage_symbol}_saved_data = NULL;")
+            if bool(record.get("is_staged")):
+                lines.append(f"static unsigned char {storage_symbol}_buffer[{size_bytes}];")
+            if (
+                bool(record.get("is_staged"))
+                or bool(record.get("needs_restore"))
+            ):
+                lines.append(f"static void* {saved_data_symbol} = NULL;")
         if staged_value_records:
             lines.append("")
 
@@ -1308,7 +1445,11 @@ class X86Backend(BackendBase):
                     else:
                         lines.append("")
             elif step_kind == "dma_in":
-                staged_outputs = [record for record in output_value_records if bool(record.get("is_staged"))]
+                staged_outputs = [
+                    record
+                    for record in output_value_records
+                    if bool(record.get("is_staged")) or record.get("fast_expr")
+                ]
                 direct_inputs_by_tensor = {
                     str(record["graph_tensor_name"]): record
                     for record in input_value_records
@@ -1320,16 +1461,38 @@ class X86Backend(BackendBase):
                         storage_symbol = str(record["storage_symbol"])
                         size_bytes = int(record["size_bytes"])
                         source_record = direct_inputs_by_tensor.get(str(record["graph_tensor_name"]))
-                        if source_record is not None:
-                            lines.append(
-                                f"    {storage_symbol}_saved_data = {tensor_symbol}.data;"
+                        fast_expr = record.get("fast_expr")
+                        if bool(record.get("is_staged")):
+                            if source_record is not None:
+                                lines.append(
+                                    f"    {record['saved_data_symbol']} = {tensor_symbol}.data;"
+                                )
+                                lines.append(
+                                    f"    memcpy({storage_symbol}_buffer, {tensor_symbol}.data, {size_bytes});"
+                                )
+                                lines.append(
+                                    f"    {tensor_symbol}.data = {storage_symbol}_buffer;"
+                                )
+                            else:
+                                lines.append(
+                                    f"    _nnc_pipeline_touch_tensor_read(&{tensor_symbol});"
+                                )
+                        elif fast_expr:
+                            source_fast_expr = (
+                                source_record.get("fast_expr")
+                                if source_record is not None
+                                else None
                             )
-                            lines.append(
-                                f"    memcpy({storage_symbol}_buffer, {tensor_symbol}.data, {size_bytes});"
-                            )
-                            lines.append(
-                                f"    {tensor_symbol}.data = {storage_symbol}_buffer;"
-                            )
+                            if source_record is not None:
+                                if source_fast_expr:
+                                    if source_fast_expr != fast_expr:
+                                        lines.append(
+                                            f"    memcpy({fast_expr}, {source_fast_expr}, {size_bytes});"
+                                        )
+                                else:
+                                    lines.append(
+                                        f"    memcpy({fast_expr}, {tensor_symbol}.data, {size_bytes});"
+                                    )
                         else:
                             lines.append(
                                 f"    _nnc_pipeline_touch_tensor_read(&{tensor_symbol});"
@@ -1340,20 +1503,51 @@ class X86Backend(BackendBase):
                 else:
                     lines.append("    _nnc_pipeline_touch_sink ^= 1u;")
             elif step_kind == "dma_out":
-                staged_inputs = [record for record in input_value_records if bool(record.get("is_staged"))]
-                if staged_inputs:
-                    for record in staged_inputs:
+                bridged_outputs = [
+                    record
+                    for record in output_value_records
+                    if record.get("fast_expr")
+                ]
+                staged_inputs = [
+                    record
+                    for record in input_value_records
+                    if bool(record.get("is_staged")) or record.get("fast_expr")
+                ]
+                if bridged_outputs:
+                    staged_inputs_by_tensor = {
+                        str(record["graph_tensor_name"]): record
+                        for record in staged_inputs
+                    }
+                    for record in bridged_outputs:
                         tensor_symbol = str(record["tensor_symbol"])
-                        storage_symbol = str(record["storage_symbol"])
                         size_bytes = int(record["size_bytes"])
-                        lines.append(f"    if ({storage_symbol}_saved_data != NULL) {{")
-                        lines.append(
-                            f"        memcpy({storage_symbol}_saved_data, {storage_symbol}_buffer, {size_bytes});"
-                        )
-                        lines.append(
-                            f"        {tensor_symbol}.data = {storage_symbol}_saved_data;"
-                        )
-                        lines.append("    }")
+                        target_fast_expr = str(record["fast_expr"])
+                        source_record = staged_inputs_by_tensor.get(str(record["graph_tensor_name"]))
+                        if source_record is not None and bool(source_record.get("is_staged")):
+                            source_storage_symbol = str(source_record["storage_symbol"])
+                            lines.append(
+                                f"    memcpy({target_fast_expr}, {source_storage_symbol}_buffer, {size_bytes});"
+                            )
+                        else:
+                            source_fast_expr = (
+                                source_record.get("fast_expr")
+                                if source_record is not None
+                                else None
+                            )
+                            if source_fast_expr and source_fast_expr != target_fast_expr:
+                                lines.append(
+                                    f"    memcpy({target_fast_expr}, {source_fast_expr}, {size_bytes});"
+                                )
+                        lines.append(f"    {tensor_symbol}.data = {target_fast_expr};")
+                elif staged_inputs:
+                    fast_staged_inputs = [
+                        record
+                        for record in staged_inputs
+                        if not bool(record.get("is_staged")) and record.get("fast_expr")
+                    ]
+                    for record in fast_staged_inputs:
+                        tensor_symbol = str(record["tensor_symbol"])
+                        lines.append(f"    {tensor_symbol}.data = {record['fast_expr']};")
                 else:
                     dma_out_symbols = output_tensor_symbols or input_tensor_symbols
                     if dma_out_symbols:
@@ -1371,29 +1565,52 @@ class X86Backend(BackendBase):
                 if invoke_node and node_symbol:
                     lines.append(f"    {node_symbol}();")
             elif step_kind == "compute":
-                staged_inputs = [record for record in input_value_records if bool(record.get("is_staged"))]
-                staged_outputs = [record for record in output_value_records if bool(record.get("is_staged"))]
-                for record in staged_inputs:
+                buffered_inputs = [
+                    record for record in input_value_records if bool(record.get("is_staged"))
+                ]
+                fast_inputs = [
+                    record
+                    for record in input_value_records
+                    if not bool(record.get("is_staged")) and record.get("fast_expr")
+                ]
+                buffered_outputs = [
+                    record for record in output_value_records if bool(record.get("is_staged"))
+                ]
+                fast_outputs = [
+                    record
+                    for record in output_value_records
+                    if not bool(record.get("is_staged")) and record.get("fast_expr")
+                ]
+                for record in buffered_inputs:
                     tensor_symbol = str(record["tensor_symbol"])
                     storage_symbol = str(record["storage_symbol"])
                     lines.append(f"    {tensor_symbol}.data = {storage_symbol}_buffer;")
-                for record in staged_outputs:
+                for record in fast_inputs:
+                    tensor_symbol = str(record["tensor_symbol"])
+                    saved_data_symbol = str(record["saved_data_symbol"])
+                    if bool(record.get("needs_restore")):
+                        lines.append(f"    {saved_data_symbol} = {tensor_symbol}.data;")
+                    lines.append(f"    {tensor_symbol}.data = {record['fast_expr']};")
+                for record in buffered_outputs:
                     tensor_symbol = str(record["tensor_symbol"])
                     storage_symbol = str(record["storage_symbol"])
-                    lines.append(f"    {storage_symbol}_saved_data = {tensor_symbol}.data;")
+                    lines.append(f"    {record['saved_data_symbol']} = {tensor_symbol}.data;")
                     lines.append(f"    {tensor_symbol}.data = {storage_symbol}_buffer;")
+                for record in fast_outputs:
+                    tensor_symbol = str(record["tensor_symbol"])
+                    lines.append(f"    {tensor_symbol}.data = {record['fast_expr']};")
                 if node_symbol:
                     lines.append(f"    {node_symbol}();")
                 else:
                     lines.append("    _nnc_pipeline_touch_sink ^= 1u;")
-                for record in staged_inputs:
+                for record in fast_inputs:
                     tensor_symbol = str(record["tensor_symbol"])
-                    storage_symbol = str(record["storage_symbol"])
-                    lines.append(f"    if ({storage_symbol}_saved_data != NULL) {{")
-                    lines.append(
-                        f"        {tensor_symbol}.data = {storage_symbol}_saved_data;"
-                    )
-                    lines.append("    }")
+                    if bool(record.get("needs_restore")):
+                        lines.append(f"    if ({record['saved_data_symbol']} != NULL) {{")
+                        lines.append(
+                            f"        {tensor_symbol}.data = {record['saved_data_symbol']};"
+                        )
+                        lines.append("    }")
             else:
                 if node_symbol:
                     lines.append(f"    {node_symbol}();")
@@ -2089,24 +2306,29 @@ extern FILE* debug_file;
 
 """
 
-        # Insert after the includes
         lines = source_code.split("\n")
-        output = []
-        inserted = False
+        insert_at = None
+        in_block_comment = False
 
-        for line in lines:
-            output.append(line)
-            # Insert after all #include and #define statements
-            if not inserted and (line.startswith("#include") or line.startswith("/*")):
-                # Check if next line is not an include
-                continue
-            elif not inserted and (line.startswith("#include") or line.startswith("/*") or line.strip() == ""):
-                continue
-            elif not inserted:
-                # This is the first non-include line, insert macros here
-                output.append(debug_macros)
-                inserted = True
+        for index, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped.startswith("/*"):
+                in_block_comment = True
+            if not in_block_comment and line.startswith("#include"):
+                insert_at = index + 1
+            if in_block_comment and "*/" in stripped:
+                in_block_comment = False
 
+        if insert_at is None:
+            insert_at = 0
+            for index, line in enumerate(lines):
+                stripped = line.strip()
+                if not stripped or stripped.startswith("/*"):
+                    continue
+                insert_at = index
+                break
+
+        output = lines[:insert_at] + [debug_macros] + lines[insert_at:]
         return "\n".join(output)
 
     def _generate_source_with_spill(
@@ -4511,8 +4733,12 @@ run: model
 
     def _generate_test_runner(self, ctx: CompileContext) -> str:
         """Generate test runner."""
-        # Check if memory planning was performed
-        has_memory_plan = "memory_plan" in ctx.metadata
+        scheduled_plan = self._get_scheduled_memory_plan(ctx)
+        static_storage_mode = (
+            self._prefer_scheduled_memory_plan(ctx, scheduled_plan)
+            or ctx.metadata.get("memory_allocation_plan") is not None
+            or "memory_plan" in ctx.metadata
+        )
 
         # Debug mode: add file setup for debug output
         debug_decl = ""
@@ -4556,13 +4782,21 @@ FILE* debug_file = NULL;
         # Generate tensor setup code
         tensor_setups = []
 
-        if has_memory_plan:
+        if static_storage_mode:
             # Static allocation - memory is pre-allocated in memory pool
             # Only need to initialize input tensors with test data
-            from nnc_py.passes.memory_plan import get_memory_plan
-            plan = get_memory_plan(ctx)
+            static_bytes = 0
+            if self._prefer_scheduled_memory_plan(ctx, scheduled_plan) and scheduled_plan is not None:
+                static_bytes = int(getattr(scheduled_plan, "total_fast_memory", 0))
+            elif ctx.metadata.get("memory_allocation_plan") is not None:
+                alloc_plan = ctx.metadata["memory_allocation_plan"]
+                static_bytes = int(getattr(alloc_plan, "total_fast_memory", 0))
+            else:
+                from nnc_py.passes.memory_plan import get_memory_plan
+                plan = get_memory_plan(ctx)
+                static_bytes = int(getattr(plan, "total_size", 0))
 
-            tensor_setups.append(f"    /* Using static memory pool: {plan.total_size} bytes */")
+            tensor_setups.append(f"    /* Using static memory pool: {static_bytes} bytes */")
             tensor_setups.append("")
 
             # Setup input tensors - only initialize with test data
@@ -4571,12 +4805,7 @@ FILE* debug_file = NULL;
                 var_name = ctx.tensor_symbols.get(tensor_name, tensor_name)
                 size = tensor.byte_size()
 
-                # Get memory info
-                if tensor_name in plan.tensor_info:
-                    mem_info = plan.tensor_info[tensor_name]
-                    tensor_setups.append(f"    /* Initialize {var_name} at offset {mem_info.pool_offset} */")
-                else:
-                    tensor_setups.append(f"    /* Initialize {var_name} */")
+                tensor_setups.append(f"    /* Initialize {var_name} */")
 
                 # Initialize with test pattern
                 num_elements = size // 4
@@ -4638,7 +4867,7 @@ FILE* debug_file = NULL;
         setup_code = "\n".join(tensor_setups)
 
         # Free memory - only for dynamic allocation
-        if has_memory_plan:
+        if static_storage_mode:
             frees_code = "    /* Static allocation - no free needed */"
         else:
             tensor_frees = []

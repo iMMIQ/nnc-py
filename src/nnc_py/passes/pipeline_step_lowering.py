@@ -207,16 +207,21 @@ def _build_large_op_steps(
     dma_input_specs = tuple(
         _external_value_spec_for_access(ctx, access) for access in plan.input_accesses
     )
-    staged_inputs = tuple(
-        _value_spec_for_access(
-            ctx,
-            access,
-            staged_name=_staged_value_name(node_name, access.tensor_name),
-            producer_step_id=dma_in_step_id,
-            include_halo=True,
-        )
-        for access in plan.input_accesses
-    )
+    staged_inputs: list[_ValueSpec] = []
+    node_input_specs: list[_ValueSpec] = []
+    for access, external_spec in zip(plan.input_accesses, dma_input_specs):
+        if _should_stage_large_op_input(ctx, access, external_spec):
+            staged_spec = _value_spec_for_access(
+                ctx,
+                access,
+                staged_name=_staged_value_name(node_name, access.tensor_name),
+                producer_step_id=dma_in_step_id,
+                include_halo=True,
+            )
+            staged_inputs.append(staged_spec)
+            node_input_specs.append(staged_spec)
+        else:
+            node_input_specs.append(external_spec)
     steps = [
         _make_step(
             plan,
@@ -225,13 +230,13 @@ def _build_large_op_steps(
             step_kind=ScheduleStepKind.DMA_IN,
             resource_kind=PipelineResourceKind.DMA,
             input_specs=dma_input_specs,
-            output_specs=staged_inputs,
+            output_specs=tuple(staged_inputs),
             sram_temp_bytes=0,
             attrs={"phase": "ingress"},
         )
     ]
 
-    compute_input_specs = list(staged_inputs)
+    compute_input_specs = list(node_input_specs)
     produced_values: list[_ValueSpec] = list(staged_inputs)
     if _needs_shape_prep(plan):
         shape_step_id = f"{node_name}.shape_prep"
@@ -243,7 +248,7 @@ def _build_large_op_steps(
                 step_id=shape_step_id,
                 step_kind=ScheduleStepKind.SHAPE_PREP,
                 resource_kind=PipelineResourceKind.SHAPE,
-                input_specs=tuple(staged_inputs),
+                input_specs=tuple(node_input_specs),
                 output_specs=(shape_token,),
                 sram_temp_bytes=shape_token.size_bytes,
                 attrs={"phase": "shape_prep"},
@@ -367,6 +372,26 @@ def _build_single_compute_step(
         ),
         produced_values=output_specs,
     )
+
+
+def _should_stage_large_op_input(
+    ctx: CompileContext,
+    access: TensorAccessPlan,
+    external_spec: _ValueSpec,
+) -> bool:
+    max_memory = ctx.metadata.get("max_memory")
+    if not isinstance(max_memory, int) or max_memory <= 0:
+        return True
+    if external_spec.size_bytes <= max_memory:
+        return True
+    if access.tile_region.logical_extents:
+        return True
+    tensor_name = external_spec.graph_tensor_name or external_spec.name
+    if tensor_name in ctx.graph.constants:
+        return False
+    if tensor_name in ctx.graph.inputs:
+        return False
+    return True
 
 
 def _make_step(
@@ -650,6 +675,15 @@ def _access_size_bytes(
         return tensor_bytes
     return elem_size
 def _scratch_bytes(ctx: CompileContext, plan: NodeExecutionPlan) -> int:
+    region_hints_by_node = ctx.metadata.get("node_execution_plan_region_sizes", {})
+    if isinstance(region_hints_by_node, dict):
+        node_hints = region_hints_by_node.get(plan.node_name, {})
+        if isinstance(node_hints, dict):
+            region_bytes = node_hints.get("region_bytes", {})
+            if isinstance(region_bytes, dict):
+                scratch_bytes = region_bytes.get("scratch")
+                if isinstance(scratch_bytes, int) and scratch_bytes >= 0:
+                    return max(scratch_bytes, 1)
     input_bytes = sum(_access_size_bytes(ctx, access) for access in plan.input_accesses)
     output_bytes = sum(_access_size_bytes(ctx, access) for access in plan.output_accesses)
     return max(output_bytes, input_bytes // 2, 1)

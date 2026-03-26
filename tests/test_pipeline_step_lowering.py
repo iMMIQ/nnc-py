@@ -506,6 +506,66 @@ def test_pipeline_step_lowering_marks_constant_externals_with_const_home_tier():
     assert sram_values["weight"].size_bytes == 0
 
 
+def test_large_tiled_conv_skips_oversized_constant_weight_staging_under_budget():
+    ctx = _make_conv_with_constant_weight_context()
+    ctx.metadata["max_memory"] = 64 * 64 * 3 * 3 * 4 - 1
+
+    _run_pipeline_step_lowering(ctx)
+
+    problem = ctx.pipeline_schedule_problem
+    assert problem is not None
+
+    scheduled_values = {value.name: value for value in problem.scheduled_values}
+    conv_input_name = _staged_value_name("conv0", "input")
+    conv_weight_name = _staged_value_name("conv0", "weight")
+    conv_shape_name = _shape_value_name("conv0")
+
+    assert conv_weight_name not in scheduled_values
+    assert scheduled_values["weight"].home_tier is ScheduledValueHomeTier.CONST
+    assert set(scheduled_values["weight"].consumer_step_ids) == {
+        "conv0.dma_in",
+        "conv0.shape_prep",
+        "conv0.compute",
+    }
+
+    conv_steps = {step.id: step for step in problem.steps if step.node_name == "conv0"}
+    assert conv_steps["conv0.dma_in"].sram_input_names == ("input", "weight")
+    assert conv_steps["conv0.dma_in"].sram_output_names == (conv_input_name,)
+    assert conv_steps["conv0.shape_prep"].sram_input_names == (conv_input_name, "weight")
+    assert conv_steps["conv0.compute"].sram_input_names == (
+        conv_input_name,
+        "weight",
+        conv_shape_name,
+    )
+
+
+def test_tiled_conv_prefers_region_size_hint_for_scratch_bytes():
+    ctx = _make_conv_relu_context(include_relu_plan=False)
+    ctx.metadata["node_execution_plan_region_sizes"] = {
+        "conv0": {
+            "tensor_bytes": {
+                "input": 1234,
+                "conv_out": 5678,
+            },
+            "region_bytes": {
+                "scratch": 4242,
+            },
+        },
+    }
+
+    _run_pipeline_step_lowering(ctx)
+
+    problem = ctx.pipeline_schedule_problem
+    assert problem is not None
+
+    conv_compute = next(
+        step
+        for step in problem.steps
+        if step.id == "conv0.compute"
+    )
+    assert conv_compute.sram_temp_bytes == 4242
+
+
 def test_shared_graph_weight_stages_to_distinct_node_local_sram_values():
     ctx = _make_two_conv_shared_weight_context()
 
