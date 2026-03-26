@@ -111,7 +111,7 @@ class PassManager:
                 SpillAnalysisPass(),  # Handles overflow if max_memory set
             ]
 
-        # O3: Legacy-compatible advanced optimizations
+        # O3: Conservative advanced optimizations without legacy spill re-planning
         if opt_level >= 3:
             return [
                 IdentityEliminationPass(),
@@ -124,7 +124,6 @@ class PassManager:
                 TiledLoweringPass(),
                 LivenessAnalysisPass(),
                 MemoryPlanningPassV3(),
-                SpillAnalysisPass(),
             ]
 
         return []
@@ -164,5 +163,5 @@ class PassManager:
 
     @classmethod
     def get_conservative_o3_passes(cls) -> List[PassBase]:
-        """Get the legacy-compatible O3 compile path."""
+        """Get the conservative non-scheduled O3 compile path."""
         return cls.get_default_passes(3)

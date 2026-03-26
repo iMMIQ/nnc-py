@@ -392,7 +392,7 @@ class Compiler:
         return "legacy_o3_default"
 
     def _validate_scheduled_o3_result(self, ctx: CompileContext) -> None:
-        """Require the strict O3 scheduled path to produce a planned schedule."""
+        """Require O3 scheduled compilation to produce a planned schedule."""
         if self.opt_level < 3:
             return
         if not bool(ctx.metadata.get("pipeline_scheduler_enabled")):
@@ -427,7 +427,7 @@ class Compiler:
 
         raise RuntimeError(
             "O3 scheduled pipeline path failed "
-            f"({reason}). Rerun with --disable-pipeline-scheduler to use legacy O3."
+            f"({reason})."
         )
 
     def _normalize_metadata_mapping(

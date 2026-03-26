@@ -20,11 +20,19 @@ import pytest
 from nnc_py import Compiler
 from nnc_py.ir.context import CompileContext
 from nnc_py.ir.graph import Graph
+from nnc_py.ir.pipeline_schedule import (
+    PipelineResourceKind,
+    PipelineScheduleProblem,
+    PipelineScheduleResult,
+    ScheduledStep,
+    SramValue,
+)
 from nnc_py.ir.node import Node, OpType
 from nnc_py.ir.tensor import TensorShape, TensorType
 from nnc_py.ir.types import DataType
 from nnc_py.passes.base import PassManager
 from nnc_py.passes.memory_planning import get_memory_allocation_plan
+from nnc_py.passes.memory_planning_v4 import MemoryPlanningPassV4
 from nnc_py.passes.memory_strategy import MemoryAllocationPlan, SpillPoint
 from nnc_py.passes.spill import SpillAnalysisPass, get_spill_plan
 
@@ -373,6 +381,48 @@ def test_spill_analysis_skips_legacy_replanning_for_unified_spill():
     SpillAnalysisPass().run(ctx)
 
     assert ctx.metadata["spill_plan"] is None
+
+
+def test_memory_planning_v4_does_not_export_legacy_memory_plan():
+    ctx = CompileContext(graph=Graph("scheduled-v4"), target="x86", optimization_level=3)
+    ctx.metadata["pipeline_schedule_problem"] = PipelineScheduleProblem(
+        steps=(),
+        sram_values=(
+            SramValue(
+                name="value_out",
+                size_bytes=48,
+                producer_step_id="compute0",
+                consumer_step_ids=("consume0",),
+            ),
+        ),
+        resources=(PipelineResourceKind.MATMUL, PipelineResourceKind.OTHER),
+        sram_capacity_bytes=1024,
+    )
+    ctx.metadata["pipeline_schedule_result"] = PipelineScheduleResult(
+        scheduled_steps=(
+            ScheduledStep(
+                step_id="compute0",
+                resource_kind=PipelineResourceKind.MATMUL,
+                start_time=1,
+                end_time=3,
+            ),
+            ScheduledStep(
+                step_id="consume0",
+                resource_kind=PipelineResourceKind.OTHER,
+                start_time=3,
+                end_time=5,
+            ),
+        ),
+        feasible=True,
+        makespan=5,
+        solver_name="list",
+    )
+
+    MemoryPlanningPassV4().run(ctx)
+
+    assert ctx.metadata["memory_allocation_plan"].strategy_name == "schedule_time_v4"
+    assert "memory_plan" not in ctx.metadata
+    assert "spill_plan" not in ctx.metadata
 
 
 def test_cost_aware_transfer_bytes_do_not_exceed_basic():

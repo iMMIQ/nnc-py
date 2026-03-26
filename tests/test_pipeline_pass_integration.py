@@ -116,7 +116,7 @@ def _compile_graph(
     return backend.ctx
 
 
-def test_o3_default_pass_order_uses_tile_aware_v3_without_scheduler_and_v4():
+def test_o3_default_pass_order_uses_tile_aware_v3_without_scheduler_or_legacy_spill():
     names = [pass_obj.__class__.__name__ for pass_obj in PassManager.get_default_passes(3)]
 
     assert "ScheduleAnalysisPass" in names
@@ -126,13 +126,23 @@ def test_o3_default_pass_order_uses_tile_aware_v3_without_scheduler_and_v4():
     assert "PipelineStepLoweringPass" not in names
     assert "PipelineSchedulingPass" not in names
     assert "MemoryPlanningPassV4" not in names
+    assert "SpillAnalysisPass" not in names
     assert names.index("PrepackLoweringPass") < names.index("DominatorFusionPass")
     assert names.index("DominatorFusionPass") < names.index("ScheduleAnalysisPass")
     assert names.index("ScheduleAnalysisPass") < names.index("LayoutPlanningPass")
     assert names.index("LayoutPlanningPass") < names.index("TiledLoweringPass")
     assert names.index("TiledLoweringPass") < names.index("LivenessAnalysisPass")
     assert names.index("LivenessAnalysisPass") < names.index("MemoryPlanningPassV3")
-    assert names.index("MemoryPlanningPassV3") < names.index("SpillAnalysisPass")
+
+
+def test_o3_conservative_helper_excludes_legacy_spill_pass():
+    names = [
+        pass_obj.__class__.__name__
+        for pass_obj in PassManager.get_conservative_o3_passes()
+    ]
+
+    assert "MemoryPlanningPassV3" in names
+    assert "SpillAnalysisPass" not in names
 
 
 def test_o3_scheduled_pass_order_requires_explicit_helper():
@@ -213,6 +223,8 @@ def test_scheduled_compile_with_max_memory_records_expansion_output(monkeypatch,
     assert problem.metadata["scheduled_memory_expansion"]["spilled_values"]
     assert any(step.id.endswith(".spill0") for step in problem.steps)
     assert any(step.id.endswith(".reload0") for step in problem.steps)
+    assert "memory_plan" not in ctx.metadata
+    assert "spill_plan" not in ctx.metadata
 
 
 def test_disabling_scheduler_path_keeps_fallback_state_explicit(monkeypatch, tmp_path):
@@ -315,5 +327,7 @@ def test_o3_default_scheduler_failure_does_not_fallback(monkeypatch, tmp_path):
         classmethod(lambda cls: [_FailingScheduledPass()]),
     )
 
-    with pytest.raises(RuntimeError, match="scheduled pipeline path"):
+    with pytest.raises(RuntimeError, match="scheduled pipeline path") as exc_info:
         compiler.compile("model.onnx", str(tmp_path))
+
+    assert "disable-pipeline-scheduler" not in str(exc_info.value)

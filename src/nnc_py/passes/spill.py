@@ -1,4 +1,4 @@
-"""Spill analysis for memory overflow handling.
+"""Legacy spill analysis for non-O3 memory overflow handling.
 
 When the total memory required exceeds the available fast memory,
 this pass analyzes which tensors should be spilled to slow memory
@@ -90,7 +90,7 @@ class SpillPlan:
 
 
 class SpillAnalysisPass(PassBase):
-    """Analyze and plan memory spill to slow memory.
+    """Analyze and plan legacy spill/reload points for non-O3 paths.
 
     This pass:
     1. Checks if memory limit is exceeded
@@ -105,7 +105,8 @@ class SpillAnalysisPass(PassBase):
 
     def _execute(self, ctx: CompileContext) -> None:
         """Execute spill analysis."""
-        # Only run if max_memory is set and memory planning was done
+        # This pass is retained for legacy non-O3 flows. Scheduled/native O3
+        # paths must not depend on the legacy memory_plan/spill_plan metadata.
         if "max_memory" not in ctx.metadata:
             return
 

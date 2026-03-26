@@ -14,7 +14,6 @@ from nnc_py.ir.pipeline_schedule import (
 from nnc_py.passes.base import PassBase
 from nnc_py.passes.memory_plan import MemoryBuffer
 from nnc_py.passes.memory_planning import (
-    MemoryPlanningPassV2,
     _resolve_max_memory_budget,
     _should_use_tile_aware_v3,
     allocate_tile_regions,
@@ -64,18 +63,21 @@ class MemoryPlanningPassV4(PassBase):
                     ctx.metadata["memory_allocation_plan"] = tile_plan
                     ctx.metadata["memory_budget_satisfied_by_v3"] = max_memory
                     ctx.metadata.pop("memory_plan", None)
+                    ctx.metadata.pop("spill_plan", None)
                     ctx.metadata.pop("max_memory", None)
                     return
 
             if 0 < plan.total_fast_memory <= max_memory:
                 ctx.metadata["memory_allocation_plan"] = plan
                 ctx.metadata["memory_budget_satisfied_by_v4"] = max_memory
-                MemoryPlanningPassV2()._store_legacy_formats(ctx, plan)
+                ctx.metadata.pop("memory_plan", None)
+                ctx.metadata.pop("spill_plan", None)
                 ctx.metadata.pop("max_memory", None)
                 return
 
         ctx.metadata["memory_allocation_plan"] = plan
-        MemoryPlanningPassV2()._store_legacy_formats(ctx, plan)
+        ctx.metadata.pop("memory_plan", None)
+        ctx.metadata.pop("spill_plan", None)
 
     def _build_plan(self, ctx: CompileContext) -> MemoryAllocationPlan:
         intervals = self._collect_intervals(ctx)
