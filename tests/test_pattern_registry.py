@@ -58,3 +58,27 @@ def test_get_pattern_by_name():
     assert retrieved is fp
     assert retrieved.name == "my_relu"
     assert retrieved.priority == 150
+
+
+def test_registry_snapshot_restore_round_trips_builtin_patterns():
+    """Snapshot/restore should preserve builtins and discard test-only patterns."""
+    baseline_names = {pattern.name for pattern in PatternRegistry.get_all()}
+    assert "conv_relu" in baseline_names
+
+    snapshot = PatternRegistry.snapshot()
+
+    PatternRegistry.clear()
+    register_pattern(
+        name="my_relu",
+        pattern=OpPattern(OpType.RELU, "relu"),
+        priority=150,
+    )
+
+    polluted_names = {pattern.name for pattern in PatternRegistry.get_all()}
+    assert polluted_names == {"my_relu"}
+
+    PatternRegistry.restore(snapshot)
+
+    restored_names = {pattern.name for pattern in PatternRegistry.get_all()}
+    assert "conv_relu" in restored_names
+    assert "my_relu" not in restored_names

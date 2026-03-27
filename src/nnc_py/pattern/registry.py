@@ -61,6 +61,16 @@ class PatternRegistry:
         return sorted(cls._patterns.values(), key=lambda p: -p.priority)
 
     @classmethod
+    def snapshot(cls) -> Dict[str, FusionPattern]:
+        """Capture the current registry state for later restoration."""
+        return dict(cls._patterns)
+
+    @classmethod
+    def restore(cls, snapshot: Dict[str, FusionPattern]) -> None:
+        """Restore a previously captured registry snapshot."""
+        cls._patterns = dict(snapshot)
+
+    @classmethod
     def clear(cls) -> None:
         """Clear all registered patterns (for testing)."""
         cls._patterns.clear()

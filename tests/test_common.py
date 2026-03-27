@@ -459,10 +459,21 @@ class BaseSnapshotTest:
         import re
         normalized_files = {}
         for filename, content in source_files.items():
+            content = re.sub(
+                r"/\* Pipeline schedule summary\n(?: \* .*\n)* \*/\n\n",
+                "",
+                content,
+            )
+            content = content.replace(
+                "#ifndef NNC_MEMORY_ALIGNMENT\n#define NNC_MEMORY_ALIGNMENT 16\n#endif\n\n",
+                "",
+            )
+            content = content.replace("/* Strategy: basic */\n", "")
             content = re.sub(r'_nnc_memory_pool\s*\+\s*\d+', '_nnc_memory_pool + <OFFSET>', content)
             content = re.sub(r'0x[0-9a-fA-F]+', '<PTR>', content)
             content = re.sub(r'\/\* Total size: \d+ bytes \([0-9.]+ [KMGT]?B\) \*\/', '/* Total size: <SIZE> bytes (<SIZE_FORMAT>) */', content)
             content = re.sub(r'\/\* Buffers: \d+, Tensors: \d+ \*\/', '/* Buffers: <COUNT>, Tensors: <COUNT> */', content)
+            content = re.sub(r'\/\* Buffers: \d+, Logical regions: \d+ \*\/', '/* Buffers: <COUNT>, Tensors: <COUNT> */', content)
             content = re.sub(r'#define NNC_MEMORY_SIZE \d+', '#define NNC_MEMORY_SIZE <SIZE>', content)
             content = re.sub(r'nbytes = \d+,', 'nbytes = <SIZE>,', content)
             # Normalize node names that contain memory addresses (e.g., MatMul_140157833117536_MatMul)

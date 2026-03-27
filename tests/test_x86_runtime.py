@@ -6,6 +6,7 @@ the results with numpy's implementation.
 
 import ctypes
 import ctypes.util
+import shutil
 import numpy as np
 import pytest
 import subprocess
@@ -201,42 +202,19 @@ def test_conv_debug_logging_is_disabled_by_default(tmp_path):
     assert run.stderr == ""
 
 
-class TestX86Runtime:
-    """Test x86 runtime operator implementations."""
+@pytest.fixture(scope="module")
+def runtime_library():
+    """Compile the x86 runtime shared library once for the whole module."""
+    runtime_dir = Path(__file__).parent.parent / "runtime"
+    build_dir = Path(tempfile.mkdtemp(prefix="nnc-runtime-test-"))
+    makefile = build_dir / "Makefile"
 
-    @pytest.fixture(autouse=True)
-    def setup_runtime(self):
-        """Compile the runtime library for testing."""
-        self.runtime_dir = Path(__file__).parent.parent / "runtime"
-        self.build_dir = Path(tempfile.mkdtemp())
-
-        # Keep references to prevent GC
-        self._tensor_refs = []  # Store (shape_arr, data_arr) tuples
-
-        # Compile runtime ops
-        self._compile_runtime()
-
-        yield
-
-        # Cleanup
-        import shutil
-        try:
-            shutil.rmtree(self.build_dir)
-        except:
-            pass
-
-    def _compile_runtime(self):
-        """Compile the runtime library."""
-        # Create a simple test program
-        makefile = self.build_dir / "Makefile"
-
-        # Generate Makefile
-        # Note: ASan disabled for shared library tests - causes hangs with ctypes
-        makefile_content = f"""CC = gcc
+    makefile.write_text(
+        f"""CC = gcc
 CFLAGS = -std=c11 -O2 -Wall -fPIC
 LDFLAGS = -lm
 
-NNC_RUNTIME = {self.runtime_dir}
+NNC_RUNTIME = {runtime_dir}
 CFLAGS += -I$(NNC_RUNTIME)/include
 
 .PHONY: all clean
@@ -244,33 +222,41 @@ CFLAGS += -I$(NNC_RUNTIME)/include
 all: libruntime.so
 
 libruntime.so: ops.o
-	$(CC) -shared -o $@ $^ $(LDFLAGS)
+\t$(CC) -shared -o $@ $^ $(LDFLAGS)
 
 ops.o:
-	$(CC) $(CFLAGS) -c $(NNC_RUNTIME)/x86/ops.c -o $@
+\t$(CC) $(CFLAGS) -c $(NNC_RUNTIME)/x86/ops.c -o $@
 
 clean:
-	rm -f *.o *.so
+\trm -f *.o *.so
 """
-        makefile.write_text(makefile_content)
+    )
 
-        # Compile
-        result = subprocess.run(
-            ["make"],
-            cwd=self.build_dir,
-            capture_output=True,
-            text=True,
-            timeout=60
-        )
+    result = subprocess.run(
+        ["make"],
+        cwd=build_dir,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"Failed to compile runtime: {result.stderr}")
 
-        if result.returncode != 0:
-            raise RuntimeError(f"Failed to compile runtime: {result.stderr}")
+    lib_path = build_dir / "libruntime.so"
+    try:
+        yield runtime_dir, ctypes.CDLL(str(lib_path))
+    finally:
+        shutil.rmtree(build_dir, ignore_errors=True)
 
-        # Load the shared library
-        lib_path = self.build_dir / "libruntime.so"
-        self.lib = ctypes.CDLL(str(lib_path))
 
-        # Set up function signatures
+class TestX86Runtime:
+    """Test x86 runtime operator implementations."""
+
+    @pytest.fixture(autouse=True)
+    def setup_runtime(self, runtime_library):
+        """Reuse one compiled runtime library while resetting per-test state."""
+        self.runtime_dir, self.lib = runtime_library
+        self._tensor_refs = []
         self._setup_function_signatures()
 
     def _setup_function_signatures(self):

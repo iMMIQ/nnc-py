@@ -1366,22 +1366,41 @@ class X86Backend(BackendBase):
             follower_output_symbol = ctx.tensor_symbols.get(follower.outputs[0], follower.outputs[0])
             if len(follower.inputs) > 1:
                 other_input_name = next(
-                    input_name for input_name in follower.inputs if input_name != current_stage_tensor_name
+                    (
+                        input_name
+                        for input_name in follower.inputs
+                        if input_name != current_stage_tensor_name
+                    ),
+                    current_stage_tensor_name,
                 )
-                other_input_symbol = ctx.tensor_symbols.get(other_input_name, other_input_name)
-                follower_lines.extend(
-                    [
-                        f"            _nnc_pipeline_stage_nchw_tile(&{other_input_symbol}, {extra_stage_expr}, _nnc_n, _nnc_h0, _nnc_w0, {tile_h_expr}, {tile_w_expr});",
-                        f"            int64_t {rhs_symbol}_shape[4] = {{1, {other_input_symbol}.shape[1], {tile_h_expr}, {tile_w_expr}}};",
-                        f"            Tensor {rhs_symbol} = {{",
-                        f"                .data = {extra_stage_expr},",
-                        f"                .dtype = {other_input_symbol}.dtype,",
-                        f"                .shape = {rhs_symbol}_shape,",
-                        "                .ndim = 4,",
-                        f"                .nbytes = _nnc_pipeline_tile_nbytes(&{other_input_symbol}, {tile_h_expr}, {tile_w_expr}),",
-                        "            };",
-                    ]
-                )
+                if other_input_name == current_stage_tensor_name:
+                    follower_lines.extend(
+                        [
+                            f"            int64_t {rhs_symbol}_shape[4] = {{1, {root_output_symbol}.shape[1], {tile_h_expr}, {tile_w_expr}}};",
+                            f"            Tensor {rhs_symbol} = {{",
+                            f"                .data = {current_stage_expr},",
+                            f"                .dtype = {root_output_symbol}.dtype,",
+                            f"                .shape = {rhs_symbol}_shape,",
+                            "                .ndim = 4,",
+                            f"                .nbytes = _nnc_pipeline_tile_nbytes(&{root_output_symbol}, {tile_h_expr}, {tile_w_expr}),",
+                            "            };",
+                        ]
+                    )
+                else:
+                    other_input_symbol = ctx.tensor_symbols.get(other_input_name, other_input_name)
+                    follower_lines.extend(
+                        [
+                            f"            _nnc_pipeline_stage_nchw_tile(&{other_input_symbol}, {extra_stage_expr}, _nnc_n, _nnc_h0, _nnc_w0, {tile_h_expr}, {tile_w_expr});",
+                            f"            int64_t {rhs_symbol}_shape[4] = {{1, {other_input_symbol}.shape[1], {tile_h_expr}, {tile_w_expr}}};",
+                            f"            Tensor {rhs_symbol} = {{",
+                            f"                .data = {extra_stage_expr},",
+                            f"                .dtype = {other_input_symbol}.dtype,",
+                            f"                .shape = {rhs_symbol}_shape,",
+                            "                .ndim = 4,",
+                            f"                .nbytes = _nnc_pipeline_tile_nbytes(&{other_input_symbol}, {tile_h_expr}, {tile_w_expr}),",
+                            "            };",
+                        ]
+                    )
             follower_lines.extend(
                 [
                     f"            int64_t {out_symbol}_shape[4] = {{1, {follower_output_symbol}.shape[1], {tile_h_expr}, {tile_w_expr}}};",
@@ -3208,8 +3227,21 @@ class X86Backend(BackendBase):
             if len(consumer.inputs) != 2 or flow_tensor_name not in consumer.inputs:
                 return None
             other_input_name = next(
-                input_name for input_name in consumer.inputs if input_name != flow_tensor_name
+                (
+                    input_name
+                    for input_name in consumer.inputs
+                    if input_name != flow_tensor_name
+                ),
+                flow_tensor_name,
             )
+            if other_input_name == flow_tensor_name:
+                if not self._tile_aware_tensors_match(
+                    ctx,
+                    flow_tensor_name,
+                    consumer.outputs[0],
+                ):
+                    return None
+                return consumer
             other_producers = [
                 producer
                 for producer in ctx.graph.get_producers(other_input_name)
