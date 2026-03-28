@@ -9,7 +9,10 @@ from onnx import TensorProto, helper
 
 from nnc_py.compiler import Compiler
 from nnc_py.codegen.x86_backend import X86Backend
-from test_codegen_pipeline_schedule import make_codegen_context_with_native_spill
+from test_codegen_pipeline_schedule import (
+    _make_relu_context,
+    make_codegen_context_with_native_spill,
+)
 from test_pipeline_scheduler_e2e import _compile_model
 
 
@@ -117,3 +120,18 @@ def test_lower_scheduled_x86_codegen_builds_pipeline_metadata():
     assert package.mode == "scheduled"
     assert package.pipeline_summary_lines
     assert package.pipeline_codegen_metadata["summary_lines"] == package.pipeline_summary_lines
+
+
+def test_lower_serial_x86_codegen_omits_scheduled_runtime_metadata():
+    from nnc_py.codegen.x86_lowering.serial import lower_serial_x86_codegen
+
+    ctx = _make_relu_context()
+    backend = X86Backend()
+    backend._assign_symbols(ctx)
+
+    package = lower_serial_x86_codegen(ctx, backend)
+
+    assert package.mode == "serial"
+    assert package.pipeline_summary_lines
+    assert package.pipeline_summary_lines[0] == "schedule_metadata=absent"
+    assert package.pipeline_codegen_metadata["parallel_runtime"] is None

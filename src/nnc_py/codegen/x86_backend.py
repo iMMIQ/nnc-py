@@ -2905,6 +2905,7 @@ class X86Backend(BackendBase):
     def _generate_source(self, ctx: CompileContext) -> str:
         """Generate main source file with spill/reload support."""
         from nnc_py.codegen.c_emitter import CEmitter
+        from nnc_py.codegen.x86_lowering.serial import lower_serial_x86_codegen
         from nnc_py.codegen.x86_lowering.scheduled import lower_scheduled_x86_codegen
         from nnc_py.passes.memory_planning import get_memory_allocation_plan
         from nnc_py.passes.spill import get_spill_plan
@@ -2924,11 +2925,12 @@ class X86Backend(BackendBase):
             prefer_scheduled_plan = scheduled_plan is not None
             pipeline_codegen_metadata = scheduled_codegen.pipeline_codegen_metadata
         else:
-            pipeline_codegen_metadata = self._build_pipeline_codegen_metadata(
+            serial_codegen = lower_serial_x86_codegen(
                 ctx,
-                alloc_plan,
-                scheduled_plan=None,
+                self,
+                alloc_plan=alloc_plan,
             )
+            pipeline_codegen_metadata = serial_codegen.pipeline_codegen_metadata
 
         # Check for legacy spill plan
         spill_plan = get_spill_plan(ctx)
