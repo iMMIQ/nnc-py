@@ -90,3 +90,14 @@ def test_x86_backend_scheduled_contract(tmp_path):
         "parallel_runtime=enabled" in model_c
         or "parallel_runtime=disabled" in model_c
     )
+
+
+def test_x86_codegen_package_defaults():
+    from nnc_py.codegen.x86_ir import X86CodegenPackage
+
+    package = X86CodegenPackage(mode="serial", entry_point="nnc_run")
+
+    assert package.mode == "serial"
+    assert package.entry_point == "nnc_run"
+    assert package.files == {}
+    assert package.pipeline_summary_lines == []
