@@ -47,22 +47,41 @@ class X86Backend(BackendBase):
 
     def generate(self, ctx: CompileContext) -> CodeGenResult:
         """Generate x86 C code."""
+        from nnc_py.codegen.x86_emitters import (
+            emit_constants_loader,
+            emit_header,
+            emit_makefile,
+            emit_model_source,
+            emit_tensors,
+            emit_test_runner,
+        )
+        from nnc_py.codegen.x86_lowering.serial import lower_serial_x86_codegen
+        from nnc_py.codegen.x86_lowering.scheduled import lower_scheduled_x86_codegen
+        from nnc_py.passes.memory_planning import get_memory_allocation_plan
+
         result = CodeGenResult()
         self._prune_unused_tensor_defs(ctx)
 
         # Assign C symbol names
         self._assign_symbols(ctx)
+        alloc_plan = get_memory_allocation_plan(ctx)
+        scheduled_plan = self._get_scheduled_memory_plan(ctx)
+        prefer_scheduled_plan = self._prefer_scheduled_memory_plan(ctx, scheduled_plan)
+        if prefer_scheduled_plan or bool(ctx.metadata.get("pipeline_scheduler_enabled")):
+            package = lower_scheduled_x86_codegen(ctx, self, alloc_plan=alloc_plan)
+        else:
+            package = lower_serial_x86_codegen(ctx, self, alloc_plan=alloc_plan)
 
         # Generate header file
-        header = self._generate_header(ctx)
+        header = emit_header(package, self)
         result.add_file("model.h", header, "header")
 
         # Generate source file
-        source = self._generate_source(ctx)
+        source = emit_model_source(package, self)
         result.add_file("model.c", source, "source")
 
         # Generate tensors definition file
-        tensors = self._generate_tensors(ctx)
+        tensors = emit_tensors(package, self)
         result.add_file("tensors.c", tensors, "source")
 
         # Generate constants binary file and loader code
@@ -71,15 +90,16 @@ class X86Backend(BackendBase):
             result.add_file("constants.bin", constants_binary, "binary")
 
             # Generate constants loader code
-            constants_loader = self._generate_constants_loader(ctx, constants_metadata)
+            package.constants_metadata = constants_metadata
+            constants_loader = emit_constants_loader(package, self)
             result.add_file("constants_loader.c", constants_loader, "source")
 
         # Generate Makefile
-        makefile = self._generate_makefile(ctx)
+        makefile = emit_makefile(package, self)
         result.add_file("Makefile", makefile, "build")
 
         # Generate test runner
-        test_runner = self._generate_test_runner(ctx)
+        test_runner = emit_test_runner(package, self)
         result.add_file("test_runner.c", test_runner, "source")
 
         return result

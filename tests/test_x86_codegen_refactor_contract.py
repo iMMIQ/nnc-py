@@ -135,3 +135,15 @@ def test_lower_serial_x86_codegen_omits_scheduled_runtime_metadata():
     assert package.pipeline_summary_lines
     assert package.pipeline_summary_lines[0] == "schedule_metadata=absent"
     assert package.pipeline_codegen_metadata["parallel_runtime"] is None
+
+
+def test_header_emitter_uses_lowered_package_entry_point():
+    from nnc_py.codegen.x86_emitters.header import emit_header
+    from nnc_py.codegen.x86_ir import X86CodegenPackage
+
+    header_text = emit_header(
+        X86CodegenPackage(mode="serial", entry_point="my_infer"),
+    )
+
+    assert "void nnc_run(void);" in header_text
+    assert "void my_infer(void);" in header_text

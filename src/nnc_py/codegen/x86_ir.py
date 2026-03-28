@@ -12,7 +12,9 @@ class X86CodegenPackage:
 
     mode: str
     entry_point: str
+    ctx: Any | None = None
     files: dict[str, Any] = field(default_factory=dict)
     pipeline_summary_lines: list[str] = field(default_factory=list)
     pipeline_codegen_metadata: dict[str, Any] = field(default_factory=dict)
     scheduled_plan: Any | None = None
+    constants_metadata: dict[str, Any] = field(default_factory=dict)

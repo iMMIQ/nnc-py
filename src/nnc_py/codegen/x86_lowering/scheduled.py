@@ -41,6 +41,7 @@ def lower_scheduled_x86_codegen(
     return X86CodegenPackage(
         mode="scheduled",
         entry_point=backend._get_public_entry_point(ctx),
+        ctx=ctx,
         pipeline_summary_lines=list(pipeline_codegen_metadata.get("summary_lines", ())),
         pipeline_codegen_metadata=pipeline_codegen_metadata,
         scheduled_plan=scheduled_plan if prefer_scheduled_plan else None,
