@@ -6,6 +6,23 @@ import numpy as np
 
 from nnc_py.codegen.base import BackendBase, CodeGenResult
 from nnc_py.codegen.c_emitter import CEmitter
+from nnc_py.codegen.x86_emitters.model_source import (
+    _add_debug_macros as _ms_add_debug_macros,
+    _append_entry_point_alias as _ms_append_entry_point_alias,
+    _append_parallel_runtime_includes as _ms_append_parallel_runtime_includes,
+    _append_pipeline_schedule_summary_block as _ms_append_pipeline_schedule_summary_block,
+    _append_pipeline_step_comment_lines as _ms_append_pipeline_step_comment_lines,
+    _augment_parallel_runtime_for_legacy_spill as _ms_augment_parallel_runtime_for_legacy_spill,
+    _build_scheduled_transfer_body_lines as _ms_build_scheduled_transfer_body_lines,
+    _clone_pipeline_codegen_metadata as _ms_clone_pipeline_codegen_metadata,
+    _get_public_entry_point as _ms_get_public_entry_point,
+    _get_scheduled_transfer_points_for_node as _ms_get_scheduled_transfer_points_for_node,
+    _has_parallel_runtime as _ms_has_parallel_runtime,
+    _inject_debug_into_nnc_run as _ms_inject_debug_into_nnc_run,
+    _process_body_code as _ms_process_body_code,
+    _resolve_schedule_value_graph_tensor_name as _ms_resolve_schedule_value_graph_tensor_name,
+    _sanitize_c_comment_text as _ms_sanitize_c_comment_text,
+)
 from nnc_py.ir.context import CompileContext
 from nnc_py.ir.node import Node, OpType
 from nnc_py.ir.types import DataType
@@ -105,11 +122,7 @@ class X86Backend(BackendBase):
         return result
 
     def _get_public_entry_point(self, ctx: CompileContext) -> str:
-        """Get the public entry-point symbol name for generated code."""
-        entry_point = ctx.metadata.get("entry_point", "nnc_run")
-        if not isinstance(entry_point, str) or not entry_point:
-            return "nnc_run"
-        return entry_point
+        return _ms_get_public_entry_point(ctx)
 
     def _build_pipeline_codegen_metadata(
         self,
@@ -347,8 +360,7 @@ class X86Backend(BackendBase):
         }
 
     def _has_parallel_runtime(self, pipeline_codegen_metadata: dict[str, Any]) -> bool:
-        runtime = pipeline_codegen_metadata.get("parallel_runtime")
-        return bool(isinstance(runtime, dict) and runtime.get("enabled") is True)
+        return _ms_has_parallel_runtime(pipeline_codegen_metadata)
 
     def _parallel_step_function_name(self, step_id: str) -> str:
         sanitized = []
@@ -399,68 +411,29 @@ class X86Backend(BackendBase):
         self,
         ctx: CompileContext,
     ) -> dict[str, str]:
-        mapping: dict[str, str] = {}
-        for values in (
-            getattr(ctx.metadata.get("pipeline_schedule_result"), "scheduled_values", ()),
-            getattr(ctx.metadata.get("pipeline_schedule_problem"), "scheduled_values", ()),
-        ):
-            for value in values or ():
-                value_name = getattr(value, "name", None)
-                graph_tensor_name = getattr(value, "graph_tensor_name", None)
-                if not isinstance(value_name, str) or not isinstance(graph_tensor_name, str):
-                    continue
-                if not graph_tensor_name:
-                    continue
-                mapping.setdefault(value_name, graph_tensor_name)
-        return mapping
+        from nnc_py.codegen.x86_emitters.model_source import (
+            _build_schedule_value_graph_tensor_map as _fn,
+        )
+        return _fn(ctx)
 
     def _resolve_schedule_value_graph_tensor_name(
         self,
         ctx: CompileContext,
         value_name: str,
     ) -> str | None:
-        candidates: list[str] = []
-        graph_tensor_name = self._build_schedule_value_graph_tensor_map(ctx).get(value_name)
-        if isinstance(graph_tensor_name, str) and graph_tensor_name:
-            candidates.append(graph_tensor_name)
-
-        decoded_name = self._decode_schedule_value_graph_tensor_name(value_name)
-        if isinstance(decoded_name, str) and decoded_name:
-            candidates.append(decoded_name)
-
-        inferred_name = self._infer_schedule_value_graph_tensor_name(value_name)
-        if isinstance(inferred_name, str) and inferred_name:
-            candidates.append(inferred_name)
-
-        seen: set[str] = set()
-        for candidate in candidates:
-            if candidate in seen:
-                continue
-            seen.add(candidate)
-            if candidate in ctx.graph.tensors:
-                return candidate
-        return None
+        return _ms_resolve_schedule_value_graph_tensor_name(ctx, value_name)
 
     def _infer_schedule_value_graph_tensor_name(self, value_name: str) -> str | None:
-        if not value_name:
-            return None
-        for marker in (".reload", ".spill"):
-            if marker in value_name:
-                candidate = value_name.split(marker, 1)[0]
-                if candidate:
-                    return candidate
-        return None
+        from nnc_py.codegen.x86_emitters.model_source import (
+            _infer_schedule_value_graph_tensor_name as _fn,
+        )
+        return _fn(value_name)
 
     def _decode_schedule_value_graph_tensor_name(self, value_name: str) -> str | None:
-        if value_name.startswith("sram|node|") and "|tensor|" in value_name:
-            encoded_tensor = value_name.split("|tensor|", 1)[1]
-            name_parts = encoded_tensor.split(":", 1)
-            if len(name_parts) == 2:
-                return name_parts[1]
-            return encoded_tensor
-        if value_name.startswith("sram|"):
-            return None
-        return value_name
+        from nnc_py.codegen.x86_emitters.model_source import (
+            _decode_schedule_value_graph_tensor_name as _fn,
+        )
+        return _fn(value_name)
 
     def _collect_parallel_step_tensor_symbols(
         self,
@@ -590,17 +563,7 @@ class X86Backend(BackendBase):
         self,
         pipeline_codegen_metadata: dict[str, Any],
     ) -> dict[str, Any]:
-        cloned = dict(pipeline_codegen_metadata)
-        runtime = pipeline_codegen_metadata.get("parallel_runtime")
-        if not isinstance(runtime, dict):
-            return cloned
-
-        cloned_runtime = dict(runtime)
-        cloned_runtime["steps"] = tuple(dict(step) for step in runtime.get("steps", ()))
-        custom_declarations = runtime.get("custom_declarations", ())
-        cloned_runtime["custom_declarations"] = tuple(str(line) for line in custom_declarations)
-        cloned["parallel_runtime"] = cloned_runtime
-        return cloned
+        return _ms_clone_pipeline_codegen_metadata(pipeline_codegen_metadata)
 
     def _augment_parallel_runtime_for_legacy_spill(
         self,
@@ -608,66 +571,9 @@ class X86Backend(BackendBase):
         spill_plan: "SpillPlan",
         pipeline_codegen_metadata: dict[str, Any],
     ) -> dict[str, Any]:
-        if not self._has_parallel_runtime(pipeline_codegen_metadata):
-            return pipeline_codegen_metadata
-
-        cloned = self._clone_pipeline_codegen_metadata(pipeline_codegen_metadata)
-        runtime = cloned.get("parallel_runtime")
-        if not isinstance(runtime, dict):
-            return pipeline_codegen_metadata
-
-        steps_by_id = {
-            str(step["step_id"]): step
-            for step in tuple(runtime.get("steps", ()))
-        }
-        nodes = ctx.graph.topological_sort()
-
-        for node in nodes:
-            if node.op_type == OpType.CONSTANT:
-                continue
-
-            func_name = ctx.node_symbols.get(node.name, node.name)
-            dma_in_lines: list[str] = []
-            for reload_point in spill_plan.reload_points:
-                if reload_point.before_node != node.name:
-                    continue
-                dma_in_lines.extend(
-                    [
-                        "memcpy(",
-                        f"    _nnc_fast_pool + {reload_point.to_fast_offset},",
-                        f"    _nnc_slow_pool + {reload_point.from_slow_offset},",
-                        f"    {reload_point.size}",
-                        ");",
-                    ]
-                )
-
-            dma_out_lines: list[str] = []
-            for spill_point in spill_plan.spill_points:
-                if spill_point.after_node != node.name:
-                    continue
-                dma_out_lines.extend(
-                    [
-                        "memcpy(",
-                        f"    _nnc_slow_pool + {spill_point.to_slow_offset},",
-                        f"    _nnc_fast_pool + {spill_point.from_fast_offset},",
-                        f"    {spill_point.size}",
-                        ");",
-                    ]
-                )
-
-            compute_step = steps_by_id.get(f"{node.name}.compute")
-            if compute_step is not None:
-                compute_step["custom_body_lines"] = (f"{func_name}_body();",)
-
-            dma_in_step = steps_by_id.get(f"{node.name}.dma_in")
-            if dma_in_step is not None and dma_in_lines:
-                dma_in_step["custom_body_lines"] = tuple(dma_in_lines)
-
-            dma_out_step = steps_by_id.get(f"{node.name}.dma_out")
-            if dma_out_step is not None and dma_out_lines:
-                dma_out_step["custom_body_lines"] = tuple(dma_out_lines)
-
-        return cloned
+        return _ms_augment_parallel_runtime_for_legacy_spill(
+            ctx, spill_plan, pipeline_codegen_metadata,
+        )
 
     def _augment_parallel_runtime_for_scheduled_spill(
         self,
@@ -1496,36 +1402,7 @@ class X86Backend(BackendBase):
         ctx: CompileContext,
         transfer_point: Any,
     ) -> list[str]:
-        fast_expr = f"_nnc_fast_pool + {int(transfer_point.fast_offset)}"
-        slow_expr = f"_nnc_slow_pool + {int(transfer_point.slow_offset)}"
-        size_bytes = int(transfer_point.size_bytes)
-        tensor_value_name = transfer_point.resident_value_name or transfer_point.value_name
-        graph_tensor_name = self._resolve_schedule_value_graph_tensor_name(
-            ctx,
-            str(tensor_value_name),
-        )
-        tensor_symbol = None
-        if graph_tensor_name is not None:
-            tensor_symbol = ctx.tensor_symbols.get(graph_tensor_name, graph_tensor_name)
-
-        transfer_kind = getattr(getattr(transfer_point, "transfer_kind", None), "value", "")
-        custom_body_lines: list[str] = [f"/* {transfer_kind} */"]
-        if transfer_kind == "spill_dma":
-            if tensor_symbol is not None:
-                custom_body_lines.append(f"{tensor_symbol}.data = {fast_expr};")
-            custom_body_lines.append(
-                f"memcpy({slow_expr}, {fast_expr}, {size_bytes});"
-            )
-        elif transfer_kind == "reload_dma":
-            custom_body_lines.append(
-                f"memcpy({fast_expr}, {slow_expr}, {size_bytes});"
-            )
-            if tensor_symbol is not None:
-                custom_body_lines.append(f"{tensor_symbol}.data = {fast_expr};")
-        else:
-            return []
-
-        return custom_body_lines
+        return _ms_build_scheduled_transfer_body_lines(ctx, transfer_point)
 
     def _get_scheduled_transfer_points_for_node(
         self,
@@ -1535,24 +1412,12 @@ class X86Backend(BackendBase):
         after_node_name: str | None = None,
         transfer_kind: str | None = None,
     ) -> list[Any]:
-        transfer_points: list[Any] = []
-        for transfer_point in tuple(getattr(scheduled_plan, "transfer_points", ())):
-            kind_value = getattr(getattr(transfer_point, "transfer_kind", None), "value", "")
-            if transfer_kind is not None and kind_value != transfer_kind:
-                continue
-            if before_node_name is not None and getattr(transfer_point, "before_node_name", None) != before_node_name:
-                continue
-            if after_node_name is not None and getattr(transfer_point, "after_node_name", None) != after_node_name:
-                continue
-            transfer_points.append(transfer_point)
-        transfer_points.sort(
-            key=lambda item: (
-                int(getattr(item, "start_time", 0)),
-                int(getattr(item, "end_time", 0)),
-                str(getattr(item, "step_id", "")),
-            )
+        return _ms_get_scheduled_transfer_points_for_node(
+            scheduled_plan,
+            before_node_name=before_node_name,
+            after_node_name=after_node_name,
+            transfer_kind=transfer_kind,
         )
-        return transfer_points
 
     def _augment_parallel_runtime_for_unified_spill(
         self,
@@ -1899,23 +1764,7 @@ class X86Backend(BackendBase):
         pipeline_codegen_metadata: dict[str, Any],
     ) -> None:
         """Append runtime headers needed by the parallel scheduler executor."""
-        if not self._has_parallel_runtime(pipeline_codegen_metadata):
-            return
-        lines.extend(
-            [
-                "#ifndef _GNU_SOURCE",
-                "#define _GNU_SOURCE",
-                "#endif",
-                "#include <string.h>",
-                "#include <pthread.h>",
-                "#include <stdint.h>",
-                "#include <unistd.h>",
-                "#if defined(__linux__)",
-                "#include <sched.h>",
-                "#endif",
-                "",
-            ]
-        )
+        _ms_append_parallel_runtime_includes(lines, pipeline_codegen_metadata)
 
     def _render_parallel_runtime_block(
         self,
@@ -2072,7 +1921,7 @@ class X86Backend(BackendBase):
 
     def _sanitize_c_comment_text(self, value: str) -> str:
         """Avoid terminating generated C comments accidentally."""
-        return value.replace("*/", "* /").replace("\n", " ")
+        return _ms_sanitize_c_comment_text(value)
 
     def _append_pipeline_schedule_summary_block(
         self,
@@ -2080,13 +1929,7 @@ class X86Backend(BackendBase):
         pipeline_codegen_metadata: dict[str, Any],
     ) -> None:
         """Append a labeled pipeline schedule summary comment block."""
-        lines.append("/* Pipeline schedule summary")
-        for summary_line in pipeline_codegen_metadata.get("summary_lines", ()):
-            lines.append(
-                f" * {self._sanitize_c_comment_text(str(summary_line))}"
-            )
-        lines.append(" */")
-        lines.append("")
+        _ms_append_pipeline_schedule_summary_block(lines, pipeline_codegen_metadata)
 
     def _append_pipeline_step_comment_lines(
         self,
@@ -2097,8 +1940,9 @@ class X86Backend(BackendBase):
         indent: str = "",
     ) -> None:
         """Append grouped pipeline step comments for a node."""
-        for comment in pipeline_codegen_metadata.get("node_comments", {}).get(node_name, ()):
-            lines.append(f"{indent}/* {self._sanitize_c_comment_text(comment)} */")
+        _ms_append_pipeline_step_comment_lines(
+            lines, pipeline_codegen_metadata, node_name, indent=indent,
+        )
 
     def _get_tile_aware_runtime_plan(
         self,
@@ -2459,108 +2303,15 @@ class X86Backend(BackendBase):
 
     def _append_entry_point_alias(self, source_code: str, ctx: CompileContext) -> str:
         """Append a public wrapper when the requested entry point is not nnc_run."""
-        entry_point = self._get_public_entry_point(ctx)
-        if entry_point == "nnc_run":
-            return source_code
-
-        return (
-            source_code
-            + "\n"
-            + f"/* Public entry point alias */\nvoid {entry_point}(void) {{\n    nnc_run();\n}}\n"
-        )
+        return _ms_append_entry_point_alias(source_code, ctx)
 
     def _add_debug_macros(self, source_code: str) -> str:
-        """Add debug macro definitions to source code.
-
-        Args:
-            source_code: Generated C source code.
-
-        Returns:
-            Modified source code with debug macros if debug mode is enabled.
-        """
-        if not self.debug_mode:
-            return source_code
-
-        # Define debug macros - use debug_file for output (declared as extern in test_runner.c)
-        debug_macros = """
-/* Debug mode: macros for intermediate tensor output */
-/* Note: debug_file is defined in test_runner.c as a FILE* */
-extern FILE* debug_file;
-
-#ifndef DEBUG_PRINTF
-#define DEBUG_PRINTF(fmt, ...) do { \\
-    if (debug_file) { \\
-        fprintf(debug_file, fmt, ##__VA_ARGS__); \\
-    } else { \\
-        printf(fmt, ##__VA_ARGS__); \\
-    } \\
-} while(0)
-#endif
-
-#define DEBUG_PRINT_TENSOR_START(name, idx) DEBUG_PRINTF("DEBUG_TENSOR_START %s %d\\n", name, idx)
-#define DEBUG_PRINT_SHAPE(ndim) DEBUG_PRINTF("SHAPE %d\\n", ndim)
-#define DEBUG_PRINT_DIM(i, val) DEBUG_PRINTF("DIM %d %d\\n", i, val)
-#define DEBUG_PRINT_DATA_START() DEBUG_PRINTF("DATA_START\\n")
-#define DEBUG_PRINT_VALUE(val) DEBUG_PRINTF("%f\\n", val)
-#define DEBUG_PRINT_DATA_END() DEBUG_PRINTF("DATA_END\\n")
-#define DEBUG_PRINT_TENSOR_END(name) DEBUG_PRINTF("DEBUG_TENSOR_END %s\\n\\n", name)
-
-"""
-
-        lines = source_code.split("\n")
-        insert_at = None
-        in_block_comment = False
-
-        for index, line in enumerate(lines):
-            stripped = line.strip()
-            if stripped.startswith("/*"):
-                in_block_comment = True
-            if not in_block_comment and line.startswith("#include"):
-                insert_at = index + 1
-            if in_block_comment and "*/" in stripped:
-                in_block_comment = False
-
-        if insert_at is None:
-            insert_at = 0
-            for index, line in enumerate(lines):
-                stripped = line.strip()
-                if not stripped or stripped.startswith("/*"):
-                    continue
-                insert_at = index
-                break
-
-        output = lines[:insert_at] + [debug_macros] + lines[insert_at:]
-        return "\n".join(output)
+        """Add debug macro definitions to source code."""
+        return _ms_add_debug_macros(source_code, debug_mode=self.debug_mode)
 
     def _process_body_code(self, body_code: str, ctx: CompileContext) -> str:
         """Process the body code from CEmitter."""
-        lines = body_code.split("\n")
-        output = []
-        skip_main = False
-
-        for line in lines:
-            # Skip the includes (we already added them)
-            if line.startswith("#include") or line.startswith("/* Auto-generated"):
-                continue
-
-            # Skip the main nnc_run function (we'll generate our own)
-            if "void nnc_run(void)" in line:
-                skip_main = True
-                continue
-
-            if skip_main:
-                if line.startswith("}"):
-                    skip_main = False
-                continue
-
-            # Rename functions to _body
-            for node_name, func_name in ctx.node_symbols.items():
-                if f"void {func_name}(void)" in line:
-                    line = line.replace(f"void {func_name}(void)", f"static void {func_name}_body(void)")
-
-            output.append(line)
-
-        return "\n".join(output)
+        return _ms_process_body_code(body_code, ctx)
 
     def _generate_source_with_unified_spill(
         self,
@@ -3841,161 +3592,12 @@ extern FILE* debug_file;
             return "float"
 
     def _generate_debug_dump_code(self, ctx: CompileContext, tensor_name: str, node_idx: int, node_name: str) -> str:
-        """Generate C code to dump tensor values for debug comparison.
-
-        Args:
-            ctx: Compilation context.
-            tensor_name: Name of the tensor to dump.
-            node_idx: Index of the node that produced this tensor.
-            node_name: Name of the node that produced this tensor.
-
-        Returns:
-            C code string that dumps tensor values.
-        """
-        tensor = ctx.graph.get_tensor(tensor_name)
-        if tensor is None:
-            return ""
-
-        var_name = ctx.tensor_symbols.get(tensor_name, tensor_name)
-
-        # Calculate element size from dtype
-        elem_size_map = {
-            DataType.FLOAT32: 4,
-            DataType.FLOAT16: 2,
-            DataType.INT32: 4,
-            DataType.INT64: 8,
-            DataType.INT8: 1,
-            DataType.UINT8: 1,
-            DataType.BOOL: 1,
-        }
-        elem_size = elem_size_map.get(tensor.dtype, 4)
-
-        # Calculate number of elements from byte size
-        byte_size = tensor.byte_size()
-        if byte_size < 0:
-            # Unknown size due to symbolic dimensions
-            num_elements = -1
-        else:
-            num_elements = byte_size // elem_size
-
-        # Get number of dimensions
-        ndim = len(tensor.shape.dims)
-
-        # Determine how to read the tensor data based on dtype
-        # BOOL tensors are stored as uint8_t, need conversion to float for output
-        # INT64 tensors (e.g., from Shape operator) are stored as int64_t
-        is_bool = tensor.dtype == DataType.BOOL
-        is_int64 = tensor.dtype == DataType.INT64
-        if is_bool:
-            # For BOOL, read as uint8_t and convert to float
-            data_read_expr = f"((uint8_t*){var_name}.data)[i]"
-        elif is_int64:
-            # For INT64, read as int64_t and convert to float
-            data_read_expr = f"(float)((int64_t*){var_name}.data)[i]"
-        else:
-            # For other types, read as float
-            data_read_expr = f"((float*){var_name}.data)[i]"
-
-        if self.debug_mode:
-            # Use debug macros for file output
-            code = f"""
-    /* Debug dump: {tensor_name} after node {node_idx} ({node_name}) */
-    DEBUG_PRINT_TENSOR_START("{tensor_name}", {node_idx});
-    DEBUG_PRINT_SHAPE({ndim});
-"""
-            for i, dim in enumerate(tensor.shape.dims):
-                if isinstance(dim, int):
-                    code += f'    DEBUG_PRINT_DIM({i}, {dim});\n'
-                else:
-                    # For symbolic dimensions, use the actual index value (not Python variable i)
-                    code += f'    DEBUG_PRINT_DIM({i}, (int){var_name}.shape[{i}]);\n'
-
-            code += f"""
-    DEBUG_PRINT_DATA_START();
-    for (int i = 0; i < {num_elements}; i++) {{
-        DEBUG_PRINT_VALUE((float){data_read_expr});
-    }}
-    DEBUG_PRINT_DATA_END();
-    DEBUG_PRINT_TENSOR_END("{tensor_name}");
-"""
-        else:
-            # Standard printf output (for debugging compiler itself)
-            code = f"""
-    /* Debug dump: {tensor_name} after node {node_idx} ({node_name}) */
-    printf("DEBUG_TENSOR_START %s %d\\n", "{tensor_name}", {node_idx});
-    printf("SHAPE %d\\n", {ndim});
-"""
-            for i, dim in enumerate(tensor.shape.dims):
-                if isinstance(dim, int):
-                    code += f'    printf("DIM {i} %d\\\\n", {dim});\n'
-                else:
-                    # For symbolic dimensions, use the actual index value (not Python variable i)
-                    code += f'    printf("DIM {i} %d\\\\n", (int){var_name}.shape[{i}]);\n'
-
-            code += f"""
-    printf("DATA_START\\\\n");
-    for (int i = 0; i < {num_elements}; i++) {{
-        printf("%f\\\\n", (float){data_read_expr});
-    }}
-    printf("DATA_END\\\\n");
-    printf("DEBUG_TENSOR_END %s\\\\n\\n", "{tensor_name}");
-"""
-        return code
+        """Generate C code to dump tensor values for debug comparison."""
+        from nnc_py.codegen.x86_emitters.model_source import (
+            _generate_debug_dump_code as _fn,
+        )
+        return _fn(ctx, tensor_name, node_idx, node_name, debug_mode=self.debug_mode)
 
     def _inject_debug_into_nnc_run(self, source_code: str, ctx: CompileContext) -> str:
-        """Inject debug dump code into nnc_run function.
-
-        Args:
-            source_code: Generated C source code.
-            ctx: Compilation context.
-
-        Returns:
-            Modified source code with debug dumps.
-        """
-        if not self.debug_mode:
-            return source_code
-
-        lines = source_code.split("\n")
-        output = []
-        in_nnc_run = False
-        brace_count = 0
-        node_idx = 0
-        nodes = ctx.graph.topological_sort()
-
-        for i, line in enumerate(lines):
-            output.append(line)
-
-            # Detect nnc_run function start
-            if "void nnc_run(void)" in line:
-                in_nnc_run = True
-                brace_count = 0
-                continue
-
-            if in_nnc_run:
-                # Count braces to track function scope
-                brace_count += line.count("{") - line.count("}")
-
-                # After each function call, add debug dump for outputs
-                for node in nodes:
-                    if node.op_type == OpType.CONSTANT:
-                        continue
-                    func_name = ctx.node_symbols.get(node.name, node.name)
-                    if f"{func_name}();" in line:
-                        # Add debug dump for each output tensor of this node
-                        for out_name in node.outputs:
-                            tensor = ctx.graph.get_tensor(out_name)
-                            if tensor is not None and out_name not in ctx.graph.constants:
-                                debug_code = self._generate_debug_dump_code(
-                                    ctx, out_name, node_idx, node.name
-                                )
-                                # Add indentation and lines
-                                for debug_line in debug_code.strip().split("\n"):
-                                    output.append(debug_line)
-                        node_idx += 1
-                        break
-
-                # End of function
-                if brace_count == 0 and "}" in line:
-                    in_nnc_run = False
-
-        return "\n".join(output)
+        """Inject debug dump code into nnc_run function."""
+        return _ms_inject_debug_into_nnc_run(source_code, ctx, debug_mode=self.debug_mode)
