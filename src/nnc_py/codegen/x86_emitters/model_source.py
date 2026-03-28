@@ -4,14 +4,73 @@ from __future__ import annotations
 
 from typing import Any
 
+from nnc_py.codegen.c_emitter import CEmitter
 from nnc_py.codegen.x86_ir import X86CodegenPackage
+from nnc_py.passes.memory_planning import get_memory_allocation_plan
+from nnc_py.passes.spill import get_spill_plan
 
 
 def emit_model_source(package: X86CodegenPackage, backend: Any | None = None) -> str:
     """Emit model source from a lowered package."""
     if package.ctx is None or backend is None:
         return _emit_minimal_model_source(package)
-    return backend._generate_source(package.ctx)
+
+    ctx = package.ctx
+    alloc_plan = get_memory_allocation_plan(ctx)
+    tile_aware_runtime_plan = backend._get_tile_aware_runtime_plan(ctx, alloc_plan)
+    scheduled_plan = package.scheduled_plan
+    prefer_scheduled_plan = scheduled_plan is not None
+    pipeline_codegen_metadata = package.pipeline_codegen_metadata
+    spill_plan = get_spill_plan(ctx)
+
+    used_standard_emitter = False
+    if (
+        prefer_scheduled_plan
+        and backend.debug_mode
+        and scheduled_plan is not None
+        and bool(getattr(scheduled_plan, "transfer_points", ()))
+    ):
+        source = backend._generate_source_with_scheduled_spill(
+            ctx,
+            scheduled_plan,
+            pipeline_codegen_metadata,
+        )
+    elif prefer_scheduled_plan:
+        emitter = CEmitter(
+            tile_aware_wrapper_nodes=tile_aware_runtime_plan.get("wrapper_nodes", {}),
+            pipeline_schedule_metadata=pipeline_codegen_metadata,
+        )
+        source = emitter.emit(ctx)
+        used_standard_emitter = True
+    elif alloc_plan is not None and (alloc_plan.has_spill or bool(alloc_plan.move_points)):
+        source = backend._generate_source_with_unified_spill(
+            ctx,
+            alloc_plan,
+            pipeline_codegen_metadata,
+        )
+    elif spill_plan is not None and spill_plan.has_overflow:
+        source = backend._generate_source_with_spill(
+            ctx,
+            spill_plan,
+            pipeline_codegen_metadata,
+        )
+    else:
+        emitter = CEmitter(
+            tile_aware_wrapper_nodes=tile_aware_runtime_plan.get("wrapper_nodes", {}),
+            pipeline_schedule_metadata=pipeline_codegen_metadata,
+        )
+        source = emitter.emit(ctx)
+        used_standard_emitter = True
+
+    if used_standard_emitter:
+        source = backend._inject_parallel_runtime_into_emitted_source(
+            source,
+            pipeline_codegen_metadata,
+        )
+
+    source = backend._add_debug_macros(source)
+    source = backend._inject_debug_into_nnc_run(source, ctx)
+    return backend._append_entry_point_alias(source, ctx)
 
 
 def _emit_minimal_model_source(package: X86CodegenPackage) -> str:

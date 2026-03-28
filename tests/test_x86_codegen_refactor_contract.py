@@ -165,3 +165,20 @@ def test_model_source_emitter_uses_lowered_pipeline_summary_without_context():
     assert "schedule_metadata=absent" in source_text
     assert "void nnc_run(void)" in source_text
     assert "void my_infer(void)" in source_text
+
+
+def test_model_source_emitter_does_not_delegate_back_to_backend_generate_source(monkeypatch):
+    from nnc_py.codegen.x86_emitters.model_source import emit_model_source
+    from nnc_py.codegen.x86_lowering.serial import lower_serial_x86_codegen
+
+    ctx = _make_relu_context()
+    backend = X86Backend()
+    backend._assign_symbols(ctx)
+
+    package = lower_serial_x86_codegen(ctx, backend)
+    assert not hasattr(backend, "_generate_source")
+
+    source_text = emit_model_source(package, backend)
+
+    assert "Pipeline schedule summary" in source_text
+    assert "void nnc_run(void)" in source_text
