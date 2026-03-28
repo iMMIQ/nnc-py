@@ -228,19 +228,21 @@ def _build_large_op_steps(
             node_input_specs.append(staged_spec)
         else:
             node_input_specs.append(external_spec)
-    steps = [
-        _make_step(
-            plan,
-            provider=provider,
-            step_id=dma_in_step_id,
-            step_kind=ScheduleStepKind.DMA_IN,
-            resource_kind=PipelineResourceKind.DMA,
-            input_specs=dma_input_specs,
-            output_specs=tuple(staged_inputs),
-            sram_temp_bytes=0,
-            attrs={"phase": "ingress"},
+    steps: list[ScheduleStep] = []
+    if staged_inputs:
+        steps.append(
+            _make_step(
+                plan,
+                provider=provider,
+                step_id=dma_in_step_id,
+                step_kind=ScheduleStepKind.DMA_IN,
+                resource_kind=PipelineResourceKind.DMA,
+                input_specs=dma_input_specs,
+                output_specs=tuple(staged_inputs),
+                sram_temp_bytes=0,
+                attrs={"phase": "ingress"},
+            )
         )
-    ]
 
     compute_input_specs = list(node_input_specs)
     produced_values: list[_ValueSpec] = list(staged_inputs)

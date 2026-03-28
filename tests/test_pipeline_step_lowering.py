@@ -400,6 +400,73 @@ def _make_conv_with_2d_tile_extents_context() -> CompileContext:
     return ctx
 
 
+def _make_large_op_without_staged_inputs_context() -> CompileContext:
+    graph = Graph("large_op_without_staged_inputs")
+    graph.inputs = ["a"]
+    graph.outputs = ["y"]
+
+    graph.add_tensor(
+        TensorType(
+            name="a",
+            dtype=DataType.FLOAT32,
+            shape=TensorShape([1, 1024]),
+        )
+    )
+    graph.add_tensor(
+        TensorType(
+            name="b",
+            dtype=DataType.FLOAT32,
+            shape=TensorShape([1024, 1024]),
+        )
+    )
+    graph.add_tensor(
+        TensorType(
+            name="y",
+            dtype=DataType.FLOAT32,
+            shape=TensorShape([1, 1024]),
+        )
+    )
+
+    graph.constants["b"] = [1.0]
+    graph.add_node(
+        Node(
+            op_type=OpType.GEMM,
+            name="gemm0",
+            inputs=["a", "b"],
+            outputs=["y"],
+        )
+    )
+
+    ctx = CompileContext(graph=graph, target="x86", optimization_level=3)
+    set_node_execution_plan(
+        ctx,
+        NodeExecutionPlan(
+            node_name="gemm0",
+            op_family="gemm",
+            tile_axes=("m", "n"),
+            layout_class=LayoutClass.PLAIN,
+            input_accesses=(
+                TensorAccessPlan(
+                    tensor_name="a",
+                    memory_region=MemoryRegionKind.PERSISTENT,
+                ),
+                TensorAccessPlan(
+                    tensor_name="b",
+                    memory_region=MemoryRegionKind.PERSISTENT,
+                ),
+            ),
+            output_accesses=(
+                TensorAccessPlan(
+                    tensor_name="y",
+                    memory_region=MemoryRegionKind.PERSISTENT,
+                ),
+            ),
+        ),
+    )
+    ctx.metadata["max_memory"] = 1
+    return ctx
+
+
 def test_tiled_conv_lowers_to_mixed_granularity_schedule_problem():
     ctx = _make_conv_relu_context()
 
@@ -715,3 +782,20 @@ def test_lowering_tracks_external_input_values_for_scheduler_validation():
     assert scheduled_values["weight"].home_tier is ScheduledValueHomeTier.SLOW
     assert "conv0.dma_in" in scheduled_values["input"].consumer_step_ids
     assert "conv0.dma_in" in scheduled_values["weight"].consumer_step_ids
+
+
+def test_large_op_skips_empty_dma_ingress_when_no_inputs_are_staged():
+    ctx = _make_large_op_without_staged_inputs_context()
+
+    _run_pipeline_step_lowering(ctx)
+
+    problem = ctx.get_pipeline_schedule_problem()
+    assert problem is not None
+
+    gemm_steps = [step for step in problem.steps if step.node_name == "gemm0"]
+    assert [step.id for step in gemm_steps] == ["gemm0.compute", "gemm0.dma_out"]
+    assert all(step.id != "gemm0.dma_in" for step in gemm_steps)
+
+    scheduled_values = {value.name: value for value in problem.scheduled_values}
+    assert scheduled_values["a"].consumer_step_ids == ("gemm0.compute",)
+    assert scheduled_values["b"].consumer_step_ids == ("gemm0.compute",)
