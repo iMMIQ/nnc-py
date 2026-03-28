@@ -10,6 +10,31 @@ from nnc_py.passes.memory_planning import get_memory_allocation_plan
 from nnc_py.passes.spill import get_spill_plan
 
 
+# ---------------------------------------------------------------------------
+# Pure helper functions (migrated from X86Backend)
+# ---------------------------------------------------------------------------
+
+def _sanitize_c_comment_text(value: str) -> str:
+    """Avoid terminating generated C comments accidentally."""
+    return value.replace("*/", "* /").replace("\n", " ")
+
+
+def _has_parallel_runtime(pipeline_codegen_metadata: dict[str, Any]) -> bool:
+    runtime = pipeline_codegen_metadata.get("parallel_runtime")
+    return bool(isinstance(runtime, dict) and runtime.get("enabled") is True)
+
+
+def _get_public_entry_point(ctx: Any) -> str:
+    entry_point = ctx.metadata.get("entry_point", "nnc_run")
+    if not isinstance(entry_point, str) or not entry_point:
+        return "nnc_run"
+    return entry_point
+
+
+# ---------------------------------------------------------------------------
+# Main emitter
+# ---------------------------------------------------------------------------
+
 def emit_model_source(package: X86CodegenPackage, backend: Any | None = None) -> str:
     """Emit model source from a lowered package."""
     if package.ctx is None or backend is None:
@@ -107,11 +132,11 @@ def _emit_minimal_model_source(package: X86CodegenPackage) -> str:
 def _append_pipeline_schedule_summary_block(
     lines: list[str],
     pipeline_codegen_metadata: dict[str, Any],
-    backend: Any,
+    backend: Any | None = None,
 ) -> None:
     lines.append("/* Pipeline schedule summary")
     for summary_line in pipeline_codegen_metadata.get("summary_lines", ()):
-        lines.append(f" * {backend._sanitize_c_comment_text(str(summary_line))}")
+        lines.append(f" * {_sanitize_c_comment_text(str(summary_line))}")
     lines.append(" */")
     lines.append("")
 
@@ -121,11 +146,11 @@ def _append_pipeline_step_comment_lines(
     pipeline_codegen_metadata: dict[str, Any],
     node_name: str,
     *,
-    backend: Any,
+    backend: Any | None = None,
     indent: str = "",
 ) -> None:
     for comment in pipeline_codegen_metadata.get("node_comments", {}).get(node_name, ()):
-        lines.append(f"{indent}/* {backend._sanitize_c_comment_text(comment)} */")
+        lines.append(f"{indent}/* {_sanitize_c_comment_text(comment)} */")
 
 
 def _emit_scheduled_spill_model_source(
@@ -330,7 +355,7 @@ def _emit_legacy_spill_model_source(
     lines.append("/* Main inference entry point */")
     lines.append("void nnc_run(void) {")
 
-    if backend._has_parallel_runtime(pipeline_codegen_metadata):
+    if _has_parallel_runtime(pipeline_codegen_metadata):
         lines.append("    nnc_pipeline_run_parallel();")
     else:
         for node in nodes:

@@ -2,11 +2,293 @@
 
 from __future__ import annotations
 
+import struct
 from typing import Any
+
+import numpy as np
 
 from nnc_py.codegen.x86_ir import X86CodegenPackage
 
 
-def emit_constants_loader(package: X86CodegenPackage, backend: Any) -> str:
+def _get_constant_type_info(arr: np.ndarray) -> tuple[str, int, str]:
+    """Get C type, element size, and NNC dtype enum for a constant array.
+
+    Returns:
+        Tuple of (c_dtype, element_size, nnc_dtype_enum)
+    """
+    if arr.dtype == np.float32:
+        return "float", 4, "NNC_DTYPE_FLOAT32"
+    elif arr.dtype == np.float64:
+        return "double", 8, "NNC_DTYPE_FLOAT32"
+    elif arr.dtype == np.float16:
+        return "uint16_t", 2, "NNC_DTYPE_FLOAT16"
+    elif arr.dtype == np.int64:
+        return "int64_t", 8, "NNC_DTYPE_INT64"
+    elif arr.dtype == np.int32:
+        return "int32_t", 4, "NNC_DTYPE_INT32"
+    elif arr.dtype == np.int8:
+        return "int8_t", 1, "NNC_DTYPE_INT8"
+    elif arr.dtype == np.uint8:
+        return "uint8_t", 1, "NNC_DTYPE_UINT8"
+    elif arr.dtype == np.bool_:
+        return "uint8_t", 1, "NNC_DTYPE_BOOL"
+    else:
+        # Default to float32
+        return "float", 4, "NNC_DTYPE_FLOAT32"
+
+
+def generate_constants_binary(ctx: Any) -> tuple[bytes, dict[str, Any]]:
+    """Generate constants as binary file with metadata.
+
+    Binary format:
+    - Header: magic number (4 bytes), version (4 bytes), num_constants (4 bytes)
+    - For each constant:
+        - name_len (4 bytes), name (null-terminated string)
+        - dtype (4 bytes: 0=float32, 1=float16, 2=int32, 3=int8, 4=uint8, 5=bool)
+        - ndim (4 bytes)
+        - shape (ndim * 8 bytes, int64_t each)
+        - nbytes (8 bytes)
+        - data (nbytes)
+
+    Returns:
+        Tuple of (binary_data, metadata_dict)
+    """
+    MAGIC = b'NNCB'
+    VERSION = 1
+
+    # Build metadata dict for C code generation
+    metadata: dict[str, Any] = {}
+
+    # First pass: calculate offsets
+    offset = 12  # header: magic (4) + version (4) + num_constants (4)
+
+    constant_entries: list[dict[str, Any]] = []
+    for name, arr in ctx.graph.constants.items():
+        var_name = ctx.tensor_symbols.get(name, name)
+        dtype, element_size, nnc_dtype = _get_constant_type_info(arr)
+        shape = list(arr.shape)
+        ndim = len(shape)
+        nbytes = arr.nbytes
+
+        # Map dtype to enum
+        dtype_enum = {
+            "float": 0,
+            "double": 0,
+            "uint16_t": 1,
+            "int64_t": 2,
+            "int32_t": 3,
+            "int8_t": 4,
+            "uint8_t": 5,
+        }.get(dtype, 0)
+
+        # Calculate entry size
+        name_bytes = var_name.encode('utf-8')
+        name_len = len(name_bytes) + 1  # null-terminated
+
+        entry_header_size = 4 + name_len + 4 + 4 + (ndim * 8) + 8
+        # name_len + name + dtype + ndim + shape + nbytes
+
+        data_offset = offset + entry_header_size
+
+        constant_entries.append({
+            'name': var_name,
+            'original_name': name,
+            'dtype': dtype,
+            'dtype_enum': dtype_enum,
+            'nnc_dtype': nnc_dtype,
+            'shape': shape,
+            'ndim': ndim,
+            'nbytes': nbytes,
+            'element_size': element_size,
+            'data': arr.tobytes(),
+            'offset': data_offset,
+        })
+
+        metadata[var_name] = {
+            'dtype': dtype,
+            'nnc_dtype': nnc_dtype,
+            'shape': shape,
+            'ndim': ndim,
+            'nbytes': nbytes,
+            'offset': data_offset,
+        }
+
+        offset = data_offset + nbytes
+
+    # Build binary data with interleaved headers and data
+    parts: list[bytes] = []
+    parts.append(MAGIC)
+    parts.append(struct.pack('<I', VERSION))
+    parts.append(struct.pack('<I', len(constant_entries)))
+
+    for entry in constant_entries:
+        name = str(entry['name'])
+        name_bytes = name.encode('utf-8')
+        parts.append(struct.pack('<I', len(name_bytes) + 1))  # name_len
+        parts.append(name_bytes + b'\x00')  # name (null-terminated)
+        parts.append(struct.pack('<I', int(entry['dtype_enum'])))  # dtype
+        parts.append(struct.pack('<I', int(entry['ndim'])))  # ndim
+        # shape
+        shape = entry['shape']
+        if isinstance(shape, list):
+            for dim in shape:
+                parts.append(struct.pack('<q', int(dim)))
+        parts.append(struct.pack('<Q', int(entry['nbytes'])))  # nbytes
+        # Data immediately follows header
+        data = entry['data']
+        if isinstance(data, bytes):
+            parts.append(data)
+        else:
+            parts.append(bytes(data))
+
+    return b''.join(parts), metadata
+
+
+def emit_constants_loader(package: X86CodegenPackage) -> str:
     """Emit the constants loader source from a lowered package."""
-    return backend._generate_constants_loader(package.ctx, package.constants_metadata)
+    ctx = package.ctx
+    metadata = package.constants_metadata
+
+    lines = [
+        "/* Auto-generated by NNC - DO NOT EDIT */",
+        '#include "nnc_types.h"',
+        '#include <stdio.h>',
+        '#include <stdlib.h>',
+        '#include <string.h>',
+        "",
+        "/* Constants data loaded from binary file */",
+        "",
+    ]
+
+    # Generate static data buffers for each constant
+    for name, arr in ctx.graph.constants.items():
+        var_name = ctx.tensor_symbols.get(name, name)
+        dtype, element_size, nnc_dtype = _get_constant_type_info(arr)
+        size = arr.size
+
+        # For INT64/INT32 constants (used as shapes), make data array non-static
+        is_shape_constant = (arr.dtype == np.int64 or arr.dtype == np.int32)
+        storage_class = "" if is_shape_constant else "static "
+
+        lines.append(f"/* Constant: {name} */")
+        lines.append(f"{storage_class}{dtype} {var_name}_data[{size}];")
+        lines.append("")
+
+    lines.append("/* Tensor structures */")
+    for name, arr in ctx.graph.constants.items():
+        var_name = ctx.tensor_symbols.get(name, name)
+        shape = list(arr.shape)
+        dtype, element_size, nnc_dtype = _get_constant_type_info(arr)
+        # Handle symbolic dimensions (strings) by converting to -1
+        shape_str = ", ".join(str(s) if isinstance(s, (int, float)) else "-1" for s in shape)
+
+        lines.append(f"static const int64_t {var_name}_shape[] = {{{shape_str}}};")
+        lines.append(f"Tensor {var_name} = {{")
+        lines.append(f"    .data = (void*){var_name}_data,")
+        lines.append(f"    .dtype = {nnc_dtype},")
+        lines.append(f"    .shape = (int64_t*){var_name}_shape,")
+        lines.append(f"    .ndim = {len(shape)},")
+        lines.append(f"    .nbytes = {arr.nbytes},")
+        lines.append("};")
+        lines.append("")
+
+    # Generate loading code - one section per constant in order
+    lines.extend([
+        "/* Load constants from binary file */",
+        "int nnc_load_constants(const char* path) {",
+        "    FILE* f = fopen(path, \"rb\");",
+        "    if (!f) {",
+        "        fprintf(stderr, \"Failed to open constants file: %s\\n\", path);",
+        "        return -1;",
+        "    }",
+        "",
+        "    /* Check magic number */",
+        "    char magic[4];",
+        "    if (fread(magic, 1, 4, f) != 4 || memcmp(magic, \"NNCB\", 4) != 0) {",
+        "        fprintf(stderr, \"Invalid constants file format\\n\");",
+        "        fclose(f);",
+        "        return -1;",
+        "    }",
+        "",
+        "    /* Check version */",
+        "    uint32_t version;",
+        "    if (fread(&version, sizeof(uint32_t), 1, f) != 1) {",
+        "        fprintf(stderr, \"Failed to read version\\n\");",
+        "        fclose(f);",
+        "        return -1;",
+        "    }",
+        "    if (version != 1) {",
+        "        fprintf(stderr, \"Unsupported version: %u\\n\", version);",
+        "        fclose(f);",
+        "        return -1;",
+        "    }",
+        "",
+        "    /* Get number of constants */",
+        "    uint32_t num_constants;",
+        "    if (fread(&num_constants, sizeof(uint32_t), 1, f) != 1) {",
+        "        fprintf(stderr, \"Failed to read num_constants\\n\");",
+        "        fclose(f);",
+        "        return -1;",
+        "    }",
+        "",
+        f"    (void)num_constants;  /* Will be implicitly checked by loading each constant */",
+        "",
+    ])
+
+    # Generate a loading block for each constant - they must match the file order
+    for idx, (name, arr) in enumerate(ctx.graph.constants.items()):
+        var_name = ctx.tensor_symbols.get(name, name)
+        dtype, element_size, nnc_dtype = _get_constant_type_info(arr)
+        ndim = len(arr.shape)
+        # Handle symbolic dimensions (strings) by converting to -1
+        shape_str = ", ".join(str(s) if isinstance(s, (int, float)) else "-1" for s in arr.shape)
+        data_size = arr.nbytes
+
+        lines.extend([
+            f"    /* Load constant {idx}: {name} */",
+            f"    {{",
+            f"        /* Read name */",
+            f"        uint32_t name_len;",
+            f"        if (fread(&name_len, sizeof(uint32_t), 1, f) != 1) {{",
+            f"            fprintf(stderr, \"Failed to read name_len for constant {idx}\\\\n\");",
+            f"            fclose(f);",
+            f"            return -1;",
+            f"        }}",
+            f"        char name[256];",
+            f"        if (name_len >= sizeof(name)) {{",
+            f"            fprintf(stderr, \"Name too long for constant {idx}: %u\\\\n\", name_len);",
+            f"            fclose(f);",
+            f"            return -1;",
+            f"        }}",
+            f"        if (fread(name, 1, name_len, f) != name_len) {{",
+            f"            fprintf(stderr, \"Failed to read name for constant {idx}\\\\n\");",
+            f"            fclose(f);",
+            f"            return -1;",
+            f"        }}",
+            f"        if (strcmp(name, \"{var_name}\") != 0) {{",
+            f"            fprintf(stderr, \"Name mismatch for constant {idx}: expected '{var_name}', got '%s'\\\\n\", name);",
+            f"            fclose(f);",
+            f"            return -1;",
+            f"        }}",
+            f"        /* Skip dtype, ndim, shape - we know them from codegen */",
+            f"        fseek(f, 4, SEEK_CUR);  /* dtype */",
+            f"        fseek(f, 4, SEEK_CUR);  /* ndim */",
+            f"        fseek(f, {ndim * 8}, SEEK_CUR);  /* shape ({ndim} dims) */",
+            f"        fseek(f, 8, SEEK_CUR);  /* nbytes */",
+            f"        /* Read data */",
+            f"        if (fread({var_name}_data, 1, {data_size}, f) != {data_size}) {{",
+            f"            fprintf(stderr, \"Failed to read data for {var_name}\\\\n\");",
+            f"            fclose(f);",
+            f"            return -1;",
+            f"        }}",
+            f"    }}",
+            f"",
+        ])
+
+    lines.extend([
+        "    fclose(f);",
+        "    return 0;",
+        "}",
+    ])
+
+    return "\n".join(lines)
