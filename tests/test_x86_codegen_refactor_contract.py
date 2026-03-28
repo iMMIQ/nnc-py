@@ -9,6 +9,8 @@ from onnx import TensorProto, helper
 
 from nnc_py.compiler import Compiler
 from nnc_py.codegen.x86_backend import X86Backend
+from nnc_py.passes.spill import ReloadPoint as LegacyReloadPoint
+from nnc_py.passes.spill import SpillPlan, SpillPoint as LegacySpillPoint
 from test_codegen_pipeline_schedule import (
     _make_relu_context,
     make_codegen_context_with_native_spill,
@@ -182,3 +184,62 @@ def test_model_source_emitter_does_not_delegate_back_to_backend_generate_source(
 
     assert "Pipeline schedule summary" in source_text
     assert "void nnc_run(void)" in source_text
+
+
+def test_model_source_emitter_does_not_delegate_back_to_backend_scheduled_spill(monkeypatch):
+    from nnc_py.codegen.x86_emitters.model_source import emit_model_source
+    from nnc_py.codegen.x86_lowering.scheduled import lower_scheduled_x86_codegen
+
+    ctx = make_codegen_context_with_native_spill()
+    backend = X86Backend(debug_mode=True)
+    backend._assign_symbols(ctx)
+
+    package = lower_scheduled_x86_codegen(ctx, backend)
+    assert not hasattr(backend, "_generate_source_with_scheduled_spill")
+
+    source_text = emit_model_source(package, backend)
+
+    assert "spill_dma" in source_text
+    assert "reload_dma" in source_text
+
+
+def test_model_source_emitter_does_not_delegate_back_to_backend_legacy_spill(monkeypatch):
+    from nnc_py.codegen.x86_emitters.model_source import emit_model_source
+    from nnc_py.codegen.x86_lowering.serial import lower_serial_x86_codegen
+
+    ctx = _make_relu_context()
+    backend = X86Backend()
+    backend._assign_symbols(ctx)
+    ctx.metadata["spill_plan"] = SpillPlan(
+        original_memory_size=128,
+        fast_memory_size=64,
+        slow_memory_size=64,
+        max_memory=64,
+        spilled_tensors={},
+        spill_points=[
+            LegacySpillPoint(
+                tensor_name="output",
+                after_node="relu0",
+                from_fast_offset=0,
+                to_slow_offset=0,
+                size=16,
+            )
+        ],
+        reload_points=[
+            LegacyReloadPoint(
+                tensor_name="input",
+                before_node="relu0",
+                from_slow_offset=0,
+                to_fast_offset=0,
+                size=16,
+            )
+        ],
+        memory_plan=None,
+    )
+    package = lower_serial_x86_codegen(ctx, backend)
+    assert not hasattr(backend, "_generate_source_with_spill")
+
+    source_text = emit_model_source(package, backend)
+
+    assert "Reload input from slow memory" in source_text
+    assert "Spill output to slow memory" in source_text
