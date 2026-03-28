@@ -2905,34 +2905,30 @@ class X86Backend(BackendBase):
     def _generate_source(self, ctx: CompileContext) -> str:
         """Generate main source file with spill/reload support."""
         from nnc_py.codegen.c_emitter import CEmitter
+        from nnc_py.codegen.x86_lowering.scheduled import lower_scheduled_x86_codegen
         from nnc_py.passes.memory_planning import get_memory_allocation_plan
         from nnc_py.passes.spill import get_spill_plan
 
         # Check for new MemoryAllocationPlan
         alloc_plan = get_memory_allocation_plan(ctx)
+        tile_aware_runtime_plan = self._get_tile_aware_runtime_plan(ctx, alloc_plan)
         scheduled_plan = self._get_scheduled_memory_plan(ctx)
         prefer_scheduled_plan = self._prefer_scheduled_memory_plan(ctx, scheduled_plan)
-        tile_aware_runtime_plan = self._get_tile_aware_runtime_plan(ctx, alloc_plan)
-        pipeline_codegen_metadata = self._build_pipeline_codegen_metadata(
-            ctx,
-            alloc_plan,
-            scheduled_plan=scheduled_plan if prefer_scheduled_plan else None,
-        )
-        if prefer_scheduled_plan and scheduled_plan is not None:
-            pipeline_codegen_metadata = self._augment_parallel_runtime_for_scheduled_spill(
+        if prefer_scheduled_plan or bool(ctx.metadata.get("pipeline_scheduler_enabled")):
+            scheduled_codegen = lower_scheduled_x86_codegen(
                 ctx,
-                scheduled_plan,
-                pipeline_codegen_metadata,
+                self,
+                alloc_plan=alloc_plan,
             )
-            if not bool(getattr(scheduled_plan, "transfer_points", ())):
-                pipeline_codegen_metadata = self._augment_parallel_runtime_for_scheduled_tile_streaming(
-                    ctx,
-                    pipeline_codegen_metadata,
-                )
-                pipeline_codegen_metadata = self._augment_parallel_runtime_for_scheduled_home_execution(
-                    ctx,
-                    pipeline_codegen_metadata,
-                )
+            scheduled_plan = scheduled_codegen.scheduled_plan
+            prefer_scheduled_plan = scheduled_plan is not None
+            pipeline_codegen_metadata = scheduled_codegen.pipeline_codegen_metadata
+        else:
+            pipeline_codegen_metadata = self._build_pipeline_codegen_metadata(
+                ctx,
+                alloc_plan,
+                scheduled_plan=None,
+            )
 
         # Check for legacy spill plan
         spill_plan = get_spill_plan(ctx)

@@ -8,6 +8,8 @@ import onnx
 from onnx import TensorProto, helper
 
 from nnc_py.compiler import Compiler
+from nnc_py.codegen.x86_backend import X86Backend
+from test_codegen_pipeline_schedule import make_codegen_context_with_native_spill
 from test_pipeline_scheduler_e2e import _compile_model
 
 
@@ -101,3 +103,17 @@ def test_x86_codegen_package_defaults():
     assert package.entry_point == "nnc_run"
     assert package.files == {}
     assert package.pipeline_summary_lines == []
+
+
+def test_lower_scheduled_x86_codegen_builds_pipeline_metadata():
+    from nnc_py.codegen.x86_lowering.scheduled import lower_scheduled_x86_codegen
+
+    ctx = make_codegen_context_with_native_spill()
+    backend = X86Backend()
+    backend._assign_symbols(ctx)
+
+    package = lower_scheduled_x86_codegen(ctx, backend)
+
+    assert package.mode == "scheduled"
+    assert package.pipeline_summary_lines
+    assert package.pipeline_codegen_metadata["summary_lines"] == package.pipeline_summary_lines
