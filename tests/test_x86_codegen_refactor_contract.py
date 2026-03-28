@@ -147,3 +147,21 @@ def test_header_emitter_uses_lowered_package_entry_point():
 
     assert "void nnc_run(void);" in header_text
     assert "void my_infer(void);" in header_text
+
+
+def test_model_source_emitter_uses_lowered_pipeline_summary_without_context():
+    from nnc_py.codegen.x86_emitters.model_source import emit_model_source
+    from nnc_py.codegen.x86_ir import X86CodegenPackage
+
+    source_text = emit_model_source(
+        X86CodegenPackage(
+            mode="serial",
+            entry_point="my_infer",
+            pipeline_summary_lines=["schedule_metadata=absent"],
+        ),
+    )
+
+    assert "Pipeline schedule summary" in source_text
+    assert "schedule_metadata=absent" in source_text
+    assert "void nnc_run(void)" in source_text
+    assert "void my_infer(void)" in source_text
