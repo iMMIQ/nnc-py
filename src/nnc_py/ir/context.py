@@ -9,6 +9,11 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from nnc_py.ir.execution_plan import NodeExecutionPlan
+    from nnc_py.ir.joint_tiling_schedule import (
+        JointFailure,
+        JointProblem,
+        JointSolution,
+    )
     from nnc_py.ir.pipeline_schedule import (
         JsonValue,
         PipelineScheduleProblem,
@@ -132,3 +137,48 @@ class CompileContext:
         from nnc_py.ir.pipeline_schedule import get_pipeline_transfer_diagnostics
 
         return get_pipeline_transfer_diagnostics(self)
+
+    @property
+    def joint_tiling_schedule_problem(self) -> "JointProblem | None":
+        """Read-only typed access to the joint tiling schedule problem metadata."""
+
+        from nnc_py.ir.joint_tiling_schedule import get_joint_tiling_schedule_problem
+
+        return get_joint_tiling_schedule_problem(self)
+
+    def get_joint_tiling_schedule_problem(self) -> "JointProblem | None":
+        """Return the joint tiling schedule problem without mutating metadata."""
+
+        from nnc_py.ir.joint_tiling_schedule import get_joint_tiling_schedule_problem
+
+        return get_joint_tiling_schedule_problem(self)
+
+    @property
+    def joint_tiling_schedule_solution(self) -> "JointSolution | None":
+        """Read-only typed access to the joint tiling schedule solution metadata."""
+
+        from nnc_py.ir.joint_tiling_schedule import get_joint_tiling_schedule_solution
+
+        return get_joint_tiling_schedule_solution(self)
+
+    def get_joint_tiling_schedule_solution(self) -> "JointSolution | None":
+        """Return the joint tiling schedule solution without mutating metadata."""
+
+        from nnc_py.ir.joint_tiling_schedule import get_joint_tiling_schedule_solution
+
+        return get_joint_tiling_schedule_solution(self)
+
+    @property
+    def joint_tiling_schedule_failure(self) -> "JointFailure | None":
+        """Read-only typed access to the joint tiling schedule failure metadata."""
+
+        from nnc_py.ir.joint_tiling_schedule import get_joint_tiling_schedule_failure
+
+        return get_joint_tiling_schedule_failure(self)
+
+    def get_joint_tiling_schedule_failure(self) -> "JointFailure | None":
+        """Return the joint tiling schedule failure without mutating metadata."""
+
+        from nnc_py.ir.joint_tiling_schedule import get_joint_tiling_schedule_failure
+
+        return get_joint_tiling_schedule_failure(self)
