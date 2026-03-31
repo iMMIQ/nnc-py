@@ -435,6 +435,45 @@ def test_joint_value_and_action_validate_required_nullable_fields():
     assert action.recipe_id is None
     assert action.optional_value_id == "value0"
 
+    with pytest.raises(TypeError, match="JointValue.must_keep"):
+        JointValue(
+            value_id="bad_bool",
+            size_bytes=1,
+            initial_tier=JointValueTier.SLOW,
+            required_final_tier=JointValueTier.SRAM,
+            must_keep=1,  # type: ignore[arg-type]
+            spillable=False,
+            allows_multiple_sram_windows=False,
+            producer=None,
+            consumers=(),
+        )
+
+    with pytest.raises(TypeError, match="JointValue.spillable"):
+        JointValue(
+            value_id="bad_spillable",
+            size_bytes=1,
+            initial_tier=JointValueTier.SLOW,
+            required_final_tier=JointValueTier.SRAM,
+            must_keep=False,
+            spillable="false",  # type: ignore[arg-type]
+            allows_multiple_sram_windows=False,
+            producer=None,
+            consumers=(),
+        )
+
+    with pytest.raises(TypeError, match="JointValue.allows_multiple_sram_windows"):
+        JointValue(
+            value_id="bad_windows",
+            size_bytes=1,
+            initial_tier=JointValueTier.SLOW,
+            required_final_tier=JointValueTier.SRAM,
+            must_keep=False,
+            spillable=False,
+            allows_multiple_sram_windows=0,  # type: ignore[arg-type]
+            producer=None,
+            consumers=(),
+        )
+
 
 def test_joint_solution_and_failure_validate_unique_entries_and_json_payloads():
     solution = _sample_solution()
@@ -485,6 +524,9 @@ def test_joint_solution_and_failure_validate_unique_entries_and_json_payloads():
             error_category="bad",
             diagnostics={},
         )
+
+    with pytest.raises(ValueError, match="JointResidencyWindow.end_time"):
+        JointResidencyWindow(value_id="output0", start_time=5, end_time=5)
 
 
 def test_joint_tiling_schedule_metadata_helpers_validate_runtime_types():

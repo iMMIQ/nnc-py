@@ -1,4 +1,4 @@
-"""External joint tiling and scheduling IR plus compile-context helpers."""
+"""External joint tiling/schedule IR and compile-context metadata helpers."""
 
 from __future__ import annotations
 
@@ -18,15 +18,14 @@ JsonValue = JsonScalar | tuple["JsonValue", ...] | Mapping[str, "JsonValue"]
 EnumT = TypeVar("EnumT", bound=Enum)
 
 
-JOINT_TILING_SCHEDULE_PROBLEM_METADATA_KEY = "joint_tiling_schedule_problem"
-JOINT_TILING_SCHEDULE_SOLUTION_METADATA_KEY = "joint_tiling_schedule_solution"
-JOINT_TILING_SCHEDULE_FAILURE_METADATA_KEY = "joint_tiling_schedule_failure"
-
 JOINT_TILING_SCHEDULE_PROBLEM_SCHEMA_VERSION = "joint_tiling_schedule_problem_v1"
 JOINT_TILING_SCHEDULE_SOLUTION_SCHEMA_VERSION = "joint_tiling_schedule_solution_v1"
 JOINT_TILING_SCHEDULE_FAILURE_SCHEMA_VERSION = "joint_tiling_schedule_failure_v1"
-
 JOINT_TILING_SCHEDULE_OBJECTIVE = "min_makespan"
+
+JOINT_TILING_SCHEDULE_PROBLEM_METADATA_KEY = "joint_tiling_schedule_problem"
+JOINT_TILING_SCHEDULE_SOLUTION_METADATA_KEY = "joint_tiling_schedule_solution"
+JOINT_TILING_SCHEDULE_FAILURE_METADATA_KEY = "joint_tiling_schedule_failure"
 
 
 def _freeze_json_mapping(
@@ -38,9 +37,7 @@ def _freeze_json_mapping(
     keys = tuple(value.keys())
     for key in keys:
         if not isinstance(key, str):
-            raise TypeError(
-                f"{field_name} keys must be strings, got {type(key).__name__}"
-            )
+            raise TypeError(f"{field_name} keys must be strings, got {type(key).__name__}")
     for key in sorted(keys):
         frozen_items[key] = _freeze_json_value(value[key], path=f"{field_name}.{key}")
     return MappingProxyType(frozen_items)
@@ -82,9 +79,8 @@ def _coerce_enum(value: object, enum_type: type[EnumT], *, field_name: str) -> E
         try:
             return enum_type(value)
         except ValueError as exc:
-            raise ValueError(
-                f"{field_name} must be one of {tuple(member.value for member in enum_type)}"
-            ) from exc
+            members = tuple(member.value for member in enum_type)
+            raise ValueError(f"{field_name} must be one of {members}") from exc
     raise TypeError(f"{field_name} must be a {enum_type.__name__} or str")
 
 
@@ -99,18 +95,6 @@ def _coerce_str_tuple(value: object, *, field_name: str) -> tuple[str, ...]:
         if not isinstance(item, str):
             raise TypeError(f"{field_name}[{index}] must be str")
     return items
-
-
-def _coerce_int_tuple(value: object, *, field_name: str) -> tuple[int, ...]:
-    if isinstance(value, str):
-        raise TypeError(f"{field_name} must be a sequence of integers")
-    try:
-        items = tuple(value)
-    except TypeError as exc:
-        raise TypeError(f"{field_name} must be a sequence of integers") from exc
-    for index, item in enumerate(items):
-        _validate_non_negative_int(item, field_name=f"{field_name}[{index}]")
-    return items  # type: ignore[return-value]
 
 
 def _coerce_tuple_of_type(
@@ -130,80 +114,18 @@ def _coerce_tuple_of_type(
     return items
 
 
-def _validate_non_negative_int(value: object, *, field_name: str) -> int:
-    if not isinstance(value, int) or isinstance(value, bool):
+def _coerce_non_negative_int(value: object, *, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
         raise TypeError(f"{field_name} must be int")
     if value < 0:
         raise ValueError(f"{field_name} must be non-negative")
     return value
 
 
-def _validate_bool(value: object, *, field_name: str) -> bool:
+def _coerce_bool(value: object, *, field_name: str) -> bool:
     if not isinstance(value, bool):
         raise TypeError(f"{field_name} must be bool")
     return value
-
-
-def _validate_optional_str(value: object, *, field_name: str) -> str | None:
-    if value is None:
-        return None
-    if not isinstance(value, str):
-        raise TypeError(f"{field_name} must be str or None")
-    return value
-
-
-def _validate_schema_version(value: str, *, expected: str, field_name: str) -> str:
-    if value != expected:
-        raise ValueError(f"{field_name} must be {expected!r}")
-    return value
-
-
-def _require_mapping(value: object, *, field_name: str) -> Mapping[str, object]:
-    if not isinstance(value, Mapping):
-        raise TypeError(f"{field_name} must be a mapping")
-    keys = tuple(value.keys())
-    for key in keys:
-        if not isinstance(key, str):
-            raise TypeError(
-                f"{field_name} keys must be strings, got {type(key).__name__}"
-            )
-    return value
-
-
-def _require_field(payload: Mapping[str, object], field_name: str) -> object:
-    if field_name not in payload:
-        raise ValueError(f"{field_name} is required")
-    return payload[field_name]
-
-
-def _parse_object_list(
-    payload: Mapping[str, object],
-    field_name: str,
-    factory: type,
-) -> tuple[object, ...]:
-    value = _require_field(payload, field_name)
-    if isinstance(value, str):
-        raise TypeError(f"{field_name} must be an array")
-    try:
-        items = tuple(value)
-    except TypeError as exc:
-        raise TypeError(f"{field_name} must be an array") from exc
-    parsed: list[object] = []
-    for index, item in enumerate(items):
-        mapping = _require_mapping(item, field_name=f"{field_name}[{index}]")
-        parsed.append(factory.from_json(mapping))
-    return tuple(parsed)
-
-
-def _validate_unique_attr(
-    items: tuple[object, ...], *, attr_name: str, field_name: str
-) -> None:
-    seen: set[str] = set()
-    for item in items:
-        value = getattr(item, attr_name)
-        if value in seen:
-            raise ValueError(f"duplicate {attr_name} in {field_name}")
-        seen.add(value)
 
 
 def _get_typed_metadata(
@@ -219,14 +141,52 @@ def _get_typed_metadata(
     return value
 
 
+def _require_mapping(payload: object, *, field_name: str) -> Mapping[str, object]:
+    if not isinstance(payload, Mapping):
+        raise TypeError(f"{field_name} must be a mapping")
+    for key in payload:
+        if not isinstance(key, str):
+            raise TypeError(f"{field_name} keys must be strings")
+    return payload
+
+
+def _require_field(payload: Mapping[str, object], key: str, *, owner: str) -> object:
+    if key not in payload:
+        raise ValueError(f"{owner}.{key} is required")
+    return payload[key]
+
+
+def _ensure_unique_ids(
+    items: tuple[object, ...], attr_name: str, *, label: str | None = None
+) -> None:
+    seen: set[str] = set()
+    field_label = label or attr_name
+    for item in items:
+        item_id = getattr(item, attr_name)
+        if item_id in seen:
+            raise ValueError(f"duplicate {field_label}: {item_id}")
+        seen.add(item_id)
+
+
+def _parse_object_array(
+    payload: Mapping[str, object], key: str, parser, *, owner: str
+) -> tuple[object, ...]:
+    raw = _require_field(payload, key, owner=owner)
+    if isinstance(raw, str):
+        raise TypeError(f"{owner}.{key} must be an array")
+    try:
+        items = tuple(raw)
+    except TypeError as exc:
+        raise TypeError(f"{owner}.{key} must be an array") from exc
+    return tuple(
+        parser(item, field_name=f"{owner}.{key}[{index}]")
+        for index, item in enumerate(items)
+    )
+
+
 class JointRegionKind(str, Enum):
     SINGLE_OP = "single_op"
     FUSED_GROUP = "fused_group"
-
-
-class JointDependencyEdgeKind(str, Enum):
-    DATA = "data"
-    ORDER = "order"
 
 
 class JointValueTier(str, Enum):
@@ -243,6 +203,11 @@ class JointActionKind(str, Enum):
     DMA_OUT = "dma_out"
     SPILL = "spill"
     RELOAD = "reload"
+
+
+class JointDependencyEdgeKind(str, Enum):
+    DATA = "data"
+    ORDER = "order"
 
 
 class JointResourceKind(str, Enum):
@@ -279,19 +244,34 @@ class JointTileSpec:
         object.__setattr__(
             self, "axes", _coerce_str_tuple(self.axes, field_name="JointTileSpec.axes")
         )
+        if isinstance(self.shape, str):
+            raise TypeError("JointTileSpec.shape must be a sequence of int")
+        try:
+            shape_items = tuple(self.shape)
+        except TypeError as exc:
+            raise TypeError("JointTileSpec.shape must be a sequence of int") from exc
         object.__setattr__(
-            self, "shape", _coerce_int_tuple(self.shape, field_name="JointTileSpec.shape")
+            self,
+            "shape",
+            tuple(
+                _coerce_non_negative_int(
+                    item, field_name=f"JointTileSpec.shape[{index}]"
+                )
+                for index, item in enumerate(shape_items)
+            ),
         )
 
     def to_json(self) -> dict[str, object]:
         return {"axes": list(self.axes), "shape": list(self.shape)}
 
     @classmethod
-    def from_json(cls, payload: object) -> JointTileSpec:
-        mapping = _require_mapping(payload, field_name="JointTileSpec")
+    def from_json(
+        cls, payload: object, *, field_name: str = "JointTileSpec"
+    ) -> "JointTileSpec":
+        mapping = _require_mapping(payload, field_name=field_name)
         return cls(
-            axes=_require_field(mapping, "axes"),
-            shape=_require_field(mapping, "shape"),
+            axes=_require_field(mapping, "axes", owner=field_name),
+            shape=_require_field(mapping, "shape", owner=field_name),
         )
 
 
@@ -303,16 +283,22 @@ class JointLayoutSpec:
         object.__setattr__(
             self,
             "layout_tags",
-            _coerce_str_tuple(self.layout_tags, field_name="JointLayoutSpec.layout_tags"),
+            _coerce_str_tuple(
+                self.layout_tags, field_name="JointLayoutSpec.layout_tags"
+            ),
         )
 
     def to_json(self) -> dict[str, object]:
         return {"layout_tags": list(self.layout_tags)}
 
     @classmethod
-    def from_json(cls, payload: object) -> JointLayoutSpec:
-        mapping = _require_mapping(payload, field_name="JointLayoutSpec")
-        return cls(layout_tags=_require_field(mapping, "layout_tags"))
+    def from_json(
+        cls, payload: object, *, field_name: str = "JointLayoutSpec"
+    ) -> "JointLayoutSpec":
+        mapping = _require_mapping(payload, field_name=field_name)
+        return cls(
+            layout_tags=_require_field(mapping, "layout_tags", owner=field_name)
+        )
 
 
 @dataclass(frozen=True)
@@ -325,21 +311,21 @@ class JointValueFootprint:
         object.__setattr__(
             self,
             "resident_bytes",
-            _validate_non_negative_int(
+            _coerce_non_negative_int(
                 self.resident_bytes, field_name="JointValueFootprint.resident_bytes"
             ),
         )
         object.__setattr__(
             self,
             "scratch_bytes",
-            _validate_non_negative_int(
+            _coerce_non_negative_int(
                 self.scratch_bytes, field_name="JointValueFootprint.scratch_bytes"
             ),
         )
         object.__setattr__(
             self,
             "transfer_bytes",
-            _validate_non_negative_int(
+            _coerce_non_negative_int(
                 self.transfer_bytes, field_name="JointValueFootprint.transfer_bytes"
             ),
         )
@@ -352,12 +338,14 @@ class JointValueFootprint:
         }
 
     @classmethod
-    def from_json(cls, payload: object) -> JointValueFootprint:
-        mapping = _require_mapping(payload, field_name="JointValueFootprint")
+    def from_json(
+        cls, payload: object, *, field_name: str = "JointValueFootprint"
+    ) -> "JointValueFootprint":
+        mapping = _require_mapping(payload, field_name=field_name)
         return cls(
-            resident_bytes=_require_field(mapping, "resident_bytes"),
-            scratch_bytes=_require_field(mapping, "scratch_bytes"),
-            transfer_bytes=_require_field(mapping, "transfer_bytes"),
+            resident_bytes=_require_field(mapping, "resident_bytes", owner=field_name),
+            scratch_bytes=_require_field(mapping, "scratch_bytes", owner=field_name),
+            transfer_bytes=_require_field(mapping, "transfer_bytes", owner=field_name),
         )
 
 
@@ -370,14 +358,14 @@ class JointCostParameters:
         object.__setattr__(
             self,
             "latency",
-            _validate_non_negative_int(
+            _coerce_non_negative_int(
                 self.latency, field_name="JointCostParameters.latency"
             ),
         )
         object.__setattr__(
             self,
             "launch_overhead",
-            _validate_non_negative_int(
+            _coerce_non_negative_int(
                 self.launch_overhead,
                 field_name="JointCostParameters.launch_overhead",
             ),
@@ -390,38 +378,14 @@ class JointCostParameters:
         }
 
     @classmethod
-    def from_json(cls, payload: object) -> JointCostParameters:
-        mapping = _require_mapping(payload, field_name="JointCostParameters")
+    def from_json(
+        cls, payload: object, *, field_name: str = "JointCostParameters"
+    ) -> "JointCostParameters":
+        mapping = _require_mapping(payload, field_name=field_name)
         return cls(
-            latency=_require_field(mapping, "latency"),
-            launch_overhead=_require_field(mapping, "launch_overhead"),
+            latency=_require_field(mapping, "latency", owner=field_name),
+            launch_overhead=_require_field(mapping, "launch_overhead", owner=field_name),
         )
-
-
-@dataclass(frozen=True)
-class JointValueProducer:
-    action_id: str
-
-    def to_json(self) -> dict[str, object]:
-        return {"action_id": self.action_id}
-
-    @classmethod
-    def from_json(cls, payload: object) -> JointValueProducer:
-        mapping = _require_mapping(payload, field_name="JointValueProducer")
-        return cls(action_id=_require_field(mapping, "action_id"))
-
-
-@dataclass(frozen=True)
-class JointValueConsumer:
-    action_id: str
-
-    def to_json(self) -> dict[str, object]:
-        return {"action_id": self.action_id}
-
-    @classmethod
-    def from_json(cls, payload: object) -> JointValueConsumer:
-        mapping = _require_mapping(payload, field_name="JointValueConsumer")
-        return cls(action_id=_require_field(mapping, "action_id"))
 
 
 @dataclass(frozen=True)
@@ -436,12 +400,44 @@ class JointCompatibleRecipePair:
         }
 
     @classmethod
-    def from_json(cls, payload: object) -> JointCompatibleRecipePair:
-        mapping = _require_mapping(payload, field_name="JointCompatibleRecipePair")
+    def from_json(
+        cls, payload: object, *, field_name: str = "JointCompatibleRecipePair"
+    ) -> "JointCompatibleRecipePair":
+        mapping = _require_mapping(payload, field_name=field_name)
         return cls(
-            src_recipe_id=_require_field(mapping, "src_recipe_id"),
-            dst_recipe_id=_require_field(mapping, "dst_recipe_id"),
+            src_recipe_id=_require_field(mapping, "src_recipe_id", owner=field_name),
+            dst_recipe_id=_require_field(mapping, "dst_recipe_id", owner=field_name),
         )
+
+
+@dataclass(frozen=True)
+class JointValueProducer:
+    action_id: str
+
+    def to_json(self) -> dict[str, object]:
+        return {"action_id": self.action_id}
+
+    @classmethod
+    def from_json(
+        cls, payload: object, *, field_name: str = "JointValueProducer"
+    ) -> "JointValueProducer":
+        mapping = _require_mapping(payload, field_name=field_name)
+        return cls(action_id=_require_field(mapping, "action_id", owner=field_name))
+
+
+@dataclass(frozen=True)
+class JointValueConsumer:
+    action_id: str
+
+    def to_json(self) -> dict[str, object]:
+        return {"action_id": self.action_id}
+
+    @classmethod
+    def from_json(
+        cls, payload: object, *, field_name: str = "JointValueConsumer"
+    ) -> "JointValueConsumer":
+        mapping = _require_mapping(payload, field_name=field_name)
+        return cls(action_id=_require_field(mapping, "action_id", owner=field_name))
 
 
 @dataclass(frozen=True)
@@ -508,14 +504,18 @@ class JointRegion:
         }
 
     @classmethod
-    def from_json(cls, payload: object) -> JointRegion:
-        mapping = _require_mapping(payload, field_name="JointRegion")
+    def from_json(
+        cls, payload: object, *, field_name: str = "JointRegion"
+    ) -> "JointRegion":
+        mapping = _require_mapping(payload, field_name=field_name)
         return cls(
-            region_id=_require_field(mapping, "region_id"),
-            kind=_require_field(mapping, "kind"),
-            input_value_ids=_require_field(mapping, "input_value_ids"),
-            output_value_ids=_require_field(mapping, "output_value_ids"),
+            region_id=_require_field(mapping, "region_id", owner=field_name),
+            kind=_require_field(mapping, "kind", owner=field_name),
             member_nodes=mapping.get("member_nodes", ()),
+            input_value_ids=_require_field(mapping, "input_value_ids", owner=field_name),
+            output_value_ids=_require_field(
+                mapping, "output_value_ids", owner=field_name
+            ),
             predecessor_region_ids=mapping.get("predecessor_region_ids", ()),
             successor_region_ids=mapping.get("successor_region_ids", ()),
         )
@@ -536,10 +536,6 @@ class JointRecipe:
             raise TypeError("JointRecipe.tile_spec must be JointTileSpec")
         if not isinstance(self.layout_spec, JointLayoutSpec):
             raise TypeError("JointRecipe.layout_spec must be JointLayoutSpec")
-        if not isinstance(self.value_footprint, JointValueFootprint):
-            raise TypeError("JointRecipe.value_footprint must be JointValueFootprint")
-        if not isinstance(self.cost_parameters, JointCostParameters):
-            raise TypeError("JointRecipe.cost_parameters must be JointCostParameters")
         object.__setattr__(
             self,
             "activates_action_ids",
@@ -548,6 +544,14 @@ class JointRecipe:
                 field_name="JointRecipe.activates_action_ids",
             ),
         )
+        if not isinstance(self.value_footprint, JointValueFootprint):
+            raise TypeError(
+                "JointRecipe.value_footprint must be JointValueFootprint"
+            )
+        if not isinstance(self.cost_parameters, JointCostParameters):
+            raise TypeError(
+                "JointRecipe.cost_parameters must be JointCostParameters"
+            )
 
     def to_json(self) -> dict[str, object]:
         return {
@@ -561,19 +565,31 @@ class JointRecipe:
         }
 
     @classmethod
-    def from_json(cls, payload: object) -> JointRecipe:
-        mapping = _require_mapping(payload, field_name="JointRecipe")
+    def from_json(
+        cls, payload: object, *, field_name: str = "JointRecipe"
+    ) -> "JointRecipe":
+        mapping = _require_mapping(payload, field_name=field_name)
         return cls(
-            recipe_id=_require_field(mapping, "recipe_id"),
-            region_id=_require_field(mapping, "region_id"),
-            tile_spec=JointTileSpec.from_json(_require_field(mapping, "tile_spec")),
-            layout_spec=JointLayoutSpec.from_json(_require_field(mapping, "layout_spec")),
-            activates_action_ids=_require_field(mapping, "activates_action_ids"),
+            recipe_id=_require_field(mapping, "recipe_id", owner=field_name),
+            region_id=_require_field(mapping, "region_id", owner=field_name),
+            tile_spec=JointTileSpec.from_json(
+                _require_field(mapping, "tile_spec", owner=field_name),
+                field_name=f"{field_name}.tile_spec",
+            ),
+            layout_spec=JointLayoutSpec.from_json(
+                _require_field(mapping, "layout_spec", owner=field_name),
+                field_name=f"{field_name}.layout_spec",
+            ),
+            activates_action_ids=_require_field(
+                mapping, "activates_action_ids", owner=field_name
+            ),
             value_footprint=JointValueFootprint.from_json(
-                _require_field(mapping, "value_footprint")
+                _require_field(mapping, "value_footprint", owner=field_name),
+                field_name=f"{field_name}.value_footprint",
             ),
             cost_parameters=JointCostParameters.from_json(
-                _require_field(mapping, "cost_parameters")
+                _require_field(mapping, "cost_parameters", owner=field_name),
+                field_name=f"{field_name}.cost_parameters",
             ),
         )
 
@@ -594,7 +610,7 @@ class JointValue:
         object.__setattr__(
             self,
             "size_bytes",
-            _validate_non_negative_int(self.size_bytes, field_name="JointValue.size_bytes"),
+            _coerce_non_negative_int(self.size_bytes, field_name="JointValue.size_bytes"),
         )
         object.__setattr__(
             self,
@@ -614,24 +630,6 @@ class JointValue:
                 field_name="JointValue.required_final_tier",
             ),
         )
-        object.__setattr__(
-            self,
-            "must_keep",
-            _validate_bool(self.must_keep, field_name="JointValue.must_keep"),
-        )
-        object.__setattr__(
-            self,
-            "spillable",
-            _validate_bool(self.spillable, field_name="JointValue.spillable"),
-        )
-        object.__setattr__(
-            self,
-            "allows_multiple_sram_windows",
-            _validate_bool(
-                self.allows_multiple_sram_windows,
-                field_name="JointValue.allows_multiple_sram_windows",
-            ),
-        )
         if self.producer is not None and not isinstance(self.producer, JointValueProducer):
             raise TypeError("JointValue.producer must be JointValueProducer or None")
         object.__setattr__(
@@ -643,6 +641,26 @@ class JointValue:
                 field_name="JointValue.consumers",
             ),
         )
+        object.__setattr__(
+            self,
+            "must_keep",
+            _coerce_bool(self.must_keep, field_name="JointValue.must_keep"),
+        )
+        object.__setattr__(
+            self,
+            "spillable",
+            _coerce_bool(self.spillable, field_name="JointValue.spillable"),
+        )
+        object.__setattr__(
+            self,
+            "allows_multiple_sram_windows",
+            _coerce_bool(
+                self.allows_multiple_sram_windows,
+                field_name="JointValue.allows_multiple_sram_windows",
+            ),
+        )
+        if self.must_keep and self.spillable:
+            raise ValueError("JointValue.must_keep cannot be true when spillable is true")
 
     def to_json(self) -> dict[str, object]:
         return {
@@ -658,37 +676,34 @@ class JointValue:
         }
 
     @classmethod
-    def from_json(cls, payload: object) -> JointValue:
-        mapping = _require_mapping(payload, field_name="JointValue")
-        producer_payload = _require_field(mapping, "producer")
-        consumers_payload = _require_field(mapping, "consumers")
-        if isinstance(consumers_payload, str):
-            raise TypeError("consumers must be an array")
-        try:
-            consumer_items = tuple(consumers_payload)
-        except TypeError as exc:
-            raise TypeError("consumers must be an array") from exc
+    def from_json(
+        cls, payload: object, *, field_name: str = "JointValue"
+    ) -> "JointValue":
+        mapping = _require_mapping(payload, field_name=field_name)
+        producer_payload = _require_field(mapping, "producer", owner=field_name)
+        if producer_payload is None:
+            producer = None
+        else:
+            producer = JointValueProducer.from_json(
+                producer_payload, field_name=f"{field_name}.producer"
+            )
+        consumers_payload = _parse_object_array(
+            mapping, "consumers", JointValueConsumer.from_json, owner=field_name
+        )
         return cls(
-            value_id=_require_field(mapping, "value_id"),
-            size_bytes=_require_field(mapping, "size_bytes"),
-            initial_tier=_require_field(mapping, "initial_tier"),
-            required_final_tier=_require_field(mapping, "required_final_tier"),
-            must_keep=_require_field(mapping, "must_keep"),
-            spillable=_require_field(mapping, "spillable"),
+            value_id=_require_field(mapping, "value_id", owner=field_name),
+            size_bytes=_require_field(mapping, "size_bytes", owner=field_name),
+            initial_tier=_require_field(mapping, "initial_tier", owner=field_name),
+            required_final_tier=_require_field(
+                mapping, "required_final_tier", owner=field_name
+            ),
+            must_keep=_require_field(mapping, "must_keep", owner=field_name),
+            spillable=_require_field(mapping, "spillable", owner=field_name),
             allows_multiple_sram_windows=_require_field(
-                mapping, "allows_multiple_sram_windows"
+                mapping, "allows_multiple_sram_windows", owner=field_name
             ),
-            producer=(
-                None
-                if producer_payload is None
-                else JointValueProducer.from_json(producer_payload)
-            ),
-            consumers=tuple(
-                JointValueConsumer.from_json(
-                    _require_mapping(item, field_name=f"consumers[{index}]")
-                )
-                for index, item in enumerate(consumer_items)
-            ),
+            producer=producer,
+            consumers=consumers_payload,
         )
 
 
@@ -725,12 +740,12 @@ class JointAction:
         object.__setattr__(
             self,
             "duration",
-            _validate_non_negative_int(self.duration, field_name="JointAction.duration"),
+            _coerce_non_negative_int(self.duration, field_name="JointAction.duration"),
         )
         object.__setattr__(
             self,
             "launch_overhead",
-            _validate_non_negative_int(
+            _coerce_non_negative_int(
                 self.launch_overhead, field_name="JointAction.launch_overhead"
             ),
         )
@@ -745,34 +760,16 @@ class JointAction:
         object.__setattr__(
             self,
             "temp_bytes",
-            _validate_non_negative_int(self.temp_bytes, field_name="JointAction.temp_bytes"),
-        )
-        object.__setattr__(
-            self,
-            "is_optional",
-            _validate_bool(self.is_optional, field_name="JointAction.is_optional"),
-        )
-        object.__setattr__(
-            self,
-            "region_id",
-            _validate_optional_str(self.region_id, field_name="JointAction.region_id"),
-        )
-        object.__setattr__(
-            self,
-            "recipe_id",
-            _validate_optional_str(self.recipe_id, field_name="JointAction.recipe_id"),
-        )
-        object.__setattr__(
-            self,
-            "optional_value_id",
-            _validate_optional_str(
-                self.optional_value_id, field_name="JointAction.optional_value_id"
+            _coerce_non_negative_int(
+                self.temp_bytes, field_name="JointAction.temp_bytes"
             ),
         )
 
     def to_json(self) -> dict[str, object]:
         return {
             "action_id": self.action_id,
+            "region_id": self.region_id,
+            "recipe_id": self.recipe_id,
             "kind": self.kind.value,
             "resource_kind": self.resource_kind.value,
             "duration": self.duration,
@@ -781,27 +778,31 @@ class JointAction:
             "writes": list(self.writes),
             "temp_bytes": self.temp_bytes,
             "is_optional": self.is_optional,
-            "region_id": self.region_id,
-            "recipe_id": self.recipe_id,
             "optional_value_id": self.optional_value_id,
         }
 
     @classmethod
-    def from_json(cls, payload: object) -> JointAction:
-        mapping = _require_mapping(payload, field_name="JointAction")
+    def from_json(
+        cls, payload: object, *, field_name: str = "JointAction"
+    ) -> "JointAction":
+        mapping = _require_mapping(payload, field_name=field_name)
         return cls(
-            action_id=_require_field(mapping, "action_id"),
-            kind=_require_field(mapping, "kind"),
-            resource_kind=_require_field(mapping, "resource_kind"),
-            duration=_require_field(mapping, "duration"),
-            launch_overhead=_require_field(mapping, "launch_overhead"),
-            reads=_require_field(mapping, "reads"),
-            writes=_require_field(mapping, "writes"),
-            temp_bytes=_require_field(mapping, "temp_bytes"),
-            is_optional=_require_field(mapping, "is_optional"),
-            region_id=_require_field(mapping, "region_id"),
-            recipe_id=_require_field(mapping, "recipe_id"),
-            optional_value_id=_require_field(mapping, "optional_value_id"),
+            action_id=_require_field(mapping, "action_id", owner=field_name),
+            region_id=_require_field(mapping, "region_id", owner=field_name),
+            recipe_id=_require_field(mapping, "recipe_id", owner=field_name),
+            kind=_require_field(mapping, "kind", owner=field_name),
+            resource_kind=_require_field(mapping, "resource_kind", owner=field_name),
+            duration=_require_field(mapping, "duration", owner=field_name),
+            launch_overhead=_require_field(
+                mapping, "launch_overhead", owner=field_name
+            ),
+            reads=_require_field(mapping, "reads", owner=field_name),
+            writes=_require_field(mapping, "writes", owner=field_name),
+            temp_bytes=_require_field(mapping, "temp_bytes", owner=field_name),
+            is_optional=_require_field(mapping, "is_optional", owner=field_name),
+            optional_value_id=_require_field(
+                mapping, "optional_value_id", owner=field_name
+            ),
         )
 
 
@@ -856,24 +857,19 @@ class JointBoundaryConstraint:
         }
 
     @classmethod
-    def from_json(cls, payload: object) -> JointBoundaryConstraint:
-        mapping = _require_mapping(payload, field_name="JointBoundaryConstraint")
-        pairs_payload = _require_field(mapping, "compatible_recipe_pairs")
-        if isinstance(pairs_payload, str):
-            raise TypeError("compatible_recipe_pairs must be an array")
-        try:
-            pair_items = tuple(pairs_payload)
-        except TypeError as exc:
-            raise TypeError("compatible_recipe_pairs must be an array") from exc
+    def from_json(
+        cls, payload: object, *, field_name: str = "JointBoundaryConstraint"
+    ) -> "JointBoundaryConstraint":
+        mapping = _require_mapping(payload, field_name=field_name)
         return cls(
-            boundary_id=_require_field(mapping, "boundary_id"),
-            src_region_id=_require_field(mapping, "src_region_id"),
-            dst_region_id=_require_field(mapping, "dst_region_id"),
-            compatible_recipe_pairs=tuple(
-                JointCompatibleRecipePair.from_json(
-                    _require_mapping(item, field_name=f"compatible_recipe_pairs[{index}]")
-                )
-                for index, item in enumerate(pair_items)
+            boundary_id=_require_field(mapping, "boundary_id", owner=field_name),
+            src_region_id=_require_field(mapping, "src_region_id", owner=field_name),
+            dst_region_id=_require_field(mapping, "dst_region_id", owner=field_name),
+            compatible_recipe_pairs=_parse_object_array(
+                mapping,
+                "compatible_recipe_pairs",
+                JointCompatibleRecipePair.from_json,
+                owner=field_name,
             ),
             required_layout_relations=mapping.get("required_layout_relations", ()),
             required_tile_domain_relations=mapping.get(
@@ -907,19 +903,21 @@ class JointDependencyEdge:
         }
 
     @classmethod
-    def from_json(cls, payload: object) -> JointDependencyEdge:
-        mapping = _require_mapping(payload, field_name="JointDependencyEdge")
+    def from_json(
+        cls, payload: object, *, field_name: str = "JointDependencyEdge"
+    ) -> "JointDependencyEdge":
+        mapping = _require_mapping(payload, field_name=field_name)
         return cls(
-            src_action_id=_require_field(mapping, "src_action_id"),
-            dst_action_id=_require_field(mapping, "dst_action_id"),
-            kind=_require_field(mapping, "kind"),
+            src_action_id=_require_field(mapping, "src_action_id", owner=field_name),
+            dst_action_id=_require_field(mapping, "dst_action_id", owner=field_name),
+            kind=_require_field(mapping, "kind", owner=field_name),
         )
 
 
 @dataclass(frozen=True)
 class JointResource:
     resource_kind: JointResourceKind
-    slot_count: int
+    slot_count: int = 1
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -931,11 +929,11 @@ class JointResource:
                 field_name="JointResource.resource_kind",
             ),
         )
-        slot_count = _validate_non_negative_int(
+        slot_count = _coerce_non_negative_int(
             self.slot_count, field_name="JointResource.slot_count"
         )
         if slot_count != 1:
-            raise ValueError("JointResource.slot_count must be 1")
+            raise ValueError("JointResource.slot_count must be 1 in v1")
         object.__setattr__(self, "slot_count", slot_count)
 
     def to_json(self) -> dict[str, object]:
@@ -945,89 +943,13 @@ class JointResource:
         }
 
     @classmethod
-    def from_json(cls, payload: object) -> JointResource:
-        mapping = _require_mapping(payload, field_name="JointResource")
+    def from_json(
+        cls, payload: object, *, field_name: str = "JointResource"
+    ) -> "JointResource":
+        mapping = _require_mapping(payload, field_name=field_name)
         return cls(
-            resource_kind=_require_field(mapping, "resource_kind"),
-            slot_count=_require_field(mapping, "slot_count"),
-        )
-
-
-@dataclass(frozen=True)
-class JointSelectedRecipe:
-    region_id: str
-    recipe_id: str
-
-    def to_json(self) -> dict[str, object]:
-        return {"region_id": self.region_id, "recipe_id": self.recipe_id}
-
-    @classmethod
-    def from_json(cls, payload: object) -> JointSelectedRecipe:
-        mapping = _require_mapping(payload, field_name="JointSelectedRecipe")
-        return cls(
-            region_id=_require_field(mapping, "region_id"),
-            recipe_id=_require_field(mapping, "recipe_id"),
-        )
-
-
-@dataclass(frozen=True)
-class JointScheduledAction:
-    action_id: str
-    start_time: int
-
-    def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "start_time",
-            _validate_non_negative_int(
-                self.start_time, field_name="JointScheduledAction.start_time"
-            ),
-        )
-
-    def to_json(self) -> dict[str, object]:
-        return {"action_id": self.action_id, "start_time": self.start_time}
-
-    @classmethod
-    def from_json(cls, payload: object) -> JointScheduledAction:
-        mapping = _require_mapping(payload, field_name="JointScheduledAction")
-        return cls(
-            action_id=_require_field(mapping, "action_id"),
-            start_time=_require_field(mapping, "start_time"),
-        )
-
-
-@dataclass(frozen=True)
-class JointResidencyWindow:
-    value_id: str
-    start_time: int
-    end_time: int
-
-    def __post_init__(self) -> None:
-        start_time = _validate_non_negative_int(
-            self.start_time, field_name="JointResidencyWindow.start_time"
-        )
-        end_time = _validate_non_negative_int(
-            self.end_time, field_name="JointResidencyWindow.end_time"
-        )
-        if end_time <= start_time:
-            raise ValueError("JointResidencyWindow.end_time must be greater than start_time")
-        object.__setattr__(self, "start_time", start_time)
-        object.__setattr__(self, "end_time", end_time)
-
-    def to_json(self) -> dict[str, object]:
-        return {
-            "value_id": self.value_id,
-            "start_time": self.start_time,
-            "end_time": self.end_time,
-        }
-
-    @classmethod
-    def from_json(cls, payload: object) -> JointResidencyWindow:
-        mapping = _require_mapping(payload, field_name="JointResidencyWindow")
-        return cls(
-            value_id=_require_field(mapping, "value_id"),
-            start_time=_require_field(mapping, "start_time"),
-            end_time=_require_field(mapping, "end_time"),
+            resource_kind=_require_field(mapping, "resource_kind", owner=field_name),
+            slot_count=_require_field(mapping, "slot_count", owner=field_name),
         )
 
 
@@ -1042,37 +964,22 @@ class JointProblem:
     dependency_edges: tuple[JointDependencyEdge, ...]
     resources: tuple[JointResource, ...]
     sram_capacity_bytes: int
-    objective: str
+    objective: str = JOINT_TILING_SCHEDULE_OBJECTIVE
 
     def __post_init__(self) -> None:
+        if self.schema_version != JOINT_TILING_SCHEDULE_PROBLEM_SCHEMA_VERSION:
+            raise ValueError("JointProblem.schema_version must be joint_tiling_schedule_problem_v1")
         object.__setattr__(
-            self,
-            "schema_version",
-            _validate_schema_version(
-                self.schema_version,
-                expected=JOINT_TILING_SCHEDULE_PROBLEM_SCHEMA_VERSION,
-                field_name="JointProblem.schema_version",
-            ),
+            self, "regions", _coerce_tuple_of_type(self.regions, JointRegion, field_name="JointProblem.regions")
         )
         object.__setattr__(
-            self,
-            "regions",
-            _coerce_tuple_of_type(self.regions, JointRegion, field_name="JointProblem.regions"),
+            self, "recipes", _coerce_tuple_of_type(self.recipes, JointRecipe, field_name="JointProblem.recipes")
         )
         object.__setattr__(
-            self,
-            "recipes",
-            _coerce_tuple_of_type(self.recipes, JointRecipe, field_name="JointProblem.recipes"),
+            self, "values", _coerce_tuple_of_type(self.values, JointValue, field_name="JointProblem.values")
         )
         object.__setattr__(
-            self,
-            "values",
-            _coerce_tuple_of_type(self.values, JointValue, field_name="JointProblem.values"),
-        )
-        object.__setattr__(
-            self,
-            "actions",
-            _coerce_tuple_of_type(self.actions, JointAction, field_name="JointProblem.actions"),
+            self, "actions", _coerce_tuple_of_type(self.actions, JointAction, field_name="JointProblem.actions")
         )
         object.__setattr__(
             self,
@@ -1096,35 +1003,25 @@ class JointProblem:
             self,
             "resources",
             _coerce_tuple_of_type(
-                self.resources,
-                JointResource,
-                field_name="JointProblem.resources",
+                self.resources, JointResource, field_name="JointProblem.resources"
             ),
         )
         object.__setattr__(
             self,
             "sram_capacity_bytes",
-            _validate_non_negative_int(
+            _coerce_non_negative_int(
                 self.sram_capacity_bytes,
                 field_name="JointProblem.sram_capacity_bytes",
             ),
         )
         if self.objective != JOINT_TILING_SCHEDULE_OBJECTIVE:
-            raise ValueError(
-                f"JointProblem.objective must be {JOINT_TILING_SCHEDULE_OBJECTIVE!r}"
-            )
-        _validate_unique_attr(self.regions, attr_name="region_id", field_name="regions")
-        _validate_unique_attr(self.recipes, attr_name="recipe_id", field_name="recipes")
-        _validate_unique_attr(self.values, attr_name="value_id", field_name="values")
-        _validate_unique_attr(self.actions, attr_name="action_id", field_name="actions")
-        _validate_unique_attr(
-            self.boundary_constraints,
-            attr_name="boundary_id",
-            field_name="boundary_constraints",
-        )
-        _validate_unique_attr(
-            self.resources, attr_name="resource_kind", field_name="resources"
-        )
+            raise ValueError("JointProblem.objective must be min_makespan")
+        _ensure_unique_ids(self.regions, "region_id")
+        _ensure_unique_ids(self.recipes, "recipe_id")
+        _ensure_unique_ids(self.values, "value_id")
+        _ensure_unique_ids(self.actions, "action_id")
+        _ensure_unique_ids(self.boundary_constraints, "boundary_id")
+        _ensure_unique_ids(self.resources, "resource_kind")
 
     def to_json(self) -> dict[str, object]:
         return {
@@ -1143,29 +1040,127 @@ class JointProblem:
         }
 
     @classmethod
-    def from_json(cls, payload: object) -> JointProblem:
+    def from_json(cls, payload: object) -> "JointProblem":
         mapping = _require_mapping(payload, field_name="JointProblem")
-        schema_version = _require_field(mapping, "schema_version")
-        if schema_version != JOINT_TILING_SCHEDULE_PROBLEM_SCHEMA_VERSION:
-            raise ValueError(
-                "JointProblem.schema_version must be "
-                f"{JOINT_TILING_SCHEDULE_PROBLEM_SCHEMA_VERSION!r}"
-            )
         return cls(
-            schema_version=schema_version,
-            regions=_parse_object_list(mapping, "regions", JointRegion),
-            recipes=_parse_object_list(mapping, "recipes", JointRecipe),
-            values=_parse_object_list(mapping, "values", JointValue),
-            actions=_parse_object_list(mapping, "actions", JointAction),
-            boundary_constraints=_parse_object_list(
-                mapping, "boundary_constraints", JointBoundaryConstraint
+            schema_version=_require_field(
+                mapping, "schema_version", owner="JointProblem"
             ),
-            dependency_edges=_parse_object_list(
-                mapping, "dependency_edges", JointDependencyEdge
+            regions=_parse_object_array(
+                mapping, "regions", JointRegion.from_json, owner="JointProblem"
             ),
-            resources=_parse_object_list(mapping, "resources", JointResource),
-            sram_capacity_bytes=_require_field(mapping, "sram_capacity_bytes"),
-            objective=_require_field(mapping, "objective"),
+            recipes=_parse_object_array(
+                mapping, "recipes", JointRecipe.from_json, owner="JointProblem"
+            ),
+            values=_parse_object_array(
+                mapping, "values", JointValue.from_json, owner="JointProblem"
+            ),
+            actions=_parse_object_array(
+                mapping, "actions", JointAction.from_json, owner="JointProblem"
+            ),
+            boundary_constraints=_parse_object_array(
+                mapping,
+                "boundary_constraints",
+                JointBoundaryConstraint.from_json,
+                owner="JointProblem",
+            ),
+            dependency_edges=_parse_object_array(
+                mapping,
+                "dependency_edges",
+                JointDependencyEdge.from_json,
+                owner="JointProblem",
+            ),
+            resources=_parse_object_array(
+                mapping, "resources", JointResource.from_json, owner="JointProblem"
+            ),
+            sram_capacity_bytes=_require_field(
+                mapping, "sram_capacity_bytes", owner="JointProblem"
+            ),
+            objective=_require_field(mapping, "objective", owner="JointProblem"),
+        )
+
+
+@dataclass(frozen=True)
+class JointSelectedRecipe:
+    region_id: str
+    recipe_id: str
+
+    def to_json(self) -> dict[str, object]:
+        return {"region_id": self.region_id, "recipe_id": self.recipe_id}
+
+    @classmethod
+    def from_json(
+        cls, payload: object, *, field_name: str = "JointSelectedRecipe"
+    ) -> "JointSelectedRecipe":
+        mapping = _require_mapping(payload, field_name=field_name)
+        return cls(
+            region_id=_require_field(mapping, "region_id", owner=field_name),
+            recipe_id=_require_field(mapping, "recipe_id", owner=field_name),
+        )
+
+
+@dataclass(frozen=True)
+class JointScheduledAction:
+    action_id: str
+    start_time: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "start_time",
+            _coerce_non_negative_int(
+                self.start_time, field_name="JointScheduledAction.start_time"
+            ),
+        )
+
+    def to_json(self) -> dict[str, object]:
+        return {"action_id": self.action_id, "start_time": self.start_time}
+
+    @classmethod
+    def from_json(
+        cls, payload: object, *, field_name: str = "JointScheduledAction"
+    ) -> "JointScheduledAction":
+        mapping = _require_mapping(payload, field_name=field_name)
+        return cls(
+            action_id=_require_field(mapping, "action_id", owner=field_name),
+            start_time=_require_field(mapping, "start_time", owner=field_name),
+        )
+
+
+@dataclass(frozen=True)
+class JointResidencyWindow:
+    value_id: str
+    start_time: int
+    end_time: int
+
+    def __post_init__(self) -> None:
+        start_time = _coerce_non_negative_int(
+            self.start_time, field_name="JointResidencyWindow.start_time"
+        )
+        end_time = _coerce_non_negative_int(
+            self.end_time, field_name="JointResidencyWindow.end_time"
+        )
+        if end_time <= start_time:
+            raise ValueError("JointResidencyWindow.end_time must be > start_time")
+        object.__setattr__(self, "start_time", start_time)
+        object.__setattr__(self, "end_time", end_time)
+
+    def to_json(self) -> dict[str, object]:
+        return {
+            "value_id": self.value_id,
+            "start_time": self.start_time,
+            "end_time": self.end_time,
+        }
+
+    @classmethod
+    def from_json(
+        cls, payload: object, *, field_name: str = "JointResidencyWindow"
+    ) -> "JointResidencyWindow":
+        mapping = _require_mapping(payload, field_name=field_name)
+        return cls(
+            value_id=_require_field(mapping, "value_id", owner=field_name),
+            start_time=_require_field(mapping, "start_time", owner=field_name),
+            end_time=_require_field(mapping, "end_time", owner=field_name),
         )
 
 
@@ -1179,15 +1174,8 @@ class JointSolution:
     diagnostics: Mapping[str, JsonValue] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "schema_version",
-            _validate_schema_version(
-                self.schema_version,
-                expected=JOINT_TILING_SCHEDULE_SOLUTION_SCHEMA_VERSION,
-                field_name="JointSolution.schema_version",
-            ),
-        )
+        if self.schema_version != JOINT_TILING_SCHEDULE_SOLUTION_SCHEMA_VERSION:
+            raise ValueError("JointSolution.schema_version must be joint_tiling_schedule_solution_v1")
         object.__setattr__(
             self,
             "selected_recipes",
@@ -1218,7 +1206,7 @@ class JointSolution:
         object.__setattr__(
             self,
             "objective_value",
-            _validate_non_negative_int(
+            _coerce_non_negative_int(
                 self.objective_value, field_name="JointSolution.objective_value"
             ),
         )
@@ -1227,55 +1215,57 @@ class JointSolution:
             "diagnostics",
             _freeze_json_mapping(self.diagnostics, field_name="JointSolution.diagnostics"),
         )
-        _validate_unique_attr(
-            self.selected_recipes,
-            attr_name="region_id",
-            field_name="selected_recipes",
-        )
-        _validate_unique_attr(
-            self.scheduled_actions,
-            attr_name="action_id",
-            field_name="scheduled_actions",
-        )
+        _ensure_unique_ids(self.selected_recipes, "region_id")
+        _ensure_unique_ids(self.scheduled_actions, "action_id")
 
     def to_json(self) -> dict[str, object]:
         return {
             "schema_version": self.schema_version,
             "selected_recipes": [
-                recipe.to_json() for recipe in self.selected_recipes
+                selected_recipe.to_json()
+                for selected_recipe in self.selected_recipes
             ],
             "scheduled_actions": [
-                action.to_json() for action in self.scheduled_actions
+                scheduled_action.to_json()
+                for scheduled_action in self.scheduled_actions
             ],
             "residency_windows": [
-                window.to_json() for window in self.residency_windows
+                residency_window.to_json()
+                for residency_window in self.residency_windows
             ],
             "objective_value": self.objective_value,
             "diagnostics": _to_json_value(self.diagnostics),
         }
 
     @classmethod
-    def from_json(cls, payload: object) -> JointSolution:
+    def from_json(cls, payload: object) -> "JointSolution":
         mapping = _require_mapping(payload, field_name="JointSolution")
-        schema_version = _require_field(mapping, "schema_version")
-        if schema_version != JOINT_TILING_SCHEDULE_SOLUTION_SCHEMA_VERSION:
-            raise ValueError(
-                "JointSolution.schema_version must be "
-                f"{JOINT_TILING_SCHEDULE_SOLUTION_SCHEMA_VERSION!r}"
-            )
         return cls(
-            schema_version=schema_version,
-            selected_recipes=_parse_object_list(
-                mapping, "selected_recipes", JointSelectedRecipe
+            schema_version=_require_field(
+                mapping, "schema_version", owner="JointSolution"
             ),
-            scheduled_actions=_parse_object_list(
-                mapping, "scheduled_actions", JointScheduledAction
+            selected_recipes=_parse_object_array(
+                mapping,
+                "selected_recipes",
+                JointSelectedRecipe.from_json,
+                owner="JointSolution",
             ),
-            residency_windows=_parse_object_list(
-                mapping, "residency_windows", JointResidencyWindow
+            scheduled_actions=_parse_object_array(
+                mapping,
+                "scheduled_actions",
+                JointScheduledAction.from_json,
+                owner="JointSolution",
             ),
-            objective_value=_require_field(mapping, "objective_value"),
-            diagnostics=_require_field(mapping, "diagnostics"),
+            residency_windows=_parse_object_array(
+                mapping,
+                "residency_windows",
+                JointResidencyWindow.from_json,
+                owner="JointSolution",
+            ),
+            objective_value=_require_field(
+                mapping, "objective_value", owner="JointSolution"
+            ),
+            diagnostics=_require_field(mapping, "diagnostics", owner="JointSolution"),
         )
 
 
@@ -1287,15 +1277,8 @@ class JointFailure:
     diagnostics: Mapping[str, JsonValue] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "schema_version",
-            _validate_schema_version(
-                self.schema_version,
-                expected=JOINT_TILING_SCHEDULE_FAILURE_SCHEMA_VERSION,
-                field_name="JointFailure.schema_version",
-            ),
-        )
+        if self.schema_version != JOINT_TILING_SCHEDULE_FAILURE_SCHEMA_VERSION:
+            raise ValueError("JointFailure.schema_version must be joint_tiling_schedule_failure_v1")
         object.__setattr__(
             self,
             "status",
@@ -1327,19 +1310,17 @@ class JointFailure:
         }
 
     @classmethod
-    def from_json(cls, payload: object) -> JointFailure:
+    def from_json(cls, payload: object) -> "JointFailure":
         mapping = _require_mapping(payload, field_name="JointFailure")
-        schema_version = _require_field(mapping, "schema_version")
-        if schema_version != JOINT_TILING_SCHEDULE_FAILURE_SCHEMA_VERSION:
-            raise ValueError(
-                "JointFailure.schema_version must be "
-                f"{JOINT_TILING_SCHEDULE_FAILURE_SCHEMA_VERSION!r}"
-            )
         return cls(
-            schema_version=schema_version,
-            status=_require_field(mapping, "status"),
-            error_category=_require_field(mapping, "error_category"),
-            diagnostics=_require_field(mapping, "diagnostics"),
+            schema_version=_require_field(
+                mapping, "schema_version", owner="JointFailure"
+            ),
+            status=_require_field(mapping, "status", owner="JointFailure"),
+            error_category=_require_field(
+                mapping, "error_category", owner="JointFailure"
+            ),
+            diagnostics=_require_field(mapping, "diagnostics", owner="JointFailure"),
         )
 
 
@@ -1404,8 +1385,6 @@ __all__ = [
     "JOINT_TILING_SCHEDULE_PROBLEM_SCHEMA_VERSION",
     "JOINT_TILING_SCHEDULE_SOLUTION_METADATA_KEY",
     "JOINT_TILING_SCHEDULE_SOLUTION_SCHEMA_VERSION",
-    "JsonScalar",
-    "JsonValue",
     "JointAction",
     "JointActionKind",
     "JointBoundaryConstraint",
@@ -1433,6 +1412,8 @@ __all__ = [
     "JointValueFootprint",
     "JointValueProducer",
     "JointValueTier",
+    "JsonScalar",
+    "JsonValue",
     "get_joint_tiling_schedule_failure",
     "get_joint_tiling_schedule_problem",
     "get_joint_tiling_schedule_solution",
