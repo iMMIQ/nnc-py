@@ -134,6 +134,14 @@ def _coerce_non_negative_int(value: object, *, field_name: str) -> int:
     return value
 
 
+def _coerce_optional_non_negative_int(
+    value: object, *, field_name: str
+) -> int | None:
+    if value is None:
+        return None
+    return _coerce_non_negative_int(value, field_name=field_name)
+
+
 def _get_typed_metadata(
     ctx: CompileContext, key: str, expected_type: type[object]
 ) -> object | None:
@@ -539,13 +547,13 @@ class SramAllocationInterval:
     size_bytes: int
     item_id: str = ""
     item_kind: str = ""
-    offset: int = 0
+    offset: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
             self,
             "offset",
-            _coerce_non_negative_int(
+            _coerce_optional_non_negative_int(
                 self.offset, field_name="SramAllocationInterval.offset"
             ),
         )

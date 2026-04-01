@@ -197,6 +197,11 @@ def _build_fast_allocations(
             )
 
         imported = intervals[0]
+        if imported.offset is None:
+            raise RuntimeError(
+                "Malformed feasible joint schedule import metadata: "
+                f"imported interval for SRAM value '{value_name}' is missing offset."
+            )
         timing = _resolve_value_timing(
             value=value,
             value_name=value_name,
@@ -241,6 +246,11 @@ def _validate_imported_interval(interval: SramAllocationInterval) -> None:
         raise RuntimeError(
             "Malformed feasible joint schedule import metadata: imported interval "
             f"for value '{interval.value_name}' is missing item_kind."
+        )
+    if interval.offset is None:
+        raise RuntimeError(
+            "Malformed feasible joint schedule import metadata: imported interval "
+            f"for value '{interval.value_name}' is missing offset."
         )
     if interval.size_bytes <= 0:
         raise RuntimeError(
@@ -508,10 +518,18 @@ def _calculate_total_fast_memory(
 ) -> int:
     if not intervals:
         return 0
-    return max(
-        interval.offset + _align(interval.size_bytes, _DEFAULT_ALIGNMENT)
-        for interval in intervals
-    )
+    max_extent = 0
+    for interval in intervals:
+        if interval.offset is None:
+            raise RuntimeError(
+                "Malformed feasible joint schedule import metadata: imported interval "
+                f"for value '{interval.value_name}' is missing offset."
+            )
+        max_extent = max(
+            max_extent,
+            interval.offset + _align(interval.size_bytes, _DEFAULT_ALIGNMENT),
+        )
+    return max_extent
 
 
 def _calculate_total_slow_memory(

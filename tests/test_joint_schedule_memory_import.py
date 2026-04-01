@@ -201,3 +201,23 @@ def test_joint_schedule_memory_import_rejects_non_imported_interval_shape():
 
     with pytest.raises(RuntimeError, match="item_id"):
         JointScheduleMemoryImportPass().run(ctx)
+
+
+def test_joint_schedule_memory_import_requires_explicit_imported_offset():
+    ctx = _make_import_context(
+        sram_intervals=(
+            SramAllocationInterval(
+                value_name="mid",
+                item_id="mid@2.item",
+                item_kind="resident_window",
+                buffer_id="mid@2.item",
+                offset=None,
+                start_time=2,
+                end_time=3,
+                size_bytes=16,
+            ),
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="offset"):
+        JointScheduleMemoryImportPass().run(ctx)
