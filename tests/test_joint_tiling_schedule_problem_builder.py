@@ -703,11 +703,16 @@ def test_build_joint_regions_rejects_unknown_tensor_accesses():
         build_joint_regions(ctx)
 
 
-def test_build_joint_problem_rejects_partial_plan_coverage():
+def test_build_joint_problem_synthesizes_missing_plain_execution_plan_coverage():
     ctx = _make_partial_plan_coverage_context()
 
-    with pytest.raises(JointProblemBuilderError):
-        build_joint_problem(ctx)
+    problem = build_joint_problem(ctx)
+
+    assert {region.region_id for region in problem.regions} == {"relu0", "conv0"}
+    recipes = {recipe.region_id: recipe for recipe in problem.recipes}
+    assert recipes["relu0"].tile_spec.axes == ()
+    assert recipes["relu0"].tile_spec.shape == ()
+    assert recipes["conv0"].tile_spec.axes == ("h", "w")
 
 
 def test_build_joint_problem_maps_tile_shape_by_named_axes():

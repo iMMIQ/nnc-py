@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from nnc_py.ir.context import CompileContext
+from nnc_py.ir.execution_plan import NodeExecutionPlan
 from nnc_py.ir.joint_tiling_schedule import JointRegion, JointRegionKind
+from nnc_py.passes.pipeline_step_lowering import _synthesize_execution_plan
 
 
 class JointProblemBuilderError(ValueError):
@@ -13,7 +15,7 @@ class JointProblemBuilderError(ValueError):
 def build_joint_regions(ctx: CompileContext) -> tuple[JointRegion, ...]:
     """Emit one region per current execution-plan decision unit."""
 
-    plans = ctx.node_execution_plans
+    plans = get_joint_problem_plans(ctx)
     if not plans:
         return ()
 
@@ -102,6 +104,23 @@ def build_joint_regions(ctx: CompileContext) -> tuple[JointRegion, ...]:
     )
 
 
+def get_joint_problem_plans(ctx: CompileContext) -> dict[str, NodeExecutionPlan]:
+    """Return complete execution plans for the joint problem.
+
+    The joint path needs full graph coverage, including shape/plain ops that do
+    not participate in tiled lowering. Reuse synthesized plans for uncovered
+    nodes instead of requiring every producer to be present in
+    ``ctx.node_execution_plans``.
+    """
+
+    plans = dict(ctx.node_execution_plans)
+    for node in ctx.graph.topological_sort():
+        if node.name in plans:
+            continue
+        plans[node.name] = _synthesize_execution_plan(ctx, node)
+    return plans
+
+
 def _member_nodes_for(node) -> tuple[str, ...]:
     fused_from = node.metadata.get("fused_from")
     if fused_from is None:
@@ -145,4 +164,8 @@ def _validate_region_tensor_access(
     return tensor_name
 
 
-__all__ = ["JointProblemBuilderError", "build_joint_regions"]
+__all__ = [
+    "JointProblemBuilderError",
+    "build_joint_regions",
+    "get_joint_problem_plans",
+]

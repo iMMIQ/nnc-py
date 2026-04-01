@@ -102,6 +102,13 @@ def _make_pipeline_ready_gemm_graph() -> Graph:
     return graph
 
 
+def _require_resnet18_model_path() -> Path:
+    model_path = Path(__file__).resolve().parents[1] / "models" / "resnet18.onnx"
+    if not model_path.exists():
+        pytest.skip(f"Model not found: {model_path}")
+    return model_path
+
+
 def _compile_model(
     tmp_path,
     *,
@@ -133,6 +140,30 @@ def _compile_model(
 
     assert backend.ctx is not None
     return backend.ctx, output_dir
+
+
+def _compile_existing_model(
+    model_path: Path,
+    output_dir: Path,
+    *,
+    enable_pipeline_scheduler: bool | None,
+    metadata: dict[str, object] | None = None,
+):
+    compiler = Compiler(
+        target="x86",
+        opt_level=3,
+        enable_constant_folding=False,
+    )
+    backend = _CapturingX86Backend()
+    compiler.backend = backend
+    compiler.compile(
+        str(model_path),
+        str(output_dir),
+        enable_pipeline_scheduler=enable_pipeline_scheduler,
+        metadata=metadata,
+    )
+    assert backend.ctx is not None
+    return backend.ctx
 
 
 def _joint_solver_command(mode: str) -> list[str]:
@@ -368,6 +399,22 @@ def test_joint_contract_external_solver_failure_surfaces_standardized_category(
 
     assert getattr(exc_info.value, "error_category", None) == "solver_reported_infeasible"
     assert "solver_reported_infeasible" in str(exc_info.value)
+
+
+def test_joint_contract_resnet18_compiles_with_default_submodule_solver(tmp_path):
+    model_path = _require_resnet18_model_path()
+
+    ctx = _compile_existing_model(
+        model_path,
+        tmp_path / "resnet18_joint_build",
+        enable_pipeline_scheduler=None,
+        metadata={"enable_joint_tiling_schedule_contract": True},
+    )
+
+    assert ctx.joint_tiling_schedule_problem is not None
+    assert ctx.joint_tiling_schedule_solution is not None
+    assert ctx.pipeline_schedule_result is not None
+    assert ctx.pipeline_schedule_result.feasible is True
 
 
 def test_strict_o3_scheduled_compile_with_impossible_max_memory_preserves_budget_diagnostics(

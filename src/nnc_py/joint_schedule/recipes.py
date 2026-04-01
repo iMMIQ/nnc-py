@@ -46,7 +46,7 @@ from nnc_py.passes.pipeline_step_lowering import (
     _scratch_bytes,
 )
 
-from .regions import JointProblemBuilderError, build_joint_regions
+from .regions import JointProblemBuilderError, build_joint_regions, get_joint_problem_plans
 
 _DEFAULT_ALIGNMENT_BYTES = 16
 
@@ -229,9 +229,10 @@ def _build_region_assembly(
 def _plan_by_region_id(
     ctx: CompileContext, regions: tuple[JointRegion, ...]
 ) -> dict[str, NodeExecutionPlan]:
+    available_plans = get_joint_problem_plans(ctx)
     plan_by_region_id: dict[str, NodeExecutionPlan] = {}
     for region in regions:
-        plan = ctx.get_node_execution_plan(region.region_id)
+        plan = available_plans.get(region.region_id)
         if plan is None:
             raise JointProblemBuilderError(
                 f"missing node execution plan for region {region.region_id!r}"
