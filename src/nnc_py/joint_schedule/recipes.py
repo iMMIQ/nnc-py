@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
+import sys
 
 from nnc_py.ir.context import CompileContext
 from nnc_py.ir.execution_plan import NodeExecutionPlan
@@ -763,7 +764,7 @@ def _sram_capacity_bytes(ctx: CompileContext) -> int:
         value = ctx.metadata.get(key)
         if isinstance(value, int) and value >= 0:
             return value
-    return 0
+    return sys.maxsize
 
 
 def _validate_problem(problem: JointProblem) -> None:

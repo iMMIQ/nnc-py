@@ -162,6 +162,41 @@ class PassManager:
         ]
 
     @classmethod
+    def get_joint_tiling_schedule_o3_passes(cls) -> List[PassBase]:
+        """Get the O3 path that materializes the joint tiling/schedule contract."""
+        from nnc_py.passes.dead_code_elimination import DeadCodeEliminationPass
+        from nnc_py.passes.dominator_fusion import DominatorFusionPass
+        from nnc_py.passes.identity_elimination import IdentityEliminationPass
+        from nnc_py.passes.joint_tiling_schedule import (
+            JointTilingScheduleMaterializationPass,
+            JointTilingScheduleProblemPass,
+            JointTilingScheduleSolvePass,
+        )
+        from nnc_py.passes.layout_planning import LayoutPlanningPass
+        from nnc_py.passes.liveness import LivenessAnalysisPass
+        from nnc_py.passes.pattern_fusion import PatternFusionPass
+        from nnc_py.passes.prepack_lowering import PrepackLoweringPass
+        from nnc_py.passes.schedule_analysis import ScheduleAnalysisPass
+        from nnc_py.passes.scheduled_memory_planning import ScheduledMemoryPlanningPass
+        from nnc_py.passes.tiled_lowering import TiledLoweringPass
+
+        return [
+            IdentityEliminationPass(),
+            DeadCodeEliminationPass(),
+            PatternFusionPass(),
+            PrepackLoweringPass(),
+            DominatorFusionPass(),
+            ScheduleAnalysisPass(),
+            LayoutPlanningPass(),
+            TiledLoweringPass(),
+            JointTilingScheduleProblemPass(),
+            JointTilingScheduleSolvePass(),
+            JointTilingScheduleMaterializationPass(),
+            LivenessAnalysisPass(),
+            ScheduledMemoryPlanningPass(),
+        ]
+
+    @classmethod
     def get_conservative_o3_passes(cls) -> List[PassBase]:
         """Get the conservative non-scheduled O3 compile path."""
         return cls.get_default_passes(3)

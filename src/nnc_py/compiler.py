@@ -9,7 +9,6 @@ from rich.console import Console
 
 from nnc_py.codegen.npu_backend import NPUBackend
 from nnc_py.codegen.x86_backend import X86Backend
-from nnc_py.frontend.onnx_loader import ONNXFrontend
 from nnc_py.ir.context import CompileContext
 from nnc_py.ir.pipeline_schedule import PipelineScheduleResult, set_pipeline_schedule_result
 from nnc_py.passes.base import PassManager
@@ -91,9 +90,16 @@ def sanitize_compile_error_message(message: str) -> str:
 def _raise_sanitized_compile_error(exc: Exception) -> None:
     """Re-raise scheduled compile failures without leaking staged SRAM keys."""
     sanitized = sanitize_compile_error_message(str(exc))
+    error_category = getattr(exc, "error_category", None)
+    failure_status = getattr(exc, "failure_status", None)
     if sanitized == str(exc):
         raise exc
-    raise RuntimeError(sanitized).with_traceback(exc.__traceback__) from None
+    error = RuntimeError(sanitized)
+    if error_category is not None:
+        setattr(error, "error_category", error_category)
+    if failure_status is not None:
+        setattr(error, "failure_status", failure_status)
+    raise error.with_traceback(exc.__traceback__) from None
 
 
 class Compiler:
@@ -133,13 +139,22 @@ class Compiler:
         self.console = Console()
 
         # Initialize compiler stages
-        self.frontend = ONNXFrontend(enable_simplify=enable_constant_folding)
+        self.frontend = None
         self.backend = self._create_backend(target)
+        base_metadata = self._base_compile_metadata()
+        joint_tiling_schedule_enabled = (
+            self._resolve_joint_tiling_schedule_contract_enabled(base_metadata)
+        )
         self.pass_manager = self._build_pass_manager(
-            enable_pipeline_scheduler=self._resolve_pipeline_scheduler_enabled(
-                self._base_compile_metadata(),
-                explicit_enable_pipeline_scheduler=None,
-            )
+            enable_pipeline_scheduler=(
+                True
+                if joint_tiling_schedule_enabled
+                else self._resolve_pipeline_scheduler_enabled(
+                    base_metadata,
+                    explicit_enable_pipeline_scheduler=None,
+                )
+            ),
+            enable_joint_tiling_schedule_contract=joint_tiling_schedule_enabled,
         )
 
     def compile(
@@ -174,6 +189,12 @@ class Compiler:
             )
 
         # Stage 1: Frontend parsing
+        if self.frontend is None:
+            from nnc_py.frontend import ONNXFrontend
+
+            self.frontend = ONNXFrontend(
+                enable_simplify=self.enable_constant_folding
+            )
         with self.console.status("[bold green]Loading ONNX model..."):
             graph = self.frontend.load(onnx_path)
             self.console.print(
@@ -207,10 +228,28 @@ class Compiler:
             ctx.metadata["memory_strategy"] = strategy
             self.console.print(f"  Memory strategy: {strategy}")
 
-        scheduler_enabled = self._resolve_pipeline_scheduler_enabled(
-            ctx.metadata,
-            explicit_enable_pipeline_scheduler=enable_pipeline_scheduler,
+        joint_tiling_schedule_enabled = (
+            self._resolve_joint_tiling_schedule_contract_enabled(ctx.metadata)
         )
+        ctx.metadata["enable_joint_tiling_schedule_contract"] = (
+            joint_tiling_schedule_enabled
+        )
+        ctx.metadata["joint_tiling_schedule_contract_enabled"] = (
+            joint_tiling_schedule_enabled
+        )
+        scheduler_enabled = (
+            True
+            if joint_tiling_schedule_enabled
+            else self._resolve_pipeline_scheduler_enabled(
+                ctx.metadata,
+                explicit_enable_pipeline_scheduler=None,
+            )
+        )
+        if not joint_tiling_schedule_enabled:
+            scheduler_enabled = self._resolve_pipeline_scheduler_enabled(
+                ctx.metadata,
+                explicit_enable_pipeline_scheduler=enable_pipeline_scheduler,
+            )
         ctx.metadata["pipeline_scheduler_enabled"] = scheduler_enabled
         if self.opt_level >= 3 and not scheduler_enabled:
             fallback_reason = self._pipeline_scheduler_fallback_reason(
@@ -238,7 +277,8 @@ class Compiler:
         # Re-register passes for current opt_level to avoid accumulation
         # when the same Compiler instance is reused across multiple compilations
         self.pass_manager = self._build_pass_manager(
-            enable_pipeline_scheduler=scheduler_enabled
+            enable_pipeline_scheduler=scheduler_enabled,
+            enable_joint_tiling_schedule_contract=joint_tiling_schedule_enabled,
         )
 
         try:
@@ -247,6 +287,7 @@ class Compiler:
                     "[bold yellow]Running optimization passes..."
                 ):
                     self.pass_manager.run(ctx)
+                    self._validate_joint_tiling_schedule_result(ctx)
                     self._validate_scheduled_o3_result(ctx)
                     self.console.print(
                         f"✓ Applied {len(self.pass_manager.applied_passes)} passes"
@@ -331,17 +372,32 @@ class Compiler:
         artifacts.metadata["target"] = self.target
         artifacts.metadata["opt_level"] = self.opt_level
 
-    def _build_pass_manager(self, *, enable_pipeline_scheduler: bool) -> PassManager:
+    def _build_pass_manager(
+        self,
+        *,
+        enable_pipeline_scheduler: bool,
+        enable_joint_tiling_schedule_contract: bool,
+    ) -> PassManager:
         """Build a fresh pass manager for the requested optimization path."""
         pass_manager = PassManager()
-        for pass_obj in self._get_passes(enable_pipeline_scheduler=enable_pipeline_scheduler):
+        for pass_obj in self._get_passes(
+            enable_pipeline_scheduler=enable_pipeline_scheduler,
+            enable_joint_tiling_schedule_contract=enable_joint_tiling_schedule_contract,
+        ):
             pass_manager.register(pass_obj)
         return pass_manager
 
-    def _get_passes(self, *, enable_pipeline_scheduler: bool):
+    def _get_passes(
+        self,
+        *,
+        enable_pipeline_scheduler: bool,
+        enable_joint_tiling_schedule_contract: bool,
+    ):
         """Return the pass sequence for the current optimization level."""
         if self.opt_level < 3:
             return PassManager.get_default_passes(self.opt_level)
+        if enable_joint_tiling_schedule_contract:
+            return PassManager.get_joint_tiling_schedule_o3_passes()
         if enable_pipeline_scheduler:
             return PassManager.get_scheduled_o3_passes()
         return PassManager.get_conservative_o3_passes()
@@ -369,6 +425,15 @@ class Compiler:
         if "disable_pipeline_scheduler" in metadata:
             return not bool(metadata["disable_pipeline_scheduler"])
         return self.opt_level >= 3
+
+    def _resolve_joint_tiling_schedule_contract_enabled(
+        self,
+        metadata: Mapping[str, Any],
+    ) -> bool:
+        """Resolve the opt-in joint-contract O3 path toggle."""
+        if self.opt_level < 3:
+            return False
+        return bool(metadata.get("enable_joint_tiling_schedule_contract"))
 
     def _pipeline_scheduler_fallback_reason(
         self,
@@ -430,6 +495,28 @@ class Compiler:
             f"({reason})."
         )
 
+    def _validate_joint_tiling_schedule_result(self, ctx: CompileContext) -> None:
+        """Require the joint-contract O3 path to yield a solution or structured failure."""
+        if self.opt_level < 3:
+            return
+        if not bool(
+            ctx.metadata.get("enable_joint_tiling_schedule_contract")
+            or ctx.metadata.get("joint_tiling_schedule_contract_enabled")
+        ):
+            return
+
+        failure = ctx.joint_tiling_schedule_failure
+        if failure is not None:
+            raise _make_joint_failure_compile_error(failure)
+        if ctx.joint_tiling_schedule_problem is None:
+            raise RuntimeError(
+                "O3 joint tiling schedule path failed (missing_joint_problem)."
+            )
+        if ctx.joint_tiling_schedule_solution is None:
+            raise RuntimeError(
+                "O3 joint tiling schedule path failed (missing_joint_solution)."
+            )
+
     def _normalize_metadata_mapping(
         self,
         metadata: Mapping[str, Any] | None,
@@ -438,3 +525,38 @@ class Compiler:
         if metadata is None:
             return {}
         return {str(key): value for key, value in metadata.items()}
+
+
+def _format_joint_failure_compile_error(failure) -> str:
+    """Format a structured joint failure as a concise compile error."""
+    error_category, status = _joint_failure_error_fields(failure)
+
+    reason = None
+    diagnostics = failure.diagnostics
+    if isinstance(diagnostics, Mapping):
+        candidate = diagnostics.get("reason")
+        if isinstance(candidate, str) and candidate:
+            reason = candidate
+
+    detail_parts = [f"error_category={error_category}", f"status={status}"]
+    if reason is not None:
+        detail_parts.append(f"reason={reason}")
+    return f"O3 joint tiling schedule path failed ({', '.join(detail_parts)})."
+
+
+def _make_joint_failure_compile_error(failure) -> RuntimeError:
+    """Attach normalized joint failure fields to the compile exception."""
+    error = RuntimeError(_format_joint_failure_compile_error(failure))
+    error_category, status = _joint_failure_error_fields(failure)
+    setattr(error, "error_category", error_category)
+    setattr(error, "failure_status", status)
+    return error
+
+
+def _joint_failure_error_fields(failure) -> tuple[str, str]:
+    """Return normalized compile-surface joint failure labels."""
+    error_category = failure.error_category.value
+    status = failure.status.value
+    if status == "infeasible":
+        error_category = "solver_reported_infeasible"
+    return error_category, status

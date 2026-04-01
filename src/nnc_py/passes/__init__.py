@@ -1,5 +1,9 @@
 """Optimization passes module."""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
 from nnc_py.ir.execution_plan import get_node_execution_plan, get_node_execution_plans
 from nnc_py.passes.indexed_forward_graph import Edge, IndexedForwardGraph, NodeEntry
 from nnc_py.passes.dominator_tree import DominatorTree
@@ -48,6 +52,17 @@ from nnc_py.passes.tiled_lowering import TiledLoweringPass
 from nnc_py.passes.dominator_fusion import DominatorFusionPass
 from nnc_py.passes.fusion_groups import FusionGroup, GroupArena
 from nnc_py.passes.path_validator import PathValidator
+
+if TYPE_CHECKING:
+    from nnc_py.passes.joint_tiling_schedule import (
+        JointTilingScheduleMaterializationPass as JointTilingScheduleMaterializationPass,
+    )
+    from nnc_py.passes.joint_tiling_schedule import (
+        JointTilingScheduleProblemPass as JointTilingScheduleProblemPass,
+    )
+    from nnc_py.passes.joint_tiling_schedule import (
+        JointTilingScheduleSolvePass as JointTilingScheduleSolvePass,
+    )
 
 __all__ = [
     # Indexed forward graph
@@ -98,6 +113,9 @@ __all__ = [
     "ScheduleAnalysisPass",
     "ScheduleCandidate",
     "ScheduledMemoryExpansionPass",
+    "JointTilingScheduleMaterializationPass",
+    "JointTilingScheduleProblemPass",
+    "JointTilingScheduleSolvePass",
     "PipelineStepLoweringPass",
     "PipelineSchedulingPass",
     "TiledLoweringPass",
@@ -110,3 +128,24 @@ __all__ = [
     # Path validation
     "PathValidator",
 ]
+
+
+def __getattr__(name: str) -> Any:
+    if name not in {
+        "JointTilingScheduleMaterializationPass",
+        "JointTilingScheduleProblemPass",
+        "JointTilingScheduleSolvePass",
+    }:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from nnc_py.passes.joint_tiling_schedule import (
+        JointTilingScheduleMaterializationPass,
+        JointTilingScheduleProblemPass,
+        JointTilingScheduleSolvePass,
+    )
+
+    exports = {
+        "JointTilingScheduleMaterializationPass": JointTilingScheduleMaterializationPass,
+        "JointTilingScheduleProblemPass": JointTilingScheduleProblemPass,
+        "JointTilingScheduleSolvePass": JointTilingScheduleSolvePass,
+    }
+    return exports[name]
