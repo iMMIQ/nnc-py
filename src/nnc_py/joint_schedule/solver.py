@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections import defaultdict
+from dataclasses import dataclass
 import json
 import subprocess
 from typing import Final
@@ -31,6 +32,14 @@ from nnc_py.joint_schedule.validation import (
 
 
 DEFAULT_SOLVER_TIMEOUT_SECONDS: Final[float] = 5.0
+
+
+@dataclass(frozen=True)
+class _LiveSramItem:
+    order_index: int
+    item: JointSramItem
+    start_time: int
+    end_time: int
 
 
 class JointSolverTransportError(RuntimeError):
@@ -207,8 +216,20 @@ class BaselineJointScheduleSolver(JointScheduleSolver):
         )
         generated_sram_items = _generated_residency_items(problem, residency_windows)
         sram_allocations = _pack_sram_allocations(
-            (*problem.sram_items, *generated_sram_items)
+            problem,
+            fixed_items=problem.sram_items,
+            generated_items=generated_sram_items,
+            start_by_action=start_by_action,
+            end_by_action=end_by_action,
+            residency_windows=residency_windows,
+            objective_value=objective_value,
         )
+        if sram_allocations is None:
+            return _baseline_failure(
+                JointFailureStatus.ERROR,
+                JointFailureCategory.SRAM_CAPACITY_EXCEEDED,
+                "baseline SRAM allocator could not place active items within capacity",
+            )
         solution = JointSolution(
             schema_version=JOINT_TILING_SCHEDULE_SOLUTION_SCHEMA_VERSION,
             selected_recipes=selected_recipes,
@@ -324,17 +345,123 @@ def _generated_residency_items(
 
 
 def _pack_sram_allocations(
-    items: tuple[JointSramItem, ...],
-) -> tuple[JointSramAllocation, ...]:
+    problem: JointProblem,
+    *,
+    fixed_items: tuple[JointSramItem, ...],
+    generated_items: tuple[JointSramItem, ...],
+    start_by_action: dict[str, int],
+    end_by_action: dict[str, int],
+    residency_windows: tuple[JointResidencyWindow, ...],
+    objective_value: int,
+) -> tuple[JointSramAllocation, ...] | None:
+    live_items = _collect_live_sram_items(
+        fixed_items=fixed_items,
+        generated_items=generated_items,
+        start_by_action=start_by_action,
+        end_by_action=end_by_action,
+        residency_windows=residency_windows,
+        objective_value=objective_value,
+    )
     allocations: list[JointSramAllocation] = []
-    next_offset = 0
-    for item in items:
-        aligned_offset = _align(next_offset, item.alignment_bytes)
+    active: list[tuple[int, int, int, int]] = []
+
+    for live_item in live_items:
+        active = [
+            (start_time, end_time, offset, end_offset)
+            for start_time, end_time, offset, end_offset in active
+            if end_time > live_item.start_time
+        ]
+        candidate_offset = 0
+        placed_offset: int | None = None
+        for _, _, offset, end_offset in sorted(active, key=lambda interval: interval[2]):
+            aligned_offset = _align(candidate_offset, live_item.item.alignment_bytes)
+            if aligned_offset + live_item.item.size_bytes <= offset:
+                placed_offset = aligned_offset
+                break
+            candidate_offset = max(candidate_offset, end_offset)
+        if placed_offset is None:
+            placed_offset = _align(candidate_offset, live_item.item.alignment_bytes)
+        if placed_offset + live_item.item.size_bytes > problem.sram_capacity_bytes:
+            return None
         allocations.append(
-            JointSramAllocation(item_id=item.item_id, offset=aligned_offset)
+            JointSramAllocation(item_id=live_item.item.item_id, offset=placed_offset)
         )
-        next_offset = aligned_offset + item.size_bytes
+        active.append(
+            (
+                live_item.start_time,
+                live_item.end_time,
+                placed_offset,
+                placed_offset + live_item.item.size_bytes,
+            )
+        )
+
     return tuple(allocations)
+
+
+def _collect_live_sram_items(
+    *,
+    fixed_items: tuple[JointSramItem, ...],
+    generated_items: tuple[JointSramItem, ...],
+    start_by_action: dict[str, int],
+    end_by_action: dict[str, int],
+    residency_windows: tuple[JointResidencyWindow, ...],
+    objective_value: int,
+) -> tuple[_LiveSramItem, ...]:
+    windows_by_residency = {
+        window.residency_id: window for window in residency_windows
+    }
+    live_items: list[_LiveSramItem] = []
+    for order_index, item in enumerate((*fixed_items, *generated_items)):
+        lifetime = _item_lifetime(
+            item,
+            start_by_action=start_by_action,
+            end_by_action=end_by_action,
+            windows_by_residency=windows_by_residency,
+            objective_value=objective_value,
+        )
+        if lifetime is None:
+            continue
+        start_time, end_time = lifetime
+        live_items.append(
+            _LiveSramItem(
+                order_index=order_index,
+                item=item,
+                start_time=start_time,
+                end_time=end_time,
+            )
+        )
+    return tuple(
+        sorted(
+            live_items,
+            key=lambda live_item: (
+                live_item.start_time,
+                live_item.end_time,
+                live_item.order_index,
+            ),
+        )
+    )
+
+
+def _item_lifetime(
+    item: JointSramItem,
+    *,
+    start_by_action: dict[str, int],
+    end_by_action: dict[str, int],
+    windows_by_residency: dict[str, JointResidencyWindow],
+    objective_value: int,
+) -> tuple[int, int] | None:
+    if item.owner_residency_id is not None:
+        window = windows_by_residency.get(item.owner_residency_id)
+        if window is None:
+            return None
+        return window.start_time, window.end_time
+    if item.owner_action_id is not None:
+        start_time = start_by_action.get(item.owner_action_id)
+        end_time = end_by_action.get(item.owner_action_id)
+        if start_time is None or end_time is None:
+            return None
+        return start_time, end_time
+    return 0, objective_value
 
 
 def _align(value: int, alignment: int) -> int:

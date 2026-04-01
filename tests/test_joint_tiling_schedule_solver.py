@@ -245,7 +245,7 @@ def _allocatable_joint_problem() -> JointProblem:
             JointResource(resource_kind=JointResourceKind.SHAPE, slot_count=1),
             JointResource(resource_kind=JointResourceKind.OTHER, slot_count=1),
         ),
-        sram_capacity_bytes=1024,
+        sram_capacity_bytes=192,
         sram_items=(
             JointSramItem(
                 item_id="region0.recipe0.compute.temp",
@@ -343,8 +343,30 @@ def test_baseline_solver_emits_generated_residency_items_and_sram_allocations(
         "region0.recipe0.compute.temp": 0,
         "region0.recipe0.compute.pack": 64,
         "input0@3.item": 96,
-        "output0@9.item": 160,
+        "output0@9.item": 0,
     }
+    size_by_item = {
+        "region0.recipe0.compute.temp": 64,
+        "region0.recipe0.compute.pack": 32,
+        "input0@3.item": 64,
+        "output0@9.item": 96,
+    }
+    assert max(
+        allocation.offset + size_by_item[allocation.item_id]
+        for allocation in result.sram_allocations
+    ) <= allocatable_joint_problem.sram_capacity_bytes
+
+
+def test_baseline_solver_reuses_offsets_for_non_overlapping_item_lifetimes(
+    allocatable_joint_problem: JointProblem,
+):
+    result = BaselineJointScheduleSolver().solve(allocatable_joint_problem)
+
+    assert isinstance(result, JointSolution)
+    offsets = {allocation.item_id: allocation.offset for allocation in result.sram_allocations}
+
+    assert offsets["output0@9.item"] == offsets["region0.recipe0.compute.temp"]
+    assert offsets["output0@9.item"] != offsets["input0@3.item"]
 
 
 def test_cli_solver_stderr_attachment_preserves_generated_sram_items_and_allocations(
