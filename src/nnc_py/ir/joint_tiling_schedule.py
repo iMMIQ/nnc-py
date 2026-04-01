@@ -122,9 +122,25 @@ def _coerce_non_negative_int(value: object, *, field_name: str) -> int:
     return value
 
 
+def _coerce_positive_int(value: object, *, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{field_name} must be int")
+    if value <= 0:
+        raise ValueError(f"{field_name} must be positive")
+    return value
+
+
 def _coerce_bool(value: object, *, field_name: str) -> bool:
     if not isinstance(value, bool):
         raise TypeError(f"{field_name} must be bool")
+    return value
+
+
+def _coerce_optional_str(value: object, *, field_name: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError(f"{field_name} must be str or None")
     return value
 
 
@@ -195,6 +211,12 @@ class JointValueTier(str, Enum):
     CONST = "const"
     SLOW = "slow"
     SRAM = "sram"
+
+
+class JointSramItemKind(str, Enum):
+    TEMP_INTERVAL = "temp_interval"
+    TRANSFER_BUFFER = "transfer_buffer"
+    RESIDENT_WINDOW = "resident_window"
 
 
 class JointActionKind(str, Enum):
@@ -954,6 +976,128 @@ class JointResource:
 
 
 @dataclass(frozen=True)
+class JointSramItem:
+    item_id: str
+    kind: JointSramItemKind
+    size_bytes: int
+    alignment_bytes: int
+    is_optional: bool
+    owner_action_id: str | None
+    owner_value_id: str | None
+    owner_residency_id: str | None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "kind",
+            _coerce_enum(self.kind, JointSramItemKind, field_name="JointSramItem.kind"),
+        )
+        object.__setattr__(
+            self,
+            "size_bytes",
+            _coerce_non_negative_int(
+                self.size_bytes, field_name="JointSramItem.size_bytes"
+            ),
+        )
+        object.__setattr__(
+            self,
+            "alignment_bytes",
+            _coerce_positive_int(
+                self.alignment_bytes, field_name="JointSramItem.alignment_bytes"
+            ),
+        )
+        object.__setattr__(
+            self,
+            "is_optional",
+            _coerce_bool(self.is_optional, field_name="JointSramItem.is_optional"),
+        )
+        object.__setattr__(
+            self,
+            "owner_action_id",
+            _coerce_optional_str(
+                self.owner_action_id, field_name="JointSramItem.owner_action_id"
+            ),
+        )
+        object.__setattr__(
+            self,
+            "owner_value_id",
+            _coerce_optional_str(
+                self.owner_value_id, field_name="JointSramItem.owner_value_id"
+            ),
+        )
+        object.__setattr__(
+            self,
+            "owner_residency_id",
+            _coerce_optional_str(
+                self.owner_residency_id,
+                field_name="JointSramItem.owner_residency_id",
+            ),
+        )
+
+    def to_json(self) -> dict[str, object]:
+        return {
+            "item_id": self.item_id,
+            "kind": self.kind.value,
+            "size_bytes": self.size_bytes,
+            "alignment_bytes": self.alignment_bytes,
+            "is_optional": self.is_optional,
+            "owner_action_id": self.owner_action_id,
+            "owner_value_id": self.owner_value_id,
+            "owner_residency_id": self.owner_residency_id,
+        }
+
+    @classmethod
+    def from_json(
+        cls, payload: object, *, field_name: str = "JointSramItem"
+    ) -> "JointSramItem":
+        mapping = _require_mapping(payload, field_name=field_name)
+        return cls(
+            item_id=_require_field(mapping, "item_id", owner=field_name),
+            kind=_require_field(mapping, "kind", owner=field_name),
+            size_bytes=_require_field(mapping, "size_bytes", owner=field_name),
+            alignment_bytes=_require_field(
+                mapping, "alignment_bytes", owner=field_name
+            ),
+            is_optional=_require_field(mapping, "is_optional", owner=field_name),
+            owner_action_id=_require_field(
+                mapping, "owner_action_id", owner=field_name
+            ),
+            owner_value_id=_require_field(mapping, "owner_value_id", owner=field_name),
+            owner_residency_id=_require_field(
+                mapping, "owner_residency_id", owner=field_name
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class JointSramAllocation:
+    item_id: str
+    offset: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "offset",
+            _coerce_non_negative_int(
+                self.offset, field_name="JointSramAllocation.offset"
+            ),
+        )
+
+    def to_json(self) -> dict[str, object]:
+        return {"item_id": self.item_id, "offset": self.offset}
+
+    @classmethod
+    def from_json(
+        cls, payload: object, *, field_name: str = "JointSramAllocation"
+    ) -> "JointSramAllocation":
+        mapping = _require_mapping(payload, field_name=field_name)
+        return cls(
+            item_id=_require_field(mapping, "item_id", owner=field_name),
+            offset=_require_field(mapping, "offset", owner=field_name),
+        )
+
+
+@dataclass(frozen=True)
 class JointProblem:
     schema_version: str
     regions: tuple[JointRegion, ...]
@@ -964,6 +1108,8 @@ class JointProblem:
     dependency_edges: tuple[JointDependencyEdge, ...]
     resources: tuple[JointResource, ...]
     sram_capacity_bytes: int
+    sram_items: tuple[JointSramItem, ...] = ()
+    default_alignment_bytes: int = 1
     objective: str = JOINT_TILING_SCHEDULE_OBJECTIVE
 
     def __post_init__(self) -> None:
@@ -1014,6 +1160,23 @@ class JointProblem:
                 field_name="JointProblem.sram_capacity_bytes",
             ),
         )
+        object.__setattr__(
+            self,
+            "sram_items",
+            _coerce_tuple_of_type(
+                self.sram_items,
+                JointSramItem,
+                field_name="JointProblem.sram_items",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "default_alignment_bytes",
+            _coerce_positive_int(
+                self.default_alignment_bytes,
+                field_name="JointProblem.default_alignment_bytes",
+            ),
+        )
         if self.objective != JOINT_TILING_SCHEDULE_OBJECTIVE:
             raise ValueError("JointProblem.objective must be min_makespan")
         _ensure_unique_ids(self.regions, "region_id")
@@ -1022,6 +1185,7 @@ class JointProblem:
         _ensure_unique_ids(self.actions, "action_id")
         _ensure_unique_ids(self.boundary_constraints, "boundary_id")
         _ensure_unique_ids(self.resources, "resource_kind")
+        _ensure_unique_ids(self.sram_items, "item_id")
 
     def to_json(self) -> dict[str, object]:
         return {
@@ -1036,6 +1200,8 @@ class JointProblem:
             "dependency_edges": [edge.to_json() for edge in self.dependency_edges],
             "resources": [resource.to_json() for resource in self.resources],
             "sram_capacity_bytes": self.sram_capacity_bytes,
+            "sram_items": [item.to_json() for item in self.sram_items],
+            "default_alignment_bytes": self.default_alignment_bytes,
             "objective": self.objective,
         }
 
@@ -1075,6 +1241,12 @@ class JointProblem:
             ),
             sram_capacity_bytes=_require_field(
                 mapping, "sram_capacity_bytes", owner="JointProblem"
+            ),
+            sram_items=_parse_object_array(
+                mapping, "sram_items", JointSramItem.from_json, owner="JointProblem"
+            ),
+            default_alignment_bytes=_require_field(
+                mapping, "default_alignment_bytes", owner="JointProblem"
             ),
             objective=_require_field(mapping, "objective", owner="JointProblem"),
         )
@@ -1132,6 +1304,7 @@ class JointResidencyWindow:
     value_id: str
     start_time: int
     end_time: int
+    residency_id: str | None = None
 
     def __post_init__(self) -> None:
         start_time = _coerce_non_negative_int(
@@ -1142,11 +1315,20 @@ class JointResidencyWindow:
         )
         if end_time <= start_time:
             raise ValueError("JointResidencyWindow.end_time must be > start_time")
+        residency_id = self.residency_id
+        if residency_id is None:
+            residency_id = f"{self.value_id}@{start_time}"
+        else:
+            residency_id = _coerce_optional_str(
+                residency_id, field_name="JointResidencyWindow.residency_id"
+            )
         object.__setattr__(self, "start_time", start_time)
         object.__setattr__(self, "end_time", end_time)
+        object.__setattr__(self, "residency_id", residency_id)
 
     def to_json(self) -> dict[str, object]:
         return {
+            "residency_id": self.residency_id,
             "value_id": self.value_id,
             "start_time": self.start_time,
             "end_time": self.end_time,
@@ -1158,6 +1340,7 @@ class JointResidencyWindow:
     ) -> "JointResidencyWindow":
         mapping = _require_mapping(payload, field_name=field_name)
         return cls(
+            residency_id=_require_field(mapping, "residency_id", owner=field_name),
             value_id=_require_field(mapping, "value_id", owner=field_name),
             start_time=_require_field(mapping, "start_time", owner=field_name),
             end_time=_require_field(mapping, "end_time", owner=field_name),
@@ -1171,6 +1354,8 @@ class JointSolution:
     scheduled_actions: tuple[JointScheduledAction, ...]
     residency_windows: tuple[JointResidencyWindow, ...]
     objective_value: int
+    generated_sram_items: tuple[JointSramItem, ...] = ()
+    sram_allocations: tuple[JointSramAllocation, ...] = ()
     diagnostics: Mapping[str, JsonValue] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -1212,11 +1397,32 @@ class JointSolution:
         )
         object.__setattr__(
             self,
+            "generated_sram_items",
+            _coerce_tuple_of_type(
+                self.generated_sram_items,
+                JointSramItem,
+                field_name="JointSolution.generated_sram_items",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "sram_allocations",
+            _coerce_tuple_of_type(
+                self.sram_allocations,
+                JointSramAllocation,
+                field_name="JointSolution.sram_allocations",
+            ),
+        )
+        object.__setattr__(
+            self,
             "diagnostics",
             _freeze_json_mapping(self.diagnostics, field_name="JointSolution.diagnostics"),
         )
         _ensure_unique_ids(self.selected_recipes, "region_id")
         _ensure_unique_ids(self.scheduled_actions, "action_id")
+        _ensure_unique_ids(self.residency_windows, "residency_id")
+        _ensure_unique_ids(self.generated_sram_items, "item_id")
+        _ensure_unique_ids(self.sram_allocations, "item_id")
 
     def to_json(self) -> dict[str, object]:
         return {
@@ -1234,6 +1440,12 @@ class JointSolution:
                 for residency_window in self.residency_windows
             ],
             "objective_value": self.objective_value,
+            "generated_sram_items": [
+                item.to_json() for item in self.generated_sram_items
+            ],
+            "sram_allocations": [
+                allocation.to_json() for allocation in self.sram_allocations
+            ],
             "diagnostics": _to_json_value(self.diagnostics),
         }
 
@@ -1264,6 +1476,18 @@ class JointSolution:
             ),
             objective_value=_require_field(
                 mapping, "objective_value", owner="JointSolution"
+            ),
+            generated_sram_items=_parse_object_array(
+                mapping,
+                "generated_sram_items",
+                JointSramItem.from_json,
+                owner="JointSolution",
+            ),
+            sram_allocations=_parse_object_array(
+                mapping,
+                "sram_allocations",
+                JointSramAllocation.from_json,
+                owner="JointSolution",
             ),
             diagnostics=_require_field(mapping, "diagnostics", owner="JointSolution"),
         )

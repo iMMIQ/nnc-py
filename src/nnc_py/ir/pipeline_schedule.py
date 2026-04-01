@@ -126,6 +126,14 @@ def _coerce_enum_tuple(
     )
 
 
+def _coerce_non_negative_int(value: object, *, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{field_name} must be int")
+    if value < 0:
+        raise ValueError(f"{field_name} must be non-negative")
+    return value
+
+
 def _get_typed_metadata(
     ctx: CompileContext, key: str, expected_type: type[object]
 ) -> object | None:
@@ -529,13 +537,28 @@ class SramAllocationInterval:
     start_time: int
     end_time: int
     size_bytes: int
+    item_id: str = ""
+    item_kind: str = ""
+    offset: int = 0
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "offset",
+            _coerce_non_negative_int(
+                self.offset, field_name="SramAllocationInterval.offset"
+            ),
+        )
 
     def to_json(self) -> dict[str, object]:
         """Return a JSON-ready representation of the SRAM interval."""
 
         return {
             "value_name": self.value_name,
+            "item_id": self.item_id,
+            "item_kind": self.item_kind,
             "buffer_id": self.buffer_id,
+            "offset": self.offset,
             "start_time": self.start_time,
             "end_time": self.end_time,
             "size_bytes": self.size_bytes,

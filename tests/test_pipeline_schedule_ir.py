@@ -223,6 +223,35 @@ def test_pipeline_schedule_constructors_copy_sequences_and_normalize_enum_string
     assert problem.sram_values[0].consumer_step_ids == ("relu0.compute",)
 
 
+def test_sram_allocation_interval_tracks_imported_offset_and_item_identity():
+    interval = SramAllocationInterval(
+        value_name="mid.resident@10",
+        item_id="mid@0.item",
+        item_kind="resident_window",
+        buffer_id="joint_buf_0",
+        offset=64,
+        start_time=10,
+        end_time=24,
+        size_bytes=96,
+    )
+
+    assert interval.value_name == "mid.resident@10"
+    assert interval.item_id == "mid@0.item"
+    assert interval.item_kind == "resident_window"
+    assert interval.buffer_id == "joint_buf_0"
+    assert interval.offset == 64
+    assert interval.to_json() == {
+        "value_name": "mid.resident@10",
+        "item_id": "mid@0.item",
+        "item_kind": "resident_window",
+        "buffer_id": "joint_buf_0",
+        "offset": 64,
+        "start_time": 10,
+        "end_time": 24,
+        "size_bytes": 96,
+    }
+
+
 def test_scheduled_value_tracks_home_tier_and_graph_tensor_name():
     value = ScheduledValue(
         name="sram|node|4:add0|tensor|1:y",

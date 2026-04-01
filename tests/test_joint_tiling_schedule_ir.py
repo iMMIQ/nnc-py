@@ -1,5 +1,6 @@
 import json
 
+import nnc_py.ir.joint_tiling_schedule as joint_ir
 import pytest
 
 from nnc_py.ir.context import CompileContext
@@ -236,6 +237,19 @@ def _sample_problem() -> JointProblem:
             JointResource(resource_kind=JointResourceKind.OTHER, slot_count=1),
         ),
         sram_capacity_bytes=1024,
+        sram_items=(
+            joint_ir.JointSramItem(
+                item_id="action1.temp",
+                kind="temp_interval",
+                size_bytes=64,
+                alignment_bytes=16,
+                is_optional=False,
+                owner_action_id="action1",
+                owner_value_id=None,
+                owner_residency_id=None,
+            ),
+        ),
+        default_alignment_bytes=16,
         objective="min_makespan",
     )
 
@@ -253,10 +267,35 @@ def _sample_solution() -> JointSolution:
             JointScheduledAction(action_id="action2", start_time=26),
         ),
         residency_windows=(
-            JointResidencyWindow(value_id="input0", start_time=0, end_time=26),
-            JointResidencyWindow(value_id="output0", start_time=26, end_time=36),
+            JointResidencyWindow(
+                residency_id="input0@0",
+                value_id="input0",
+                start_time=0,
+                end_time=26,
+            ),
+            JointResidencyWindow(
+                residency_id="output0@26",
+                value_id="output0",
+                start_time=26,
+                end_time=36,
+            ),
         ),
         objective_value=36,
+        generated_sram_items=(
+            joint_ir.JointSramItem(
+                item_id="output0@26.item",
+                kind="resident_window",
+                size_bytes=96,
+                alignment_bytes=16,
+                is_optional=False,
+                owner_action_id=None,
+                owner_value_id="output0",
+                owner_residency_id="output0@26",
+            ),
+        ),
+        sram_allocations=(
+            joint_ir.JointSramAllocation(item_id="output0@26.item", offset=64),
+        ),
         diagnostics={"solver": {"status": "ok"}},
     )
 
@@ -310,6 +349,84 @@ def test_joint_contract_json_round_trips_and_ignores_unknown_fields():
     restored_failure = JointFailure.from_json(failure_payload)
 
     assert restored_failure == _sample_failure()
+
+
+def test_joint_problem_round_trips_sram_items_and_default_alignment_bytes():
+    problem = JointProblem(
+        schema_version=JOINT_TILING_SCHEDULE_PROBLEM_SCHEMA_VERSION,
+        regions=(),
+        recipes=(),
+        values=(),
+        actions=(),
+        boundary_constraints=(),
+        dependency_edges=(),
+        resources=(),
+        sram_items=(
+            joint_ir.JointSramItem(
+                item_id="matmul0.temp",
+                kind="temp_interval",
+                size_bytes=128,
+                alignment_bytes=16,
+                is_optional=False,
+                owner_action_id="matmul0.compute",
+                owner_value_id=None,
+                owner_residency_id=None,
+            ),
+        ),
+        sram_capacity_bytes=1024,
+        default_alignment_bytes=16,
+        objective="min_makespan",
+    )
+
+    restored_problem = JointProblem.from_json(problem.to_json())
+
+    assert restored_problem.sram_items[0].item_id == "matmul0.temp"
+    assert restored_problem.sram_items[0].kind is joint_ir.JointSramItemKind.TEMP_INTERVAL
+    assert restored_problem.sram_items[0].alignment_bytes == 16
+    assert restored_problem.default_alignment_bytes == 16
+
+
+def test_joint_solution_carries_residency_identity_generated_items_and_allocations():
+    solution = JointSolution(
+        schema_version=JOINT_TILING_SCHEDULE_SOLUTION_SCHEMA_VERSION,
+        selected_recipes=(),
+        scheduled_actions=(),
+        residency_windows=(
+            JointResidencyWindow(
+                residency_id="mid@0",
+                value_id="mid",
+                start_time=10,
+                end_time=24,
+            ),
+        ),
+        generated_sram_items=(
+            joint_ir.JointSramItem(
+                item_id="mid@0.item",
+                kind="resident_window",
+                size_bytes=96,
+                alignment_bytes=16,
+                is_optional=False,
+                owner_action_id=None,
+                owner_value_id="mid",
+                owner_residency_id="mid@0",
+            ),
+        ),
+        sram_allocations=(
+            joint_ir.JointSramAllocation(item_id="mid@0.item", offset=64),
+        ),
+        objective_value=24,
+        diagnostics={"solver": {"status": "ok"}},
+    )
+
+    restored_solution = JointSolution.from_json(solution.to_json())
+
+    assert restored_solution.residency_windows[0].residency_id == "mid@0"
+    assert restored_solution.generated_sram_items[0].owner_residency_id == "mid@0"
+    assert restored_solution.generated_sram_items[0].kind is (
+        joint_ir.JointSramItemKind.RESIDENT_WINDOW
+    )
+    assert restored_solution.sram_allocations[0].item_id == "mid@0.item"
+    assert restored_solution.sram_allocations[0].offset == 64
 
 
 def test_joint_contract_requires_expected_fields_in_from_json():
@@ -491,10 +608,33 @@ def test_joint_solution_and_failure_validate_unique_entries_and_json_payloads():
             {"action_id": "action2", "start_time": 26},
         ],
         "residency_windows": [
-            {"value_id": "input0", "start_time": 0, "end_time": 26},
-            {"value_id": "output0", "start_time": 26, "end_time": 36},
+            {
+                "residency_id": "input0@0",
+                "value_id": "input0",
+                "start_time": 0,
+                "end_time": 26,
+            },
+            {
+                "residency_id": "output0@26",
+                "value_id": "output0",
+                "start_time": 26,
+                "end_time": 36,
+            },
         ],
         "objective_value": 36,
+        "generated_sram_items": [
+            {
+                "item_id": "output0@26.item",
+                "kind": "resident_window",
+                "size_bytes": 96,
+                "alignment_bytes": 16,
+                "is_optional": False,
+                "owner_action_id": None,
+                "owner_value_id": "output0",
+                "owner_residency_id": "output0@26",
+            }
+        ],
+        "sram_allocations": [{"item_id": "output0@26.item", "offset": 64}],
         "diagnostics": {"solver": {"status": "ok"}},
     }
     assert json.loads(json.dumps(failure.to_json())) == {
