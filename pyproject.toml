@@ -62,6 +62,14 @@ Documentation = "https://github.com/yourusername/nnc-py#readme"
 Repository = "https://github.com/yourusername/nnc-py"
 Issues = "https://github.com/yourusername/nnc-py/issues"
 
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
