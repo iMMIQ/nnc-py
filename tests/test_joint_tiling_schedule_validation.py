@@ -588,6 +588,24 @@ def test_validator_rejects_optional_value_reference_to_unknown_value():
     assert failure.status is JointFailureStatus.INVALID_PROBLEM
 
 
+def test_validator_rejects_bad_fixed_sram_item_owner_in_problem():
+    problem = replace(
+        _valid_problem(),
+        sram_items=tuple(
+            replace(item, owner_action_id="r0.dma_in")
+            if item.item_id == "r0.compute.temp"
+            else item
+            for item in _valid_problem().sram_items
+        ),
+    )
+
+    failure = validate_joint_problem(problem)
+
+    assert failure is not None
+    assert failure.status is JointFailureStatus.INVALID_PROBLEM
+    assert "temp_interval" in str(failure.diagnostics["reason"])
+
+
 def test_validator_rejects_overlapping_same_resource_actions():
     bad_solution = replace(
         _valid_solution(),
@@ -973,6 +991,24 @@ def test_validator_rejects_generated_resident_item_ownership_mismatch():
     assert failure is not None
     assert failure.error_category is JointFailureCategory.INVALID_SOLUTION
     assert "ownership" in str(failure.diagnostics["reason"])
+
+
+def test_validator_rejects_forged_resident_item_size_and_alignment():
+    bad_solution = replace(
+        _valid_solution(),
+        generated_sram_items=tuple(
+            replace(item, size_bytes=1, alignment_bytes=1, is_optional=True)
+            if item.item_id == "mid@9.item"
+            else item
+            for item in _valid_solution().generated_sram_items
+        ),
+    )
+
+    failure = validate_joint_solution(_valid_problem(), bad_solution)
+
+    assert failure is not None
+    assert failure.error_category is JointFailureCategory.INVALID_SOLUTION
+    assert "resident_window" in str(failure.diagnostics["reason"])
 
 
 def test_validator_rejects_temp_interval_owned_by_non_compute_action():

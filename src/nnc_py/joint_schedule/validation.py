@@ -273,6 +273,12 @@ def _validate_problem_shape(problem: JointProblem) -> None:
                 f"dependency edge {edge.src_action_id!r}->{edge.dst_action_id!r} references unknown actions",
             )
 
+    for item in problem.sram_items:
+        _validate_fixed_sram_item(
+            item,
+            actions_by_id=actions_by_id,
+        )
+
 
 def _validate_value_tiers(value: JointValue) -> None:
     if value.required_final_tier is JointValueTier.UNMATERIALIZED:
@@ -385,6 +391,7 @@ def _validate_solution(
         problem,
         solution,
         actions_by_id=actions_by_id,
+        values_by_id=values_by_id,
         start_by_action=start_by_action,
         end_by_action=end_by_action,
     )
@@ -658,6 +665,7 @@ def _validate_sram_placement(
     solution: JointSolution,
     *,
     actions_by_id: Mapping[str, JointAction],
+    values_by_id: Mapping[str, JointValue],
     start_by_action: Mapping[str, int],
     end_by_action: Mapping[str, int],
 ) -> None:
@@ -681,10 +689,9 @@ def _validate_sram_placement(
     }
     active_items: list[_ActiveSramItem] = []
     for item in problem.sram_items:
-        _validate_sram_item_ownership(
+        _validate_fixed_sram_item(
             item,
             actions_by_id=actions_by_id,
-            windows_by_residency=windows_by_residency,
         )
         lifetime = _item_lifetime(
             item,
@@ -711,9 +718,10 @@ def _validate_sram_placement(
 
     resident_item_ids_by_residency: dict[str, str] = {}
     for item in generated_items:
-        _validate_sram_item_ownership(
+        _validate_generated_resident_item(
             item,
-            actions_by_id=actions_by_id,
+            problem=problem,
+            values_by_id=values_by_id,
             windows_by_residency=windows_by_residency,
         )
         assert item.owner_residency_id is not None
@@ -801,11 +809,10 @@ def _validate_sram_placement(
                 )
 
 
-def _validate_sram_item_ownership(
+def _validate_fixed_sram_item(
     item: JointSramItem,
     *,
     actions_by_id: Mapping[str, JointAction],
-    windows_by_residency: Mapping[str, JointResidencyWindow],
 ) -> None:
     if item.kind is JointSramItemKind.TEMP_INTERVAL:
         if item.owner_action_id is None:
@@ -858,6 +865,24 @@ def _validate_sram_item_ownership(
             )
         return
 
+    raise _ValidationError(
+        JointFailureCategory.INVALID_SOLUTION,
+        f"problem SRAM item {item.item_id!r} must not be {item.kind.value}",
+    )
+
+
+def _validate_generated_resident_item(
+    item: JointSramItem,
+    *,
+    problem: JointProblem,
+    values_by_id: Mapping[str, JointValue],
+    windows_by_residency: Mapping[str, JointResidencyWindow],
+) -> None:
+    if item.kind is not JointSramItemKind.RESIDENT_WINDOW:
+        raise _ValidationError(
+            JointFailureCategory.INVALID_SOLUTION,
+            f"generated SRAM item {item.item_id!r} must be resident_window",
+        )
     if item.owner_action_id is not None:
         raise _ValidationError(
             JointFailureCategory.INVALID_SOLUTION,
@@ -873,6 +898,27 @@ def _validate_sram_item_ownership(
         raise _ValidationError(
             JointFailureCategory.INVALID_SOLUTION,
             f"resident_window item {item.item_id!r} has ownership mismatch",
+        )
+    value = values_by_id.get(item.owner_value_id)
+    if value is None:
+        raise _ValidationError(
+            JointFailureCategory.INVALID_SOLUTION,
+            f"resident_window item {item.item_id!r} references unknown value {item.owner_value_id!r}",
+        )
+    if item.size_bytes != value.size_bytes:
+        raise _ValidationError(
+            JointFailureCategory.INVALID_SOLUTION,
+            f"resident_window item {item.item_id!r} has invalid size_bytes",
+        )
+    if item.alignment_bytes != problem.default_alignment_bytes:
+        raise _ValidationError(
+            JointFailureCategory.INVALID_SOLUTION,
+            f"resident_window item {item.item_id!r} has invalid alignment_bytes",
+        )
+    if item.is_optional:
+        raise _ValidationError(
+            JointFailureCategory.INVALID_SOLUTION,
+            f"resident_window item {item.item_id!r} must not be optional",
         )
 
 
