@@ -421,7 +421,7 @@ def _problem_with_transfer_buffer() -> JointProblem:
                 size_bytes=32,
                 alignment_bytes=16,
                 is_optional=False,
-                owner_action_id="r0.compute",
+                owner_action_id="r0.dma_in",
                 owner_value_id=None,
                 owner_residency_id=None,
             ),
@@ -975,6 +975,24 @@ def test_validator_rejects_generated_resident_item_ownership_mismatch():
     assert "ownership" in str(failure.diagnostics["reason"])
 
 
+def test_validator_rejects_temp_interval_owned_by_non_compute_action():
+    bad_problem = replace(
+        _valid_problem(),
+        sram_items=tuple(
+            replace(item, owner_action_id="r0.dma_in")
+            if item.item_id == "r0.compute.temp"
+            else item
+            for item in _valid_problem().sram_items
+        ),
+    )
+
+    failure = validate_joint_solution(bad_problem, _valid_solution())
+
+    assert failure is not None
+    assert failure.error_category is JointFailureCategory.INVALID_SOLUTION
+    assert "temp_interval" in str(failure.diagnostics["reason"])
+
+
 def test_validator_rejects_transfer_buffer_with_non_action_ownership():
     problem = _problem_with_transfer_buffer()
     bad_problem = replace(
@@ -993,6 +1011,24 @@ def test_validator_rejects_transfer_buffer_with_non_action_ownership():
     )
 
     failure = validate_joint_solution(bad_problem, _solution_with_transfer_buffer())
+
+    assert failure is not None
+    assert failure.error_category is JointFailureCategory.INVALID_SOLUTION
+    assert "transfer_buffer" in str(failure.diagnostics["reason"])
+
+
+def test_validator_rejects_transfer_buffer_owned_by_compute_action():
+    problem = replace(
+        _problem_with_transfer_buffer(),
+        sram_items=tuple(
+            replace(item, owner_action_id="r0.compute")
+            if item.item_id == "r0.compute.pack"
+            else item
+            for item in _problem_with_transfer_buffer().sram_items
+        ),
+    )
+
+    failure = validate_joint_solution(problem, _solution_with_transfer_buffer())
 
     assert failure is not None
     assert failure.error_category is JointFailureCategory.INVALID_SOLUTION

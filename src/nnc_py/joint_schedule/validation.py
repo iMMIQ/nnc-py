@@ -807,10 +807,7 @@ def _validate_sram_item_ownership(
     actions_by_id: Mapping[str, JointAction],
     windows_by_residency: Mapping[str, JointResidencyWindow],
 ) -> None:
-    if item.kind in (
-        JointSramItemKind.TEMP_INTERVAL,
-        JointSramItemKind.TRANSFER_BUFFER,
-    ):
+    if item.kind is JointSramItemKind.TEMP_INTERVAL:
         if item.owner_action_id is None:
             raise _ValidationError(
                 JointFailureCategory.INVALID_SOLUTION,
@@ -825,6 +822,39 @@ def _validate_sram_item_ownership(
             raise _ValidationError(
                 JointFailureCategory.INVALID_SOLUTION,
                 f"{item.kind.value} item {item.item_id!r} has invalid ownership metadata",
+            )
+        if actions_by_id[item.owner_action_id].kind is not JointActionKind.COMPUTE:
+            raise _ValidationError(
+                JointFailureCategory.INVALID_SOLUTION,
+                f"{item.kind.value} item {item.item_id!r} must be owned by a compute action",
+            )
+        return
+
+    if item.kind is JointSramItemKind.TRANSFER_BUFFER:
+        if item.owner_action_id is None:
+            raise _ValidationError(
+                JointFailureCategory.INVALID_SOLUTION,
+                f"{item.kind.value} item {item.item_id!r} must declare owner_action_id",
+            )
+        if item.owner_action_id not in actions_by_id:
+            raise _ValidationError(
+                JointFailureCategory.INVALID_SOLUTION,
+                f"{item.kind.value} item {item.item_id!r} references unknown action {item.owner_action_id!r}",
+            )
+        if item.owner_value_id is not None or item.owner_residency_id is not None:
+            raise _ValidationError(
+                JointFailureCategory.INVALID_SOLUTION,
+                f"{item.kind.value} item {item.item_id!r} has invalid ownership metadata",
+            )
+        if actions_by_id[item.owner_action_id].kind not in (
+            JointActionKind.DMA_IN,
+            JointActionKind.DMA_OUT,
+            JointActionKind.SPILL,
+            JointActionKind.RELOAD,
+        ):
+            raise _ValidationError(
+                JointFailureCategory.INVALID_SOLUTION,
+                f"{item.kind.value} item {item.item_id!r} must be owned by a transfer action",
             )
         return
 
