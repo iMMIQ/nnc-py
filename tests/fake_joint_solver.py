@@ -1,36 +1,40 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
+from pathlib import Path
 
 from nnc_py.ir.joint_tiling_schedule import (
     JOINT_TILING_SCHEDULE_FAILURE_SCHEMA_VERSION,
     JOINT_TILING_SCHEDULE_SOLUTION_SCHEMA_VERSION,
-    JointFailure,
-    JointProblem,
-    JointSolution,
 )
-from nnc_py.joint_schedule.solver import BaselineJointScheduleSolver
 
 
 def _build_solution(problem_payload: dict[str, object]) -> dict[str, object]:
-    problem = JointProblem.from_json(problem_payload)
-    result = BaselineJointScheduleSolver().solve(problem)
-    if isinstance(result, JointFailure):
-        diagnostics = dict(result.diagnostics)
-        reason = diagnostics.get("reason")
-        detail = f": {reason}" if isinstance(reason, str) and reason else ""
+    root = Path(__file__).resolve().parents[1]
+    solver = root / "joint_solver" / "bin" / "nnc-joint-solver"
+    result = subprocess.run(
+        [sys.executable, str(solver)],
+        input=json.dumps(problem_payload),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
         raise RuntimeError(
-            "baseline solver could not synthesize solution "
-            f"({result.status.value}/{result.error_category.value}){detail}"
+            "external joint solver CLI failed: "
+            + (result.stderr.strip() or f"exit {result.returncode}")
         )
-    if not isinstance(result, JointSolution):
-        raise TypeError("baseline solver returned unexpected payload type")
-
-    payload = result.to_json()
+    payload = json.loads(result.stdout)
+    if payload.get("schema_version") != JOINT_TILING_SCHEDULE_SOLUTION_SCHEMA_VERSION:
+        raise RuntimeError(
+            "external joint solver CLI expected solution payload, got "
+            f"{payload.get('schema_version')!r}"
+        )
     payload["schema_version"] = JOINT_TILING_SCHEDULE_SOLUTION_SCHEMA_VERSION
     payload["diagnostics"] = {
-        **dict(result.diagnostics),
+        **dict(payload.get("diagnostics", {})),
         "mode": "solution",
     }
     return payload

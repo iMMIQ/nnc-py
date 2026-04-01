@@ -24,8 +24,13 @@ pip install -e .
 ### Development Installation
 
 ```bash
+git submodule update --init --recursive
 pip install -e ".[dev]"
 ```
+
+The external joint solver lives in the `joint_solver/` git submodule. Any
+source checkout that wants to use or test the joint-contract `-O3` path must
+initialize submodules first.
 
 ## Quick Start
 
@@ -131,8 +136,14 @@ tiling-recipe selection and makespan-oriented scheduling to an external solver
 without exposing the internal compiler schedule IR.
 
 - Enable it with compile metadata: `{"enable_joint_tiling_schedule_contract": True}`
-- Optionally provide an external CLI solver with:
+- By default, source checkouts resolve the solver from the checked-out
+  `joint_solver/bin/nnc-joint-solver` submodule CLI.
+- Optionally override the solver command explicitly with:
   `{"joint_tiling_schedule_solver_command": ["solver-binary", "--stdio"]}`
+- If the submodule checkout is missing, initialize it with:
+  `git submodule update --init --recursive`
+- Installed-package execution without the source checkout is not supported for
+  the default joint solver path.
 - v1 is intentionally limited to regions and recipes the compiler already knows
   how to build from existing tiled-lowering metadata
 

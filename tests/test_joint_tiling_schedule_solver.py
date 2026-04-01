@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from tests import fake_joint_solver as fake_solver_module
 from nnc_py.ir.joint_tiling_schedule import (
     JOINT_TILING_SCHEDULE_FAILURE_SCHEMA_VERSION,
     JOINT_TILING_SCHEDULE_PROBLEM_SCHEMA_VERSION,
@@ -37,10 +38,10 @@ from nnc_py.ir.joint_tiling_schedule import (
     JointCostParameters,
 )
 from nnc_py.joint_schedule.solver import (
-    BaselineJointScheduleSolver,
     CliJointScheduleSolver,
     JointSolverTransportError,
 )
+from tests.joint_solver_helpers import joint_solver_cli_command
 
 
 def _minimal_joint_problem() -> JointProblem:
@@ -283,7 +284,7 @@ def minimal_joint_problem() -> JointProblem:
     return _allocatable_joint_problem()
 
 
-def _solver_command(mode: str) -> list[str]:
+def _fake_solver_command(mode: str) -> list[str]:
     return [
         sys.executable,
         str(Path(__file__).with_name("fake_joint_solver.py")),
@@ -292,7 +293,7 @@ def _solver_command(mode: str) -> list[str]:
 
 
 def test_cli_solver_parses_solution_payload(minimal_joint_problem: JointProblem):
-    result = CliJointScheduleSolver(_solver_command("solution")).solve(
+    result = CliJointScheduleSolver(joint_solver_cli_command()).solve(
         minimal_joint_problem
     )
 
@@ -306,7 +307,7 @@ def test_cli_solver_parses_solution_payload(minimal_joint_problem: JointProblem)
 def test_cli_solver_attaches_stderr_to_solution_diagnostics(
     minimal_joint_problem: JointProblem,
 ):
-    result = CliJointScheduleSolver(_solver_command("solution_stderr")).solve(
+    result = CliJointScheduleSolver(_fake_solver_command("solution_stderr")).solve(
         minimal_joint_problem
     )
 
@@ -314,71 +315,15 @@ def test_cli_solver_attaches_stderr_to_solution_diagnostics(
     assert result.diagnostics["_solver_transport"]["stderr"] == "solver emitted warning"
 
 
-def test_baseline_solver_emits_generated_residency_items_and_sram_allocations(
+def test_cli_solver_submodule_emits_generated_residency_items_and_sram_allocations(
     allocatable_joint_problem: JointProblem,
 ):
-    result = BaselineJointScheduleSolver().solve(allocatable_joint_problem)
-
-    assert isinstance(result, JointSolution)
-    assert {window.residency_id for window in result.residency_windows} == {
-        "input0@3",
-        "output0@9",
-    }
-    assert {item.item_id for item in result.generated_sram_items} == {
-        "input0@3.item",
-        "output0@9.item",
-    }
-    assert all(item.kind is JointSramItemKind.RESIDENT_WINDOW for item in result.generated_sram_items)
-    assert {item.owner_residency_id for item in result.generated_sram_items} == {
-        "input0@3",
-        "output0@9",
-    }
-    assert {allocation.item_id for allocation in result.sram_allocations} == {
-        "region0.recipe0.compute.temp",
-        "region0.recipe0.compute.pack",
-        "input0@3.item",
-        "output0@9.item",
-    }
-    assert {allocation.item_id: allocation.offset for allocation in result.sram_allocations} == {
-        "region0.recipe0.compute.temp": 0,
-        "region0.recipe0.compute.pack": 0,
-        "input0@3.item": 64,
-        "output0@9.item": 0,
-    }
-    size_by_item = {
-        "region0.recipe0.compute.temp": 64,
-        "region0.recipe0.compute.pack": 32,
-        "input0@3.item": 64,
-        "output0@9.item": 96,
-    }
-    assert max(
-        allocation.offset + size_by_item[allocation.item_id]
-        for allocation in result.sram_allocations
-    ) <= allocatable_joint_problem.sram_capacity_bytes
-
-
-def test_baseline_solver_reuses_offsets_for_non_overlapping_item_lifetimes(
-    allocatable_joint_problem: JointProblem,
-):
-    result = BaselineJointScheduleSolver().solve(allocatable_joint_problem)
-
-    assert isinstance(result, JointSolution)
-    offsets = {allocation.item_id: allocation.offset for allocation in result.sram_allocations}
-
-    assert offsets["output0@9.item"] == offsets["region0.recipe0.compute.temp"]
-    assert offsets["output0@9.item"] != offsets["input0@3.item"]
-
-
-def test_cli_solver_stderr_attachment_preserves_generated_sram_items_and_allocations(
-    allocatable_joint_problem: JointProblem,
-):
-    result = CliJointScheduleSolver(_solver_command("solution_stderr")).solve(
+    result = CliJointScheduleSolver(joint_solver_cli_command()).solve(
         allocatable_joint_problem
     )
 
     assert isinstance(result, JointSolution)
-    assert result.generated_sram_items
-    assert result.sram_allocations
+    assert {window.residency_id for window in result.residency_windows} == {"input0@3", "output0@9"}
     assert {item.item_id for item in result.generated_sram_items} == {
         "input0@3.item",
         "output0@9.item",
@@ -389,13 +334,15 @@ def test_cli_solver_stderr_attachment_preserves_generated_sram_items_and_allocat
         "input0@3.item",
         "output0@9.item",
     }
-    assert result.diagnostics["_solver_transport"]["stderr"] == "solver emitted warning"
+    offsets = {allocation.item_id: allocation.offset for allocation in result.sram_allocations}
+    assert offsets["output0@9.item"] == offsets["region0.recipe0.compute.temp"]
+    assert offsets["output0@9.item"] != offsets["input0@3.item"]
 
 
 def test_cli_solver_parses_infeasible_failure_payload(
     minimal_joint_problem: JointProblem,
 ):
-    result = CliJointScheduleSolver(_solver_command("infeasible")).solve(
+    result = CliJointScheduleSolver(_fake_solver_command("infeasible")).solve(
         minimal_joint_problem
     )
 
@@ -407,7 +354,7 @@ def test_cli_solver_parses_infeasible_failure_payload(
 def test_cli_solver_parses_timeout_failure_payload(
     minimal_joint_problem: JointProblem,
 ):
-    result = CliJointScheduleSolver(_solver_command("timeout")).solve(
+    result = CliJointScheduleSolver(_fake_solver_command("timeout")).solve(
         minimal_joint_problem
     )
 
@@ -419,7 +366,7 @@ def test_cli_solver_parses_timeout_failure_payload(
 def test_cli_solver_parses_error_failure_payload(
     minimal_joint_problem: JointProblem,
 ):
-    result = CliJointScheduleSolver(_solver_command("error")).solve(
+    result = CliJointScheduleSolver(_fake_solver_command("error")).solve(
         minimal_joint_problem
     )
 
@@ -431,7 +378,7 @@ def test_cli_solver_parses_error_failure_payload(
 def test_cli_solver_raises_transport_error_on_non_zero_exit(
     minimal_joint_problem: JointProblem,
 ):
-    solver = CliJointScheduleSolver(_solver_command("crash"))
+    solver = CliJointScheduleSolver(_fake_solver_command("crash"))
 
     with pytest.raises(JointSolverTransportError, match="exited with code 7"):
         solver.solve(minimal_joint_problem)
@@ -440,7 +387,7 @@ def test_cli_solver_raises_transport_error_on_non_zero_exit(
 def test_cli_solver_prioritizes_transport_error_over_failure_payload_on_non_zero_exit(
     minimal_joint_problem: JointProblem,
 ):
-    solver = CliJointScheduleSolver(_solver_command("crash_with_payload"))
+    solver = CliJointScheduleSolver(_fake_solver_command("crash_with_payload"))
 
     with pytest.raises(JointSolverTransportError, match="exited with code 7"):
         solver.solve(minimal_joint_problem)
@@ -449,7 +396,7 @@ def test_cli_solver_prioritizes_transport_error_over_failure_payload_on_non_zero
 def test_cli_solver_raises_transport_error_on_malformed_failure_payload(
     minimal_joint_problem: JointProblem,
 ):
-    solver = CliJointScheduleSolver(_solver_command("malformed_failure"))
+    solver = CliJointScheduleSolver(_fake_solver_command("malformed_failure"))
 
     with pytest.raises(JointSolverTransportError, match="malformed failure payload"):
         solver.solve(minimal_joint_problem)
@@ -458,7 +405,23 @@ def test_cli_solver_raises_transport_error_on_malformed_failure_payload(
 def test_cli_solver_raises_transport_error_on_malformed_solution_payload(
     minimal_joint_problem: JointProblem,
 ):
-    solver = CliJointScheduleSolver(_solver_command("malformed_solution"))
+    solver = CliJointScheduleSolver(_fake_solver_command("malformed_solution"))
 
     with pytest.raises(JointSolverTransportError, match="malformed solution payload"):
         solver.solve(minimal_joint_problem)
+
+
+def test_fake_solver_solution_mode_rejects_non_solution_payload(monkeypatch):
+    class _Result:
+        returncode = 0
+        stdout = (
+            '{"schema_version":"'
+            + JOINT_TILING_SCHEDULE_FAILURE_SCHEMA_VERSION
+            + '","status":"error","error_category":"invalid_solution","diagnostics":{}}'
+        )
+        stderr = ""
+
+    monkeypatch.setattr(fake_solver_module.subprocess, "run", lambda *args, **kwargs: _Result())
+
+    with pytest.raises(RuntimeError, match="expected solution payload"):
+        fake_solver_module._build_solution(_allocatable_joint_problem().to_json())

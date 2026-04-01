@@ -1,0 +1,3 @@
+[submodule "joint_solver"]
+	path = joint_solver
+	url = git@github.com:iMMIQ/nnc-joint-solver.git

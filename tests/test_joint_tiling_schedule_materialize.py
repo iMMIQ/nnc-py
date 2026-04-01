@@ -30,7 +30,6 @@ from nnc_py.ir.joint_tiling_schedule import (
 )
 from nnc_py.ir.pipeline_schedule import PipelineScheduleProblem, PipelineScheduleResult
 from nnc_py.joint_schedule.materialize import materialize_joint_solution
-from nnc_py.joint_schedule.solver import BaselineJointScheduleSolver
 from nnc_py.joint_schedule.validation import validate_joint_solution
 
 
@@ -685,17 +684,6 @@ def test_materialize_joint_solution_preserves_transfer_buffer_identity_when_pres
     assert intervals_by_item["r0.dma_in.pack"].end_time == 1
 
 
-def test_baseline_solver_returns_solution_shape():
-    problem = _valid_joint_problem()
-
-    result = BaselineJointScheduleSolver().solve(problem)
-
-    assert isinstance(result, JointSolution)
-    assert result.schema_version == JOINT_TILING_SCHEDULE_SOLUTION_SCHEMA_VERSION
-    assert result.selected_recipes
-    assert validate_joint_solution(problem, result) is None
-
-
 def test_materialize_joint_solution_supports_initial_sram_windows():
     problem, result = materialize_joint_solution(
         _initial_sram_problem(),
@@ -705,19 +693,6 @@ def test_materialize_joint_solution_supports_initial_sram_windows():
     assert isinstance(problem, PipelineScheduleProblem)
     assert isinstance(result, PipelineScheduleResult)
     assert result.feasible is True
-
-
-def test_baseline_solver_emits_initial_sram_window_when_required():
-    problem = _initial_sram_problem()
-
-    result = BaselineJointScheduleSolver().solve(problem)
-
-    assert isinstance(result, JointSolution)
-    assert any(
-        window.value_id == "resident0" and window.start_time == 0
-        for window in result.residency_windows
-    )
-    assert validate_joint_solution(problem, result) is None
 
 
 def test_materialize_joint_solution_uses_base_value_name_for_reload_move():

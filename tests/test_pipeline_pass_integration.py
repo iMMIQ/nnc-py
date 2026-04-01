@@ -15,7 +15,10 @@ from nnc_py.ir.graph import Graph
 from nnc_py.ir.node import Node, OpType
 from nnc_py.ir.tensor import TensorShape, TensorType
 from nnc_py.ir.types import DataType
+from nnc_py.joint_schedule.solver import CliJointScheduleSolver
 from nnc_py.passes.base import PassManager
+from nnc_py.passes import joint_tiling_schedule as joint_pass_module
+from tests.joint_solver_helpers import joint_solver_cli_command
 
 
 class _CapturingBackend:
@@ -341,6 +344,44 @@ def test_compiler_enables_joint_tiling_schedule_contract_via_metadata(monkeypatc
     assert ctx.pipeline_schedule_result.solver_name == "joint_materialized"
     assert "scheduled_memory_plan" in ctx.metadata
     assert ctx.metadata["memory_allocation_plan"].strategy_name == "joint_solver_import"
+
+
+def test_joint_solver_defaults_to_submodule_cli_command():
+    solver = joint_pass_module._build_solver(SimpleNamespace(metadata={}))
+
+    assert isinstance(solver, CliJointScheduleSolver)
+    assert list(solver.command) == joint_solver_cli_command()
+
+
+def test_joint_solver_missing_submodule_cli_surfaces_bootstrap_message(
+    monkeypatch,
+    tmp_path,
+):
+    compiler = Compiler(target="x86", opt_level=3)
+    compiler.frontend = SimpleNamespace(load=lambda _: _make_gemm_graph())
+    compiler.backend = _CapturingBackend()
+    monkeypatch.setattr(
+        compiler,
+        "_write_output",
+        lambda artifacts, output_dir, entry_point: None,
+    )
+    monkeypatch.setattr(
+        joint_pass_module,
+        "_default_joint_solver_command",
+        lambda: (_ for _ in ()).throw(
+            RuntimeError(
+                "Joint tiling schedule solver requires the checked-out 'joint_solver' "
+                "submodule CLI. Run 'git submodule update --init --recursive'."
+            )
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="git submodule update --init --recursive"):
+        compiler.compile(
+            "model.onnx",
+            str(tmp_path),
+            metadata={"enable_joint_tiling_schedule_contract": True},
+        )
 
 
 def test_joint_tiling_schedule_infeasible_failure_surfaces_standardized_category(

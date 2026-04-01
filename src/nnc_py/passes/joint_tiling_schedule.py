@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from pathlib import Path
 import shlex
+import sys
 
 from nnc_py.ir.context import CompileContext
 from nnc_py.ir.joint_tiling_schedule import (
@@ -23,7 +25,6 @@ from nnc_py.ir.pipeline_schedule import (
 from nnc_py.joint_schedule.materialize import materialize_joint_solution
 from nnc_py.joint_schedule.recipes import build_joint_problem
 from nnc_py.joint_schedule.solver import (
-    BaselineJointScheduleSolver,
     CliJointScheduleSolver,
     JointScheduleSolver,
 )
@@ -118,9 +119,9 @@ class JointTilingScheduleMaterializationPass(PassBase):
 
 def _build_solver(ctx: CompileContext) -> JointScheduleSolver:
     command = _normalize_command(ctx.metadata.get("joint_tiling_schedule_solver_command"))
-    if command:
-        return CliJointScheduleSolver(command=command)
-    return BaselineJointScheduleSolver()
+    if command is None:
+        command = _default_joint_solver_command()
+    return CliJointScheduleSolver(command=command)
 
 
 def _normalize_command(command: object) -> list[str] | None:
@@ -133,6 +134,19 @@ def _normalize_command(command: object) -> list[str] | None:
         normalized = [str(part) for part in command]
         return normalized or None
     return None
+
+
+def _default_joint_solver_command() -> list[str]:
+    repo_root = Path(__file__).resolve().parents[3]
+    solver = repo_root / "joint_solver" / "bin" / "nnc-joint-solver"
+    if not solver.is_file():
+        raise RuntimeError(
+            "Joint tiling schedule solver requires the checked-out "
+            "'joint_solver' submodule CLI at "
+            f"{solver}. Run 'git submodule update --init --recursive'. "
+            "Installed-package execution without the source checkout is not supported."
+        )
+    return [sys.executable, str(solver)]
 
 __all__ = [
     "JointTilingScheduleMaterializationPass",
