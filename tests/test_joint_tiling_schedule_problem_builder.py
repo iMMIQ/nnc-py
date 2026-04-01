@@ -14,6 +14,7 @@ from nnc_py.ir.joint_tiling_schedule import (
     JointActionKind,
     JointRegionKind,
     JointResourceKind,
+    JointSramItemKind,
     JointValueTier,
 )
 from nnc_py.ir.node import Node, OpType
@@ -213,6 +214,80 @@ def _make_two_region_context() -> CompileContext:
                 "scratch": 1536,
             },
         },
+    }
+    return ctx
+
+
+def _make_pack_region_context() -> CompileContext:
+    graph = Graph("pack_region_problem")
+    graph.inputs = ["lhs"]
+    graph.outputs = ["out"]
+
+    for name, dims in (
+        ("lhs", [1, 32]),
+        ("rhs", [32, 32]),
+        ("out", [1, 32]),
+    ):
+        graph.add_tensor(
+            TensorType(
+                name=name,
+                dtype=DataType.FLOAT32,
+                shape=TensorShape(dims),
+            )
+        )
+    graph.constants["rhs"] = [1.0]
+    graph.add_node(
+        Node(
+            op_type=OpType.GEMM,
+            name="gemm0",
+            inputs=["lhs", "rhs"],
+            outputs=["out"],
+        )
+    )
+
+    ctx = CompileContext(graph=graph, target="x86", optimization_level=3)
+    ctx.metadata["pipeline_sram_capacity_bytes"] = 4096
+    set_node_execution_plan(
+        ctx,
+        NodeExecutionPlan(
+            node_name="gemm0",
+            op_family="gemm",
+            tile_axes=("m", "n"),
+            layout_class=LayoutClass.BLOCKED_ACTIVATION,
+            memory_regions=(MemoryRegionKind.TILE, MemoryRegionKind.PACK),
+            input_accesses=(
+                TensorAccessPlan(
+                    tensor_name="lhs",
+                    layout_class=LayoutClass.BLOCKED_ACTIVATION,
+                    tile_region=TileRegion(logical_extents=(1, 32)),
+                    memory_region=MemoryRegionKind.TILE,
+                ),
+                TensorAccessPlan(
+                    tensor_name="rhs",
+                    layout_class=LayoutClass.BLOCKED_WEIGHT,
+                    memory_region=MemoryRegionKind.PERSISTENT,
+                ),
+            ),
+            output_accesses=(
+                TensorAccessPlan(
+                    tensor_name="out",
+                    layout_class=LayoutClass.BLOCKED_ACTIVATION,
+                    tile_region=TileRegion(logical_extents=(1, 32)),
+                    memory_region=MemoryRegionKind.TILE,
+                ),
+            ),
+        ),
+    )
+    ctx.metadata["node_execution_plan_region_sizes"] = {
+        "gemm0": {
+            "tensor_bytes": {
+                "lhs": 128,
+                "out": 128,
+            },
+            "region_bytes": {
+                "pack": 80,
+            },
+        }
     }
     return ctx
 
@@ -570,6 +645,38 @@ def test_build_joint_problem_emits_boundaries_actions_and_logical_values():
         edge.src_action_id == "conv0.recipe0.compute"
         and edge.dst_action_id == "conv1.recipe0.compute"
         for edge in problem.dependency_edges
+    )
+
+
+def test_build_joint_problem_emits_fixed_sram_items_for_compute_actions():
+    ctx = _make_two_region_context()
+
+    problem = build_joint_problem(ctx)
+
+    sram_items = {item.item_id: item for item in problem.sram_items}
+
+    assert problem.default_alignment_bytes == 16
+    assert problem.sram_items
+    assert all(
+        item.kind is not JointSramItemKind.RESIDENT_WINDOW for item in problem.sram_items
+    )
+    assert sram_items["conv0.recipe0.compute.temp"].kind is JointSramItemKind.TEMP_INTERVAL
+    assert sram_items["conv0.recipe0.compute.temp"].size_bytes == 1024
+    assert sram_items["conv0.recipe0.compute.temp"].alignment_bytes == 16
+    assert sram_items["conv0.recipe0.compute.temp"].owner_action_id == "conv0.recipe0.compute"
+    assert sram_items["conv1.recipe0.compute.temp"].kind is JointSramItemKind.TEMP_INTERVAL
+    assert sram_items["conv1.recipe0.compute.temp"].size_bytes == 1536
+    assert sram_items["conv1.recipe0.compute.temp"].alignment_bytes == 16
+    assert sram_items["conv1.recipe0.compute.temp"].owner_action_id == "conv1.recipe0.compute"
+
+
+def test_build_joint_problem_does_not_invent_transfer_buffer_items_from_region_hints():
+    ctx = _make_pack_region_context()
+
+    problem = build_joint_problem(ctx)
+
+    assert all(
+        item.kind is not JointSramItemKind.TRANSFER_BUFFER for item in problem.sram_items
     )
 
 

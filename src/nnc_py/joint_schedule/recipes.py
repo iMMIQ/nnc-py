@@ -25,6 +25,8 @@ from nnc_py.ir.joint_tiling_schedule import (
     JointResource,
     JointResourceKind,
     JointTileSpec,
+    JointSramItem,
+    JointSramItemKind,
     JointValue,
     JointValueConsumer,
     JointValueFootprint,
@@ -45,6 +47,8 @@ from nnc_py.passes.pipeline_step_lowering import (
 )
 
 from .regions import JointProblemBuilderError, build_joint_regions
+
+_DEFAULT_ALIGNMENT_BYTES = 16
 
 
 @dataclass(frozen=True)
@@ -103,6 +107,7 @@ def build_joint_problem(ctx: CompileContext) -> JointProblem:
         values=values,
         optional_actions=optional_actions,
     )
+    sram_items = _build_problem_sram_items(ctx, assemblies)
     problem = JointProblem(
         schema_version=JOINT_TILING_SCHEDULE_PROBLEM_SCHEMA_VERSION,
         regions=regions,
@@ -118,6 +123,8 @@ def build_joint_problem(ctx: CompileContext) -> JointProblem:
             JointResource(resource_kind=JointResourceKind.OTHER, slot_count=1),
         ),
         sram_capacity_bytes=_sram_capacity_bytes(ctx),
+        sram_items=sram_items,
+        default_alignment_bytes=_DEFAULT_ALIGNMENT_BYTES,
         objective=JOINT_TILING_SCHEDULE_OBJECTIVE,
     )
     _validate_problem(problem)
@@ -527,6 +534,29 @@ def _build_boundary_constraints(
                 )
             )
     return tuple(boundaries)
+
+
+def _build_problem_sram_items(
+    ctx: CompileContext,
+    assemblies: tuple[_RegionAssembly, ...],
+) -> tuple[JointSramItem, ...]:
+    items: list[JointSramItem] = []
+    for assembly in assemblies:
+        compute_action = assembly.compute_action
+        if compute_action.temp_bytes > 0:
+            items.append(
+                JointSramItem(
+                    item_id=f"{compute_action.action_id}.temp",
+                    kind=JointSramItemKind.TEMP_INTERVAL,
+                    size_bytes=compute_action.temp_bytes,
+                    alignment_bytes=_DEFAULT_ALIGNMENT_BYTES,
+                    is_optional=False,
+                    owner_action_id=compute_action.action_id,
+                    owner_value_id=None,
+                    owner_residency_id=None,
+                )
+            )
+    return tuple(items)
 
 
 def _build_dependency_edges(

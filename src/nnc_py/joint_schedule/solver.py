@@ -17,6 +17,9 @@ from nnc_py.ir.joint_tiling_schedule import (
     JointFailure,
     JointProblem,
     JointResidencyWindow,
+    JointSramAllocation,
+    JointSramItem,
+    JointSramItemKind,
     JointScheduledAction,
     JointSelectedRecipe,
     JointSolution,
@@ -109,6 +112,8 @@ class CliJointScheduleSolver(JointScheduleSolver):
                     scheduled_actions=solution.scheduled_actions,
                     residency_windows=solution.residency_windows,
                     objective_value=solution.objective_value,
+                    generated_sram_items=solution.generated_sram_items,
+                    sram_allocations=solution.sram_allocations,
                     diagnostics=diagnostics,
                 )
             return solution
@@ -200,6 +205,10 @@ class BaselineJointScheduleSolver(JointScheduleSolver):
         residency_windows = tuple(
             _minimal_residency_windows(problem, active_actions, end_by_action, objective_value)
         )
+        generated_sram_items = _generated_residency_items(problem, residency_windows)
+        sram_allocations = _pack_sram_allocations(
+            (*problem.sram_items, *generated_sram_items)
+        )
         solution = JointSolution(
             schema_version=JOINT_TILING_SCHEDULE_SOLUTION_SCHEMA_VERSION,
             selected_recipes=selected_recipes,
@@ -209,6 +218,8 @@ class BaselineJointScheduleSolver(JointScheduleSolver):
             ),
             residency_windows=residency_windows,
             objective_value=objective_value,
+            generated_sram_items=generated_sram_items,
+            sram_allocations=sram_allocations,
             diagnostics={"solver": "baseline"},
         )
         solution_failure = validate_joint_solution(problem, solution)
@@ -292,6 +303,44 @@ def _topological_action_order(
     return tuple(order)
 
 
+def _generated_residency_items(
+    problem: JointProblem,
+    residency_windows: tuple[JointResidencyWindow, ...],
+) -> tuple[JointSramItem, ...]:
+    size_by_value = {value.value_id: value.size_bytes for value in problem.values}
+    return tuple(
+        JointSramItem(
+            item_id=f"{window.residency_id}.item",
+            kind=JointSramItemKind.RESIDENT_WINDOW,
+            size_bytes=size_by_value[window.value_id],
+            alignment_bytes=problem.default_alignment_bytes,
+            is_optional=False,
+            owner_action_id=None,
+            owner_value_id=window.value_id,
+            owner_residency_id=window.residency_id,
+        )
+        for window in residency_windows
+    )
+
+
+def _pack_sram_allocations(
+    items: tuple[JointSramItem, ...],
+) -> tuple[JointSramAllocation, ...]:
+    allocations: list[JointSramAllocation] = []
+    next_offset = 0
+    for item in items:
+        aligned_offset = _align(next_offset, item.alignment_bytes)
+        allocations.append(
+            JointSramAllocation(item_id=item.item_id, offset=aligned_offset)
+        )
+        next_offset = aligned_offset + item.size_bytes
+    return tuple(allocations)
+
+
+def _align(value: int, alignment: int) -> int:
+    return ((value + alignment - 1) // alignment) * alignment
+
+
 def _minimal_residency_windows(
     problem: JointProblem,
     active_actions: dict[str, object],
@@ -332,6 +381,7 @@ def _minimal_residency_windows(
         if close_end > open_end:
             windows.append(
                 JointResidencyWindow(
+                    residency_id=f"{value.value_id}@{open_end}",
                     value_id=value.value_id,
                     start_time=open_end,
                     end_time=close_end,
