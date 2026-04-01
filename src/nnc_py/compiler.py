@@ -457,7 +457,7 @@ class Compiler:
         return "legacy_o3_default"
 
     def _validate_scheduled_o3_result(self, ctx: CompileContext) -> None:
-        """Require O3 scheduled compilation to produce a planned schedule."""
+        """Require O3 scheduled compilation to produce planned or imported schedule metadata."""
         if self.opt_level < 3:
             return
         if not bool(ctx.metadata.get("pipeline_scheduler_enabled")):

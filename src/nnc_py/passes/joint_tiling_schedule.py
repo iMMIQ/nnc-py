@@ -110,6 +110,10 @@ class JointTilingScheduleMaterializationPass(PassBase):
         pipeline_problem, pipeline_result = materialize_joint_solution(problem, solution)
         set_pipeline_schedule_problem(ctx, pipeline_problem)
         set_pipeline_schedule_result(ctx, pipeline_result)
+        ctx.metadata.pop("scheduled_memory_plan", None)
+        ctx.metadata.pop("memory_allocation_plan", None)
+        ctx.metadata.pop("memory_plan", None)
+        ctx.metadata.pop("spill_plan", None)
 
 
 def _build_solver(ctx: CompileContext) -> JointScheduleSolver:

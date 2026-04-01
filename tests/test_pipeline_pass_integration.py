@@ -185,10 +185,11 @@ def test_o3_joint_tiling_schedule_pass_order_runs_materialization_before_livenes
     assert names.index("JointTilingScheduleProblemPass") < names.index("JointTilingScheduleSolvePass")
     assert names.index("JointTilingScheduleSolvePass") < names.index("JointTilingScheduleMaterializationPass")
     assert names.index("JointTilingScheduleMaterializationPass") < names.index("LivenessAnalysisPass")
-    assert names.index("LivenessAnalysisPass") < names.index("ScheduledMemoryPlanningPass")
+    assert names.index("LivenessAnalysisPass") < names.index("JointScheduleMemoryImportPass")
     assert "PipelineStepLoweringPass" not in names
     assert "ScheduledMemoryExpansionPass" not in names
     assert "PipelineSchedulingPass" not in names
+    assert "ScheduledMemoryPlanningPass" not in names
 
 
 def test_o3_compile_defaults_to_scheduled_path(monkeypatch, tmp_path):
@@ -339,7 +340,7 @@ def test_compiler_enables_joint_tiling_schedule_contract_via_metadata(monkeypatc
     assert ctx.pipeline_schedule_result.feasible is True
     assert ctx.pipeline_schedule_result.solver_name == "joint_materialized"
     assert "scheduled_memory_plan" in ctx.metadata
-    assert ctx.metadata["memory_allocation_plan"].strategy_name == "schedule_time_v4"
+    assert ctx.metadata["memory_allocation_plan"].strategy_name == "joint_solver_import"
 
 
 def test_joint_tiling_schedule_infeasible_failure_surfaces_standardized_category(

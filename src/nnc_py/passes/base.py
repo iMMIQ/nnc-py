@@ -167,6 +167,9 @@ class PassManager:
         from nnc_py.passes.dead_code_elimination import DeadCodeEliminationPass
         from nnc_py.passes.dominator_fusion import DominatorFusionPass
         from nnc_py.passes.identity_elimination import IdentityEliminationPass
+        from nnc_py.passes.joint_schedule_memory_import import (
+            JointScheduleMemoryImportPass,
+        )
         from nnc_py.passes.joint_tiling_schedule import (
             JointTilingScheduleMaterializationPass,
             JointTilingScheduleProblemPass,
@@ -177,7 +180,6 @@ class PassManager:
         from nnc_py.passes.pattern_fusion import PatternFusionPass
         from nnc_py.passes.prepack_lowering import PrepackLoweringPass
         from nnc_py.passes.schedule_analysis import ScheduleAnalysisPass
-        from nnc_py.passes.scheduled_memory_planning import ScheduledMemoryPlanningPass
         from nnc_py.passes.tiled_lowering import TiledLoweringPass
 
         return [
@@ -193,7 +195,7 @@ class PassManager:
             JointTilingScheduleSolvePass(),
             JointTilingScheduleMaterializationPass(),
             LivenessAnalysisPass(),
-            ScheduledMemoryPlanningPass(),
+            JointScheduleMemoryImportPass(),
         ]
 
     @classmethod

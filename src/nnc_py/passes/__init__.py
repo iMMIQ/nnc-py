@@ -54,6 +54,9 @@ from nnc_py.passes.fusion_groups import FusionGroup, GroupArena
 from nnc_py.passes.path_validator import PathValidator
 
 if TYPE_CHECKING:
+    from nnc_py.passes.joint_schedule_memory_import import (
+        JointScheduleMemoryImportPass as JointScheduleMemoryImportPass,
+    )
     from nnc_py.passes.joint_tiling_schedule import (
         JointTilingScheduleMaterializationPass as JointTilingScheduleMaterializationPass,
     )
@@ -113,6 +116,7 @@ __all__ = [
     "ScheduleAnalysisPass",
     "ScheduleCandidate",
     "ScheduledMemoryExpansionPass",
+    "JointScheduleMemoryImportPass",
     "JointTilingScheduleMaterializationPass",
     "JointTilingScheduleProblemPass",
     "JointTilingScheduleSolvePass",
@@ -132,11 +136,13 @@ __all__ = [
 
 def __getattr__(name: str) -> Any:
     if name not in {
+        "JointScheduleMemoryImportPass",
         "JointTilingScheduleMaterializationPass",
         "JointTilingScheduleProblemPass",
         "JointTilingScheduleSolvePass",
     }:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from nnc_py.passes.joint_schedule_memory_import import JointScheduleMemoryImportPass
     from nnc_py.passes.joint_tiling_schedule import (
         JointTilingScheduleMaterializationPass,
         JointTilingScheduleProblemPass,
@@ -144,6 +150,7 @@ def __getattr__(name: str) -> Any:
     )
 
     exports = {
+        "JointScheduleMemoryImportPass": JointScheduleMemoryImportPass,
         "JointTilingScheduleMaterializationPass": JointTilingScheduleMaterializationPass,
         "JointTilingScheduleProblemPass": JointTilingScheduleProblemPass,
         "JointTilingScheduleSolvePass": JointTilingScheduleSolvePass,

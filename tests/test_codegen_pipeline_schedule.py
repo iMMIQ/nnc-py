@@ -29,6 +29,7 @@ from nnc_py.ir.pipeline_schedule import (
 from nnc_py.ir.tensor import TensorShape, TensorType
 from nnc_py.ir.types import DataType
 from nnc_py.passes.liveness import LivenessAnalysisPass
+from nnc_py.passes.joint_schedule_memory_import import JointScheduleMemoryImportPass
 from nnc_py.passes.memory_planning_v4 import MemoryPlanningPassV4
 from nnc_py.passes.memory_strategy import (
     MemoryAllocationPlan,
@@ -729,6 +730,37 @@ def test_schedule_annotation_uses_scheduler_binding_only_without_v4_plan():
     assert "sram_bindings=output[buffer=buf0]" in model_c
     assert "output@0" not in model_c
     assert "nnc_pipeline_run_parallel" in model_c
+
+
+def test_joint_imported_schedule_metadata_is_codegen_compatible():
+    ctx = _make_relu_context()
+    ctx.metadata["pipeline_scheduler_enabled"] = True
+    _attach_schedule_metadata(
+        ctx,
+        sram_intervals=(
+            SramAllocationInterval(
+                value_name="output",
+                item_id="output@2.item",
+                item_kind="resident_window",
+                buffer_id="output@2.item",
+                offset=64,
+                start_time=2,
+                end_time=5,
+                size_bytes=16,
+            ),
+        ),
+        run_memory_planning=False,
+    )
+
+    JointScheduleMemoryImportPass().run(ctx)
+
+    artifacts = X86Backend().generate(ctx)
+    model_c = _artifact_text(artifacts, "model.c")
+
+    assert ctx.metadata["memory_allocation_plan"].strategy_name == "joint_solver_import"
+    assert "memory_plan_strategy=scheduled_native" in model_c
+    assert "sram_bindings=output@64[region=output]" in model_c
+    assert "buffer=output@2.item" not in model_c
 
 
 def test_schedule_codegen_materializes_step_level_worker_functions():
