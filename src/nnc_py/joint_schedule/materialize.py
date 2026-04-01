@@ -6,7 +6,9 @@ from nnc_py.ir.joint_tiling_schedule import (
     JointAction,
     JointActionKind,
     JointProblem,
+    JointResidencyWindow,
     JointSolution,
+    JointSramItem,
     JointValue,
     JointValueTier,
 )
@@ -110,15 +112,12 @@ def materialize_joint_solution(
         )
         for action in active_actions
     )
-    sram_intervals = tuple(
-        SramAllocationInterval(
-            value_name=_resident_name_for_window(window.value_id, window.start_time, value_by_id),
-            buffer_id=f"joint_buf_{index}",
-            start_time=window.start_time,
-            end_time=window.end_time,
-            size_bytes=value_by_id[window.value_id].size_bytes,
-        )
-        for index, window in enumerate(solution.residency_windows)
+    sram_intervals = _materialize_sram_intervals(
+        problem,
+        solution,
+        start_by_action=start_by_action,
+        end_by_action=end_by_action,
+        value_by_id=value_by_id,
     )
 
     internal_problem = PipelineScheduleProblem(
@@ -144,6 +143,90 @@ def materialize_joint_solution(
         diagnostics={"active_actions": tuple(active_action_ids)},
     )
     return internal_problem, internal_result
+
+
+def _materialize_sram_intervals(
+    problem: JointProblem,
+    solution: JointSolution,
+    *,
+    start_by_action: dict[str, int],
+    end_by_action: dict[str, int],
+    value_by_id: dict[str, JointValue],
+) -> tuple[SramAllocationInterval, ...]:
+    windows_by_residency = {
+        window.residency_id: window for window in solution.residency_windows
+    }
+    allocations_by_item = {
+        allocation.item_id: allocation for allocation in solution.sram_allocations
+    }
+    intervals: list[SramAllocationInterval] = []
+
+    for item in (*problem.sram_items, *solution.generated_sram_items):
+        lifetime = _sram_item_lifetime(
+            item,
+            start_by_action=start_by_action,
+            end_by_action=end_by_action,
+            windows_by_residency=windows_by_residency,
+        )
+        if lifetime is None:
+            continue
+        allocation = allocations_by_item.get(item.item_id)
+        if allocation is None:
+            raise ValueError(f"active SRAM item {item.item_id!r} is missing an allocation")
+        value_name = _sram_interval_value_name(
+            item,
+            windows_by_residency=windows_by_residency,
+            value_by_id=value_by_id,
+        )
+        intervals.append(
+            SramAllocationInterval(
+                value_name=value_name,
+                item_id=item.item_id,
+                item_kind=item.kind.value,
+                buffer_id=item.item_id,
+                offset=allocation.offset,
+                start_time=lifetime[0],
+                end_time=lifetime[1],
+                size_bytes=item.size_bytes,
+            )
+        )
+
+    return tuple(intervals)
+
+
+def _sram_item_lifetime(
+    item: JointSramItem,
+    *,
+    start_by_action: dict[str, int],
+    end_by_action: dict[str, int],
+    windows_by_residency: dict[str, JointResidencyWindow],
+) -> tuple[int, int] | None:
+    if item.owner_residency_id is not None:
+        window = windows_by_residency.get(item.owner_residency_id)
+        if window is None:
+            return None
+        return window.start_time, window.end_time
+    if item.owner_action_id is not None:
+        start_time = start_by_action.get(item.owner_action_id)
+        end_time = end_by_action.get(item.owner_action_id)
+        if start_time is None or end_time is None:
+            return None
+        return start_time, end_time
+    return None
+
+
+def _sram_interval_value_name(
+    item: JointSramItem,
+    *,
+    windows_by_residency: dict[str, JointResidencyWindow],
+    value_by_id: dict[str, JointValue],
+) -> str:
+    if item.owner_residency_id is None:
+        return item.item_id
+    window = windows_by_residency.get(item.owner_residency_id)
+    if window is None:
+        raise ValueError(f"resident SRAM item {item.item_id!r} is missing its residency window")
+    return _resident_name_for_window(window.value_id, window.start_time, value_by_id)
 
 
 def _materialize_step(

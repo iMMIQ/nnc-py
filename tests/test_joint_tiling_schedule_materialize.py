@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 from nnc_py.ir.joint_tiling_schedule import (
     JOINT_TILING_SCHEDULE_PROBLEM_SCHEMA_VERSION,
     JOINT_TILING_SCHEDULE_SOLUTION_SCHEMA_VERSION,
@@ -17,6 +19,9 @@ from nnc_py.ir.joint_tiling_schedule import (
     JointScheduledAction,
     JointSelectedRecipe,
     JointSolution,
+    JointSramAllocation,
+    JointSramItem,
+    JointSramItemKind,
     JointTileSpec,
     JointValue,
     JointValueConsumer,
@@ -27,6 +32,35 @@ from nnc_py.ir.pipeline_schedule import PipelineScheduleProblem, PipelineSchedul
 from nnc_py.joint_schedule.materialize import materialize_joint_solution
 from nnc_py.joint_schedule.solver import BaselineJointScheduleSolver
 from nnc_py.joint_schedule.validation import validate_joint_solution
+
+
+def _window(value_id: str, start_time: int, end_time: int) -> JointResidencyWindow:
+    return JointResidencyWindow(
+        residency_id=f"{value_id}@{start_time}",
+        value_id=value_id,
+        start_time=start_time,
+        end_time=end_time,
+    )
+
+
+def _generated_resident_items(
+    problem: JointProblem,
+    windows: tuple[JointResidencyWindow, ...],
+) -> tuple[JointSramItem, ...]:
+    size_by_value = {value.value_id: value.size_bytes for value in problem.values}
+    return tuple(
+        JointSramItem(
+            item_id=f"{window.residency_id}.item",
+            kind=JointSramItemKind.RESIDENT_WINDOW,
+            size_bytes=size_by_value[window.value_id],
+            alignment_bytes=problem.default_alignment_bytes,
+            is_optional=False,
+            owner_action_id=None,
+            owner_value_id=window.value_id,
+            owner_residency_id=window.residency_id,
+        )
+        for window in windows
+    )
 
 
 def _valid_joint_problem() -> JointProblem:
@@ -138,11 +172,29 @@ def _valid_joint_problem() -> JointProblem:
             JointResource(resource_kind="OTHER", slot_count=1),
         ),
         sram_capacity_bytes=128,
+        sram_items=(
+            JointSramItem(
+                item_id="r0.compute.temp",
+                kind=JointSramItemKind.TEMP_INTERVAL,
+                size_bytes=8,
+                alignment_bytes=16,
+                is_optional=False,
+                owner_action_id="r0.compute",
+                owner_value_id=None,
+                owner_residency_id=None,
+            ),
+        ),
+        default_alignment_bytes=16,
         objective="min_makespan",
     )
 
 
 def _valid_joint_solution() -> JointSolution:
+    problem = _valid_joint_problem()
+    residency_windows = (
+        _window("input0", 1, 4),
+        _window("out", 4, 5),
+    )
     return JointSolution(
         schema_version=JOINT_TILING_SCHEDULE_SOLUTION_SCHEMA_VERSION,
         selected_recipes=(JointSelectedRecipe(region_id="r0", recipe_id="r0.recipe0"),),
@@ -151,9 +203,12 @@ def _valid_joint_solution() -> JointSolution:
             JointScheduledAction(action_id="r0.compute", start_time=1),
             JointScheduledAction(action_id="r0.dma_out", start_time=4),
         ),
-        residency_windows=(
-            JointResidencyWindow(value_id="input0", start_time=1, end_time=4),
-            JointResidencyWindow(value_id="out", start_time=4, end_time=5),
+        residency_windows=residency_windows,
+        generated_sram_items=_generated_resident_items(problem, residency_windows),
+        sram_allocations=(
+            JointSramAllocation(item_id="r0.compute.temp", offset=0),
+            JointSramAllocation(item_id="input0@1.item", offset=16),
+            JointSramAllocation(item_id="out@4.item", offset=48),
         ),
         objective_value=5,
         diagnostics={},
@@ -251,11 +306,29 @@ def _initial_sram_problem() -> JointProblem:
             JointResource(resource_kind="OTHER", slot_count=1),
         ),
         sram_capacity_bytes=128,
+        sram_items=(
+            JointSramItem(
+                item_id="r0.compute.temp",
+                kind=JointSramItemKind.TEMP_INTERVAL,
+                size_bytes=4,
+                alignment_bytes=16,
+                is_optional=False,
+                owner_action_id="r0.compute",
+                owner_value_id=None,
+                owner_residency_id=None,
+            ),
+        ),
+        default_alignment_bytes=16,
         objective="min_makespan",
     )
 
 
 def _initial_sram_solution() -> JointSolution:
+    problem = _initial_sram_problem()
+    residency_windows = (
+        _window("resident0", 0, 3),
+        _window("out", 2, 3),
+    )
     return JointSolution(
         schema_version=JOINT_TILING_SCHEDULE_SOLUTION_SCHEMA_VERSION,
         selected_recipes=(JointSelectedRecipe(region_id="r0", recipe_id="r0.recipe0"),),
@@ -263,9 +336,12 @@ def _initial_sram_solution() -> JointSolution:
             JointScheduledAction(action_id="r0.compute", start_time=0),
             JointScheduledAction(action_id="r0.dma_out", start_time=2),
         ),
-        residency_windows=(
-            JointResidencyWindow(value_id="resident0", start_time=0, end_time=3),
-            JointResidencyWindow(value_id="out", start_time=2, end_time=3),
+        residency_windows=residency_windows,
+        generated_sram_items=_generated_resident_items(problem, residency_windows),
+        sram_allocations=(
+            JointSramAllocation(item_id="r0.compute.temp", offset=0),
+            JointSramAllocation(item_id="resident0@0.item", offset=16),
+            JointSramAllocation(item_id="out@2.item", offset=48),
         ),
         objective_value=3,
         diagnostics={},
@@ -420,11 +496,40 @@ def _spill_reload_problem() -> JointProblem:
             JointResource(resource_kind="OTHER", slot_count=1),
         ),
         sram_capacity_bytes=128,
+        sram_items=(
+            JointSramItem(
+                item_id="r0.compute.temp",
+                kind=JointSramItemKind.TEMP_INTERVAL,
+                size_bytes=4,
+                alignment_bytes=16,
+                is_optional=False,
+                owner_action_id="r0.compute",
+                owner_value_id=None,
+                owner_residency_id=None,
+            ),
+            JointSramItem(
+                item_id="r1.compute.temp",
+                kind=JointSramItemKind.TEMP_INTERVAL,
+                size_bytes=4,
+                alignment_bytes=16,
+                is_optional=False,
+                owner_action_id="r1.compute",
+                owner_value_id=None,
+                owner_residency_id=None,
+            ),
+        ),
+        default_alignment_bytes=16,
         objective="min_makespan",
     )
 
 
 def _spill_reload_solution() -> JointSolution:
+    problem = _spill_reload_problem()
+    residency_windows = (
+        _window("mid", 3, 4),
+        _window("mid", 6, 9),
+        _window("out", 9, 10),
+    )
     return JointSolution(
         schema_version=JOINT_TILING_SCHEDULE_SOLUTION_SCHEMA_VERSION,
         selected_recipes=(
@@ -438,14 +543,48 @@ def _spill_reload_solution() -> JointSolution:
             JointScheduledAction(action_id="r1.compute", start_time=6),
             JointScheduledAction(action_id="r1.dma_out", start_time=9),
         ),
-        residency_windows=(
-            JointResidencyWindow(value_id="mid", start_time=3, end_time=4),
-            JointResidencyWindow(value_id="mid", start_time=6, end_time=9),
-            JointResidencyWindow(value_id="out", start_time=9, end_time=10),
+        residency_windows=residency_windows,
+        generated_sram_items=_generated_resident_items(problem, residency_windows),
+        sram_allocations=(
+            JointSramAllocation(item_id="r0.compute.temp", offset=0),
+            JointSramAllocation(item_id="r1.compute.temp", offset=0),
+            JointSramAllocation(item_id="mid@3.item", offset=16),
+            JointSramAllocation(item_id="mid@6.item", offset=16),
+            JointSramAllocation(item_id="out@9.item", offset=48),
         ),
         objective_value=10,
         diagnostics={},
     )
+
+
+def _problem_with_transfer_buffer() -> JointProblem:
+    problem = _valid_joint_problem()
+    return replace(
+        problem,
+        sram_items=problem.sram_items
+        + (
+            JointSramItem(
+                item_id="r0.dma_in.pack",
+                kind=JointSramItemKind.TRANSFER_BUFFER,
+                size_bytes=32,
+                alignment_bytes=16,
+                is_optional=False,
+                owner_action_id="r0.dma_in",
+                owner_value_id=None,
+                owner_residency_id=None,
+            ),
+        ),
+    )
+
+
+def _solution_with_transfer_buffer() -> JointSolution:
+    solution = _valid_joint_solution()
+    return replace(
+        solution,
+        sram_allocations=solution.sram_allocations
+        + (JointSramAllocation(item_id="r0.dma_in.pack", offset=80),),
+    )
+
 
 def test_materialize_joint_solution_returns_internal_schedule_pair():
     problem, result = materialize_joint_solution(
@@ -479,6 +618,44 @@ def test_materialize_joint_solution_returns_internal_schedule_pair():
     assert steps["r0.compute"].sram_output_names == ("out.resident@4",)
     assert steps["r0.dma_out"].sram_input_names == ("out.resident@4",)
     assert steps["r0.dma_out"].sram_output_names == ()
+
+
+def test_materialize_joint_solution_preserves_imported_offsets_and_item_identity():
+    _, result = materialize_joint_solution(
+        _valid_joint_problem(),
+        _valid_joint_solution(),
+    )
+
+    intervals_by_item = {interval.item_id: interval for interval in result.sram_intervals}
+
+    assert set(intervals_by_item) == {
+        "r0.compute.temp",
+        "input0@1.item",
+        "out@4.item",
+    }
+    assert intervals_by_item["r0.compute.temp"].item_kind == "temp_interval"
+    assert intervals_by_item["r0.compute.temp"].offset == 0
+    assert intervals_by_item["r0.compute.temp"].start_time == 1
+    assert intervals_by_item["r0.compute.temp"].end_time == 4
+    assert intervals_by_item["input0@1.item"].item_kind == "resident_window"
+    assert intervals_by_item["input0@1.item"].offset == 16
+    assert intervals_by_item["out@4.item"].item_kind == "resident_window"
+    assert intervals_by_item["out@4.item"].offset == 48
+    assert all(not interval.buffer_id.startswith("joint_buf_") for interval in result.sram_intervals)
+
+
+def test_materialize_joint_solution_preserves_transfer_buffer_identity_when_present():
+    _, result = materialize_joint_solution(
+        _problem_with_transfer_buffer(),
+        _solution_with_transfer_buffer(),
+    )
+
+    intervals_by_item = {interval.item_id: interval for interval in result.sram_intervals}
+
+    assert intervals_by_item["r0.dma_in.pack"].item_kind == "transfer_buffer"
+    assert intervals_by_item["r0.dma_in.pack"].offset == 80
+    assert intervals_by_item["r0.dma_in.pack"].start_time == 0
+    assert intervals_by_item["r0.dma_in.pack"].end_time == 1
 
 
 def test_baseline_solver_returns_solution_shape():
