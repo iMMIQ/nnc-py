@@ -86,6 +86,54 @@ def make_maxpool_context() -> CompileContext:
     return CompileContext(graph=graph, target="x86", optimization_level=3)
 
 
+def make_safe_gemm_context() -> CompileContext:
+    graph = Graph("gemm_tiled")
+    graph.inputs = ["input"]
+    graph.outputs = ["output"]
+
+    graph.add_tensor(
+        TensorType(
+            dtype=DataType.FLOAT32,
+            shape=TensorShape([1, 512]),
+            name="input",
+        )
+    )
+    graph.add_tensor(
+        TensorType(
+            dtype=DataType.FLOAT32,
+            shape=TensorShape([512, 1000]),
+            name="weight",
+        )
+    )
+    graph.add_tensor(
+        TensorType(
+            dtype=DataType.FLOAT32,
+            shape=TensorShape([1000]),
+            name="bias",
+        )
+    )
+    graph.add_tensor(
+        TensorType(
+            dtype=DataType.FLOAT32,
+            shape=TensorShape([1, 1000]),
+            name="output",
+        )
+    )
+    graph.constants["weight"] = [1.0]
+    graph.constants["bias"] = [0.0]
+    graph.add_node(
+        Node(
+            op_type=OpType.GEMM,
+            name="fc",
+            inputs=["input", "weight", "bias"],
+            outputs=["output"],
+            attrs={"transB": 0},
+        )
+    )
+
+    return CompileContext(graph=graph, target="x86", optimization_level=3)
+
+
 def make_valid_conv_context() -> CompileContext:
     graph = Graph("conv_valid_tiled")
     graph.inputs = ["input"]
@@ -336,7 +384,7 @@ def seed_schedule_and_layout(ctx: CompileContext, node_name: str, op_family: str
                     kind=GenericBlockedLayoutKind.BLOCKED_WEIGHT,
                     blocked_axes=("K", "C"),
                 )
-                if op_family == "conv2d"
+                if op_family in {"conv2d", "gemm"}
                 else None
             ),
         )
@@ -444,11 +492,29 @@ def test_tiled_lowering_records_region_size_hints_for_conv_plan():
 
     region_sizes = ctx.metadata["node_execution_plan_region_sizes"]["conv0"]
 
-    assert set(region_sizes["tensor_bytes"]) == {"input", "output"}
+    assert set(region_sizes["tensor_bytes"]) == {"input", "weight", "output"}
     assert region_sizes["tensor_bytes"]["input"] > 0
+    assert region_sizes["tensor_bytes"]["weight"] > 0
     assert region_sizes["tensor_bytes"]["output"] > 0
+    assert region_sizes["tensor_bytes"]["weight"] < ctx.graph.tensors["weight"].byte_size()
     assert "persistent" not in region_sizes["region_bytes"]
     assert region_sizes["region_bytes"]["scratch"] >= 0
+
+
+def test_tiled_lowering_records_tile_sized_weight_hints_for_safe_gemm():
+    ctx = make_safe_gemm_context()
+    seed_schedule_and_layout(ctx, node_name="fc", op_family="gemm")
+
+    TiledLoweringPass().run(ctx)
+
+    plan = ctx.metadata["node_execution_plans"]["fc"]
+    region_sizes = ctx.metadata["node_execution_plan_region_sizes"]["fc"]
+
+    assert plan.tile_axes == ("m", "n")
+    assert region_sizes["tensor_bytes"]["weight"] > 0
+    assert region_sizes["tensor_bytes"]["weight"] < ctx.graph.tensors["weight"].byte_size()
+    assert region_sizes["tensor_bytes"]["output"] > 0
+    assert region_sizes["tensor_bytes"]["output"] < ctx.graph.tensors["output"].byte_size()
 
 
 def test_tiled_lowering_uses_minimal_tile_when_conv_scratch_exceeds_budget():

@@ -782,9 +782,7 @@ def _required_final_tier(
     producing_region_id: str | None,
 ) -> JointValueTier:
     if producing_region_id is not None:
-        if value_id in ctx.graph.outputs:
-            return JointValueTier.SLOW
-        return JointValueTier.SRAM
+        return JointValueTier.SLOW
     if value_id in ctx.graph.inputs:
         return JointValueTier.INPUT
     return JointValueTier.CONST

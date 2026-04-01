@@ -733,6 +733,45 @@ def test_validator_rejects_missing_final_output():
     assert failure.error_category is JointFailureCategory.INCOMPLETE_SOLUTION
 
 
+def test_validator_allows_intermediate_slow_values_to_expire_after_last_use():
+    problem = replace(
+        _valid_problem(),
+        values=tuple(
+            replace(value, required_final_tier="slow")
+            if value.value_id == "mid"
+            else value
+            for value in _valid_problem().values
+        ),
+    )
+    solution = replace(
+        _valid_solution(),
+        residency_windows=(
+            _window("input0", 3, 9),
+            _window("mid", 9, 14),
+            _window("out", 14, 17),
+        ),
+        generated_sram_items=_generated_resident_items(
+            problem,
+            (
+                _window("input0", 3, 9),
+                _window("mid", 9, 14),
+                _window("out", 14, 17),
+            ),
+        ),
+        sram_allocations=(
+            JointSramAllocation(item_id="r0.compute.temp", offset=0),
+            JointSramAllocation(item_id="r1.compute.temp", offset=0),
+            JointSramAllocation(item_id="input0@3.item", offset=16),
+            JointSramAllocation(item_id="mid@9.item", offset=16),
+            JointSramAllocation(item_id="out@14.item", offset=112),
+        ),
+    )
+
+    failure = validate_joint_solution(problem, solution)
+
+    assert failure is None
+
+
 def test_validator_rejects_invalid_solution_shape():
     bad_solution = replace(
         _valid_solution(),

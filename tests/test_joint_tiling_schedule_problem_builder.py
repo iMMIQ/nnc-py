@@ -623,7 +623,7 @@ def test_build_joint_problem_emits_boundaries_actions_and_logical_values():
     assert values["input"].initial_tier is JointValueTier.INPUT
     assert values["weight0"].initial_tier is JointValueTier.CONST
     assert values["mid"].initial_tier is JointValueTier.UNMATERIALIZED
-    assert values["mid"].required_final_tier is JointValueTier.SRAM
+    assert values["mid"].required_final_tier is JointValueTier.SLOW
     assert values["mid"].spillable is True
     assert values["mid"].allows_multiple_sram_windows is True
     assert values["out"].required_final_tier is JointValueTier.SLOW

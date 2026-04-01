@@ -456,16 +456,11 @@ def _estimate_region_size_hints(
     node = ctx.graph.get_node(node_name)
 
     for access in (*plan.input_accesses, *plan.output_accesses):
-        if access.memory_region not in {
-            MemoryRegionKind.TILE,
-            MemoryRegionKind.PACK,
-            MemoryRegionKind.STAGE,
-        }:
-            continue
-        size_bytes = _estimate_tile_tensor_bytes(
+        size_bytes = _estimate_access_hint_bytes(
             ctx,
-            access.tensor_name,
-            access.tile_region.logical_extents,
+            node,
+            plan,
+            access,
         )
         if size_bytes is not None:
             tensor_bytes[access.tensor_name] = size_bytes
@@ -477,6 +472,80 @@ def _estimate_region_size_hints(
         "tensor_bytes": tensor_bytes,
         "region_bytes": region_bytes,
     }
+
+
+def _estimate_access_hint_bytes(
+    ctx: CompileContext,
+    node,
+    plan: NodeExecutionPlan,
+    access: TensorAccessPlan,
+) -> int | None:
+    if access.memory_region in {
+        MemoryRegionKind.TILE,
+        MemoryRegionKind.PACK,
+        MemoryRegionKind.STAGE,
+    }:
+        return _estimate_tile_tensor_bytes(
+            ctx,
+            access.tensor_name,
+            access.tile_region.logical_extents,
+        )
+    if access.memory_region is not MemoryRegionKind.PERSISTENT:
+        return None
+    if plan.op_family == "conv2d":
+        return _estimate_conv_persistent_access_bytes(ctx, node, access)
+    if plan.op_family == "gemm":
+        return _estimate_gemm_persistent_access_bytes(ctx, node, access)
+    return None
+
+
+def _estimate_conv_persistent_access_bytes(
+    ctx: CompileContext,
+    node,
+    access: TensorAccessPlan,
+) -> int | None:
+    if len(node.inputs) < 2 or access.tensor_name != node.inputs[1]:
+        return None
+    tensor = _get_tensor(ctx, access.tensor_name)
+    if tensor is None:
+        return None
+    return max(_estimate_scratch_bytes(ctx, node), _dtype_size(tensor.dtype))
+
+
+def _estimate_gemm_persistent_access_bytes(
+    ctx: CompileContext,
+    node,
+    access: TensorAccessPlan,
+) -> int | None:
+    lhs = _get_tensor(ctx, node.inputs[0]) if len(node.inputs) >= 1 else None
+    rhs = _get_tensor(ctx, node.inputs[1]) if len(node.inputs) >= 2 else None
+    output = _get_tensor(ctx, node.outputs[0]) if node.outputs else None
+    if lhs is None or rhs is None or output is None:
+        return None
+
+    lhs_dims = _static_matrix_dims(lhs)
+    rhs_dims = _static_matrix_dims(rhs)
+    output_dims = _static_matrix_dims(output)
+    if lhs_dims is None or rhs_dims is None or output_dims is None:
+        return None
+
+    rows, inner_dim = lhs_dims
+    trans_b = int(node.attrs.get("transB", 0))
+    output_cols = rhs_dims[0] if trans_b == 1 else rhs_dims[1]
+    tile_cols = min(output_cols, _DEFAULT_CHANNEL_BLOCK)
+
+    if access.tensor_name == node.inputs[0]:
+        return rows * inner_dim * _dtype_size(lhs.dtype)
+    if access.tensor_name == node.inputs[1]:
+        return inner_dim * tile_cols * _dtype_size(rhs.dtype)
+    if len(node.inputs) >= 3 and access.tensor_name == node.inputs[2]:
+        bias = _get_tensor(ctx, node.inputs[2])
+        if bias is None:
+            return None
+        return tile_cols * _dtype_size(bias.dtype)
+    if access.tensor_name in node.outputs:
+        return rows * tile_cols * _dtype_size(output.dtype)
+    return None
 
 
 def _choose_output_tile_extents(ctx: CompileContext, node) -> tuple[int, int]:
@@ -493,7 +562,16 @@ def _choose_output_tile_extents(ctx: CompileContext, node) -> tuple[int, int]:
         return ()
 
     scratch_bytes = _estimate_scratch_bytes(ctx, node)
-    available_budget = max(_dtype_size(output_tensor.dtype), FAST_MEMORY_BUDGET_BYTES - scratch_bytes)
+    memory_budget = _fast_memory_budget_bytes(ctx)
+    explicit_budget = any(
+        isinstance(ctx.metadata.get(key), int) and int(ctx.metadata.get(key)) > 0
+        for key in ("max_memory", "pipeline_sram_capacity_bytes")
+    )
+    reserve_bytes = _tiling_reserve_bytes(memory_budget) if explicit_budget else 0
+    available_budget = max(
+        _dtype_size(output_tensor.dtype),
+        memory_budget - scratch_bytes - reserve_bytes,
+    )
 
     max_tile_h = output_h
     max_tile_w = output_w
@@ -529,6 +607,18 @@ def _choose_output_tile_extents(ctx: CompileContext, node) -> tuple[int, int]:
             return (_MIN_TILE_EXTENTS[0], tile_w)
 
     return _MIN_TILE_EXTENTS
+
+
+def _fast_memory_budget_bytes(ctx: CompileContext) -> int:
+    for key in ("max_memory", "pipeline_sram_capacity_bytes"):
+        value = ctx.metadata.get(key)
+        if isinstance(value, int) and value > 0:
+            return value
+    return FAST_MEMORY_BUDGET_BYTES
+
+
+def _tiling_reserve_bytes(memory_budget: int) -> int:
+    return min(32 * 1024, max(memory_budget // 32, 0))
 
 
 def _estimate_node_working_set_bytes(

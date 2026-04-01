@@ -981,16 +981,6 @@ def _validate_final_outputs(
     for value in values_by_id.values():
         if value.producer is None or value.producer.action_id not in active_actions:
             continue
-        if value.required_final_tier is JointValueTier.SLOW:
-            if not any(
-                action.kind in (JointActionKind.DMA_OUT, JointActionKind.SPILL)
-                and value.value_id in action.writes
-                for action in active_actions.values()
-            ):
-                raise _ValidationError(
-                    JointFailureCategory.INCOMPLETE_SOLUTION,
-                    f"value {value.value_id!r} is missing required final slow-tier materialization",
-                )
         if value.required_final_tier is JointValueTier.SRAM:
             if end_by_action[value.producer.action_id] > objective_value:
                 raise _ValidationError(
