@@ -26,7 +26,13 @@ from nnc_py.ir.pipeline_schedule import (
 )
 from nnc_py.ir.tensor import TensorShape, TensorType
 from nnc_py.ir.types import DataType
+from nnc_py.joint_schedule.materialize import materialize_joint_solution
+from nnc_py.joint_schedule.validation import validate_joint_solution
 from nnc_py.passes.joint_schedule_memory_import import JointScheduleMemoryImportPass
+from tests.test_joint_tiling_schedule_materialize import (
+    _final_sram_spill_reload_problem,
+    _final_sram_spill_reload_solution,
+)
 
 
 def _make_import_context(
@@ -204,6 +210,45 @@ def _make_no_fast_item_import_context() -> CompileContext:
     return ctx
 
 
+def _make_materialized_joint_import_context() -> CompileContext:
+    graph = Graph("joint_schedule_import_multi_window")
+    graph.outputs = ["out"]
+    for name in ("mid", "out"):
+        graph.add_tensor(
+            TensorType(
+                name=name,
+                dtype=DataType.FLOAT32,
+                shape=TensorShape([1, 4]),
+            )
+        )
+    graph.add_node(
+        Node(
+            op_type=OpType.RELU,
+            name="r0",
+            inputs=(),
+            outputs=["mid"],
+        )
+    )
+    graph.add_node(
+        Node(
+            op_type=OpType.RELU,
+            name="r1",
+            inputs=["mid"],
+            outputs=["out"],
+        )
+    )
+
+    problem = _final_sram_spill_reload_problem()
+    solution = _final_sram_spill_reload_solution()
+    assert validate_joint_solution(problem, solution) is None
+    schedule_problem, schedule_result = materialize_joint_solution(problem, solution)
+
+    ctx = CompileContext(graph=graph, target="x86", optimization_level=3)
+    set_pipeline_schedule_problem(ctx, schedule_problem)
+    set_pipeline_schedule_result(ctx, schedule_result)
+    return ctx
+
+
 def test_joint_schedule_memory_import_builds_compatibility_metadata_from_imported_offsets():
     ctx = _make_import_context(
         sram_intervals=(
@@ -261,6 +306,23 @@ def test_joint_schedule_memory_import_requires_imported_sram_intervals_for_sram_
 
     with pytest.raises(RuntimeError, match="sram_intervals"):
         JointScheduleMemoryImportPass().run(ctx)
+
+
+def test_joint_schedule_memory_import_accepts_multi_window_final_sram_aliases_from_materialized_joint_solution():
+    ctx = _make_materialized_joint_import_context()
+
+    JointScheduleMemoryImportPass().run(ctx)
+
+    scheduled_plan = ctx.metadata["scheduled_memory_plan"]
+    compat_plan = ctx.metadata["memory_allocation_plan"]
+
+    assert set(scheduled_plan.fast_allocations) >= {"mid.resident@3", "mid.resident@6"}
+    assert scheduled_plan.fast_allocations["mid.resident@3"].offset == 16
+    assert scheduled_plan.fast_allocations["mid.resident@6"].offset == 16
+    assert scheduled_plan.fast_allocations["mid.resident@3"].closed_by_step_id == "mid.spill"
+    assert scheduled_plan.fast_allocations["mid.resident@6"].opened_by_step_id == "mid.reload"
+    assert compat_plan.tensor_allocations["mid.resident@3"].offset == 16
+    assert compat_plan.tensor_allocations["mid.resident@6"].offset == 16
 
 
 def test_joint_schedule_memory_import_requires_complete_imported_residency_metadata():

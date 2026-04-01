@@ -95,6 +95,7 @@ def materialize_joint_solution(
             active_actions=active_actions,
             end_by_action=end_by_action,
             objective_value=solution.objective_value,
+            windows_by_value=windows_by_value,
         )
         for window in solution.residency_windows
         if not (
@@ -118,6 +119,7 @@ def materialize_joint_solution(
         start_by_action=start_by_action,
         end_by_action=end_by_action,
         value_by_id=value_by_id,
+        windows_by_value=windows_by_value,
     )
 
     internal_problem = PipelineScheduleProblem(
@@ -152,6 +154,7 @@ def _materialize_sram_intervals(
     start_by_action: dict[str, int],
     end_by_action: dict[str, int],
     value_by_id: dict[str, JointValue],
+    windows_by_value: dict[str, tuple[object, ...]],
 ) -> tuple[SramAllocationInterval, ...]:
     windows_by_residency = {
         window.residency_id: window for window in solution.residency_windows
@@ -177,6 +180,7 @@ def _materialize_sram_intervals(
             item,
             windows_by_residency=windows_by_residency,
             value_by_id=value_by_id,
+            windows_by_value=windows_by_value,
         )
         intervals.append(
             SramAllocationInterval(
@@ -220,13 +224,19 @@ def _sram_interval_value_name(
     *,
     windows_by_residency: dict[str, JointResidencyWindow],
     value_by_id: dict[str, JointValue],
+    windows_by_value: dict[str, tuple[object, ...]],
 ) -> str:
     if item.owner_residency_id is None:
         return item.item_id
     window = windows_by_residency.get(item.owner_residency_id)
     if window is None:
         raise ValueError(f"resident SRAM item {item.item_id!r} is missing its residency window")
-    return _resident_name_for_window(window.value_id, window.start_time, value_by_id)
+    return _resident_name_for_window(
+        window.value_id,
+        window.start_time,
+        value_by_id,
+        windows_by_value,
+    )
 
 
 def _materialize_step(
@@ -337,7 +347,11 @@ def _materialize_values(
     for value in problem.values:
         home_tier = _base_home_tier(value)
         resident_windows = windows_by_value.get(value.value_id, ())
-        if home_tier is not ScheduledValueHomeTier.SRAM and resident_windows:
+        if resident_windows and _uses_distinct_window_aliases(
+            value.value_id,
+            value_by_id={item.value_id: item for item in problem.values},
+            windows_by_value=windows_by_value,
+        ):
             materialized.append(
                 ScheduledValue(
                     name=value.value_id,
@@ -350,11 +364,20 @@ def _materialize_values(
                         if action.kind is JointActionKind.DMA_IN
                         and value.value_id in action.reads
                     ),
-                    home_tier=home_tier,
+                    home_tier=(
+                        home_tier
+                        if home_tier is not ScheduledValueHomeTier.SRAM
+                        else ScheduledValueHomeTier.SLOW
+                    ),
                 )
             )
             for window in resident_windows:
-                alias_name = _resident_name_for_window(value.value_id, window.start_time, {value.value_id: value})
+                alias_name = _resident_name_for_window(
+                    value.value_id,
+                    window.start_time,
+                    {value.value_id: value},
+                    {value.value_id: resident_windows},
+                )
                 materialized.append(
                     ScheduledValue(
                         name=alias_name,
@@ -420,6 +443,7 @@ def _materialize_residency_window(
     active_actions: tuple[JointAction, ...],
     end_by_action: dict[str, int],
     objective_value: int,
+    windows_by_value: dict[str, tuple[object, ...]],
 ) -> ResidencyWindow:
     if window.start_time == 0 and value.initial_tier is JointValueTier.SRAM:
         raise ValueError("initial SRAM windows starting at 0 should use default internal residency")
@@ -427,9 +451,15 @@ def _materialize_residency_window(
     closed_by = None
     if window.end_time != objective_value:
         closed_by = _find_close_action_id(window.value_id, window.end_time, active_actions, end_by_action)
+    value_name = _resident_name_for_window(
+        window.value_id,
+        window.start_time,
+        {value.value_id: value},
+        {value.value_id: windows_by_value.get(value.value_id, ())},
+    )
     return ResidencyWindow(
-        value_name=_resident_name_for_window(window.value_id, window.start_time, {value.value_id: value}),
-        residency_id=f"{_resident_name_for_window(window.value_id, window.start_time, {value.value_id: value})}@{window.start_time}",
+        value_name=value_name,
+        residency_id=f"{value_name}@{window.start_time}",
         opened_by_step_id=opened_by,
         closed_by_step_id=closed_by,
     )
@@ -449,8 +479,13 @@ def _resident_name_for_window(
     value_id: str,
     start_time: int,
     value_by_id: dict[str, JointValue],
+    windows_by_value: dict[str, tuple[object, ...]],
 ) -> str:
-    if _base_home_tier(value_by_id[value_id]) is ScheduledValueHomeTier.SRAM:
+    if not _uses_distinct_window_aliases(
+        value_id,
+        value_by_id=value_by_id,
+        windows_by_value=windows_by_value,
+    ):
         return value_id
     return f"{value_id}.resident@{start_time}"
 
@@ -463,11 +498,20 @@ def _resident_name_for_read(
     windows_by_value: dict[str, tuple[object, ...]],
     value_by_id: dict[str, JointValue],
 ) -> str:
-    if _base_home_tier(value_by_id[value_id]) is ScheduledValueHomeTier.SRAM:
+    if not _uses_distinct_window_aliases(
+        value_id,
+        value_by_id=value_by_id,
+        windows_by_value=windows_by_value,
+    ):
         return value_id
     for window in windows_by_value.get(value_id, ()):
         if window.start_time <= action_start and action_end <= window.end_time:
-            return _resident_name_for_window(value_id, window.start_time, value_by_id)
+            return _resident_name_for_window(
+                value_id,
+                window.start_time,
+                value_by_id,
+                windows_by_value,
+            )
     return value_id
 
 
@@ -478,11 +522,20 @@ def _resident_name_for_write(
     windows_by_value: dict[str, tuple[object, ...]],
     value_by_id: dict[str, JointValue],
 ) -> str:
-    if _base_home_tier(value_by_id[value_id]) is ScheduledValueHomeTier.SRAM:
+    if not _uses_distinct_window_aliases(
+        value_id,
+        value_by_id=value_by_id,
+        windows_by_value=windows_by_value,
+    ):
         return value_id
     for window in windows_by_value.get(value_id, ()):
         if window.start_time == writer_end:
-            return _resident_name_for_window(value_id, window.start_time, value_by_id)
+            return _resident_name_for_window(
+                value_id,
+                window.start_time,
+                value_by_id,
+                windows_by_value,
+            )
     return value_id
 
 
@@ -497,7 +550,11 @@ def _read_window_start(
 ) -> int | None:
     if value_id not in action.reads:
         return None
-    if _base_home_tier(value_by_id[value_id]) is ScheduledValueHomeTier.SRAM:
+    if not _uses_distinct_window_aliases(
+        value_id,
+        value_by_id=value_by_id,
+        windows_by_value=windows_by_value,
+    ) and _base_home_tier(value_by_id[value_id]) is ScheduledValueHomeTier.SRAM:
         return 0
     for window in windows_by_value.get(value_id, ()):
         if (
@@ -515,7 +572,11 @@ def _resident_name_for_previous_window(
     windows_by_value: dict[str, tuple[object, ...]],
     value_by_id: dict[str, JointValue],
 ) -> str:
-    if _base_home_tier(value_by_id[value_id]) is ScheduledValueHomeTier.SRAM:
+    if not _uses_distinct_window_aliases(
+        value_id,
+        value_by_id=value_by_id,
+        windows_by_value=windows_by_value,
+    ):
         return value_id
     candidate = None
     for window in windows_by_value.get(value_id, ()):
@@ -523,7 +584,12 @@ def _resident_name_for_previous_window(
             candidate = window
     if candidate is None:
         return value_id
-    return _resident_name_for_window(value_id, candidate.start_time, value_by_id)
+    return _resident_name_for_window(
+        value_id,
+        candidate.start_time,
+        value_by_id,
+        windows_by_value,
+    )
 
 
 def _action_consumes_window(
@@ -543,7 +609,12 @@ def _action_consumes_window(
             action_start=start_by_action[action_id],
             windows_by_value=windows_by_value,
             value_by_id=value_by_id,
-        ) == _resident_name_for_window(value_id, window_start, value_by_id)
+        ) == _resident_name_for_window(
+            value_id,
+            window_start,
+            value_by_id,
+            windows_by_value,
+        )
     return _read_window_start(
         action,
         value_id,
@@ -603,6 +674,20 @@ def _find_close_action_id(
     if not matches:
         raise ValueError(f"cannot resolve residency close for {value_id!r} at {end_time}")
     return matches[0]
+
+
+def _uses_distinct_window_aliases(
+    value_id: str,
+    *,
+    value_by_id: dict[str, JointValue],
+    windows_by_value: dict[str, tuple[object, ...]],
+) -> bool:
+    windows = windows_by_value.get(value_id, ())
+    if not windows:
+        return False
+    if _base_home_tier(value_by_id[value_id]) is not ScheduledValueHomeTier.SRAM:
+        return True
+    return len(windows) > 1
 
 
 def _pipeline_resource_kind(resource: JointAction | object) -> PipelineResourceKind:

@@ -1011,6 +1011,29 @@ def test_validator_rejects_forged_resident_item_size_and_alignment():
     assert "resident_window" in str(failure.diagnostics["reason"])
 
 
+def test_validator_rejects_generated_item_id_overlap_with_problem_sram_items():
+    bad_solution = replace(
+        _valid_solution(),
+        generated_sram_items=tuple(
+            replace(item, item_id="r0.compute.temp")
+            if item.item_id == "mid@9.item"
+            else item
+            for item in _valid_solution().generated_sram_items
+        ),
+        sram_allocations=tuple(
+            allocation
+            for allocation in _valid_solution().sram_allocations
+            if allocation.item_id != "mid@9.item"
+        ),
+    )
+
+    failure = validate_joint_solution(_valid_problem(), bad_solution)
+
+    assert failure is not None
+    assert failure.error_category is JointFailureCategory.INVALID_SOLUTION
+    assert "duplicate SRAM item ids" in str(failure.diagnostics["reason"])
+
+
 def test_validator_rejects_temp_interval_owned_by_non_compute_action():
     bad_problem = replace(
         _valid_problem(),

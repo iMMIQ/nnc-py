@@ -683,6 +683,14 @@ def _validate_sram_placement(
             JointFailureCategory.INVALID_SOLUTION,
             "resident_window cardinality must match residency_windows exactly",
         )
+    fixed_item_ids = {item.item_id for item in problem.sram_items}
+    generated_item_ids = {item.item_id for item in generated_items}
+    overlapping_item_ids = sorted(fixed_item_ids & generated_item_ids)
+    if overlapping_item_ids:
+        raise _ValidationError(
+            JointFailureCategory.INVALID_SOLUTION,
+            f"generated SRAM item ids duplicate SRAM item ids from problem: {overlapping_item_ids}",
+        )
 
     allocations_by_item = {
         allocation.item_id: allocation for allocation in solution.sram_allocations

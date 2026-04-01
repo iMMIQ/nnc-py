@@ -557,6 +557,33 @@ def _spill_reload_solution() -> JointSolution:
     )
 
 
+def _final_sram_spill_reload_problem() -> JointProblem:
+    problem = _spill_reload_problem()
+    return replace(
+        problem,
+        values=tuple(
+            replace(value, required_final_tier="sram")
+            if value.value_id == "mid"
+            else value
+            for value in problem.values
+        ),
+    )
+
+
+def _final_sram_spill_reload_solution() -> JointSolution:
+    solution = _spill_reload_solution()
+    return replace(
+        solution,
+        residency_windows=tuple(
+            replace(window, end_time=10)
+            if window.residency_id == "mid@6"
+            else window
+            for window in solution.residency_windows
+        ),
+        objective_value=10,
+    )
+
+
 def _problem_with_transfer_buffer() -> JointProblem:
     problem = _valid_joint_problem()
     return replace(
@@ -704,3 +731,31 @@ def test_materialize_joint_solution_uses_base_value_name_for_reload_move():
     assert steps["mid.reload"].moved_value_name == "mid.resident@3"
     assert steps["mid.reload"].sram_output_names == ("mid.resident@6",)
     assert "mid.reload" not in scheduled_values["mid"].consumer_step_ids
+
+
+def test_materialize_joint_solution_distinguishes_final_sram_multi_window_aliases():
+    problem, result = materialize_joint_solution(
+        _final_sram_spill_reload_problem(),
+        _final_sram_spill_reload_solution(),
+    )
+
+    scheduled_values = {value.name: value for value in problem.scheduled_values}
+    mid_windows = tuple(
+        window.value_name
+        for window in result.residency_windows
+        if window.value_name.startswith("mid")
+    )
+    mid_intervals = tuple(
+        interval.value_name
+        for interval in result.sram_intervals
+        if interval.item_kind == "resident_window" and interval.value_name.startswith("mid")
+    )
+
+    assert "mid" in scheduled_values
+    assert "mid.resident@3" in scheduled_values
+    assert "mid.resident@6" in scheduled_values
+    assert scheduled_values["mid"].home_tier.value == "slow"
+    assert scheduled_values["mid.resident@3"].home_tier.value == "sram"
+    assert scheduled_values["mid.resident@6"].home_tier.value == "sram"
+    assert mid_windows == ("mid.resident@3", "mid.resident@6")
+    assert mid_intervals == ("mid.resident@3", "mid.resident@6")
