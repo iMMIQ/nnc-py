@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Mapping
+from dataclasses import dataclass
 
 from nnc_py.ir.joint_tiling_schedule import (
     JOINT_TILING_SCHEDULE_FAILURE_SCHEMA_VERSION,
@@ -16,8 +17,12 @@ from nnc_py.ir.joint_tiling_schedule import (
     JointFailureCategory,
     JointFailureStatus,
     JointProblem,
+    JointResidencyWindow,
     JointResourceKind,
     JointSolution,
+    JointSramAllocation,
+    JointSramItem,
+    JointSramItemKind,
     JointValue,
     JointValueTier,
 )
@@ -63,6 +68,14 @@ class _ValidationError(ValueError):
     def __init__(self, error_category: JointFailureCategory, message: str) -> None:
         super().__init__(message)
         self.error_category = error_category
+
+
+@dataclass(frozen=True)
+class _ActiveSramItem:
+    item: JointSramItem
+    allocation: JointSramAllocation
+    start_time: int
+    end_time: int
 
 
 def _validate_problem_shape(problem: JointProblem) -> None:
@@ -368,6 +381,13 @@ def _validate_solution(
         windows_by_value,
         solution.objective_value,
     )
+    _validate_sram_placement(
+        problem,
+        solution,
+        actions_by_id=actions_by_id,
+        start_by_action=start_by_action,
+        end_by_action=end_by_action,
+    )
     _validate_capacity(
         problem,
         active_actions,
@@ -406,9 +426,11 @@ def _validate_resource_overlap(
     for action_ids in actions_by_resource.values():
         for index, left_id in enumerate(action_ids):
             for right_id in action_ids[index + 1 :]:
-                if not (
-                    end_by_action[left_id] <= start_by_action[right_id]
-                    or end_by_action[right_id] <= start_by_action[left_id]
+                if _intervals_overlap(
+                    start_by_action[left_id],
+                    end_by_action[left_id],
+                    start_by_action[right_id],
+                    end_by_action[right_id],
                 ):
                     raise _ValidationError(
                         JointFailureCategory.RESOURCE_OVERLAP,
@@ -451,7 +473,12 @@ def _normalize_windows(
     for value_id, windows in windows_by_value.items():
         ordered = tuple(sorted(windows, key=lambda item: (item.start_time, item.end_time)))
         for prev, nxt in zip(ordered, ordered[1:]):
-            if nxt.start_time < prev.end_time:
+            if _intervals_overlap(
+                prev.start_time,
+                prev.end_time,
+                nxt.start_time,
+                nxt.end_time,
+            ):
                 raise _ValidationError(
                     JointFailureCategory.INVALID_SOLUTION,
                     f"residency windows overlap for value {value_id!r}",
@@ -626,6 +653,199 @@ def _validate_residency_constraints(
                     )
 
 
+def _validate_sram_placement(
+    problem: JointProblem,
+    solution: JointSolution,
+    *,
+    actions_by_id: Mapping[str, JointAction],
+    start_by_action: Mapping[str, int],
+    end_by_action: Mapping[str, int],
+) -> None:
+    windows_by_residency = {
+        window.residency_id: window for window in solution.residency_windows
+    }
+    generated_items = solution.generated_sram_items
+    if any(item.kind is not JointSramItemKind.RESIDENT_WINDOW for item in generated_items):
+        raise _ValidationError(
+            JointFailureCategory.INVALID_SOLUTION,
+            "generated_sram_items must contain only resident_window items",
+        )
+    if len(generated_items) != len(solution.residency_windows):
+        raise _ValidationError(
+            JointFailureCategory.INVALID_SOLUTION,
+            "resident_window cardinality must match residency_windows exactly",
+        )
+
+    allocations_by_item = {
+        allocation.item_id: allocation for allocation in solution.sram_allocations
+    }
+    active_items: list[_ActiveSramItem] = []
+    for item in problem.sram_items:
+        _validate_sram_item_ownership(
+            item,
+            actions_by_id=actions_by_id,
+            windows_by_residency=windows_by_residency,
+        )
+        lifetime = _item_lifetime(
+            item,
+            start_by_action=start_by_action,
+            end_by_action=end_by_action,
+            windows_by_residency=windows_by_residency,
+        )
+        if lifetime is None:
+            continue
+        allocation = allocations_by_item.get(item.item_id)
+        if allocation is None:
+            raise _ValidationError(
+                JointFailureCategory.INVALID_SOLUTION,
+                f"missing allocation for active SRAM item {item.item_id!r}",
+            )
+        active_items.append(
+            _ActiveSramItem(
+                item=item,
+                allocation=allocation,
+                start_time=lifetime[0],
+                end_time=lifetime[1],
+            )
+        )
+
+    resident_item_ids_by_residency: dict[str, str] = {}
+    for item in generated_items:
+        _validate_sram_item_ownership(
+            item,
+            actions_by_id=actions_by_id,
+            windows_by_residency=windows_by_residency,
+        )
+        assert item.owner_residency_id is not None
+        if item.owner_residency_id in resident_item_ids_by_residency:
+            raise _ValidationError(
+                JointFailureCategory.INVALID_SOLUTION,
+                "resident_window cardinality must match residency_windows exactly",
+            )
+        resident_item_ids_by_residency[item.owner_residency_id] = item.item_id
+        lifetime = _item_lifetime(
+            item,
+            start_by_action=start_by_action,
+            end_by_action=end_by_action,
+            windows_by_residency=windows_by_residency,
+        )
+        if lifetime is None:
+            raise _ValidationError(
+                JointFailureCategory.INVALID_SOLUTION,
+                f"resident_window item {item.item_id!r} is missing its residency window",
+            )
+        allocation = allocations_by_item.get(item.item_id)
+        if allocation is None:
+            raise _ValidationError(
+                JointFailureCategory.INVALID_SOLUTION,
+                f"missing allocation for active SRAM item {item.item_id!r}",
+            )
+        active_items.append(
+            _ActiveSramItem(
+                item=item,
+                allocation=allocation,
+                start_time=lifetime[0],
+                end_time=lifetime[1],
+            )
+        )
+
+    if set(resident_item_ids_by_residency) != set(windows_by_residency):
+        raise _ValidationError(
+            JointFailureCategory.INVALID_SOLUTION,
+            "resident_window cardinality must match residency_windows exactly",
+        )
+
+    active_item_ids = {active_item.item.item_id for active_item in active_items}
+    extra_allocations = sorted(set(allocations_by_item) - active_item_ids)
+    if extra_allocations:
+        raise _ValidationError(
+            JointFailureCategory.INVALID_SOLUTION,
+            f"allocations reference inactive SRAM items: {extra_allocations}",
+        )
+
+    for active_item in active_items:
+        if active_item.allocation.offset < 0:
+            raise _ValidationError(
+                JointFailureCategory.INVALID_SOLUTION,
+                f"allocation for {active_item.item.item_id!r} has negative offset",
+            )
+        if active_item.allocation.offset % active_item.item.alignment_bytes != 0:
+            raise _ValidationError(
+                JointFailureCategory.INVALID_SOLUTION,
+                f"allocation for {active_item.item.item_id!r} violates alignment",
+            )
+        end_offset = active_item.allocation.offset + active_item.item.size_bytes
+        if end_offset > problem.sram_capacity_bytes:
+            raise _ValidationError(
+                JointFailureCategory.SRAM_CAPACITY_EXCEEDED,
+                f"allocation for {active_item.item.item_id!r} exceeds SRAM capacity",
+            )
+
+    for index, left in enumerate(active_items):
+        left_start = left.allocation.offset
+        left_end = left_start + left.item.size_bytes
+        for right in active_items[index + 1 :]:
+            if not _intervals_overlap(
+                left.start_time,
+                left.end_time,
+                right.start_time,
+                right.end_time,
+            ):
+                continue
+            right_start = right.allocation.offset
+            right_end = right_start + right.item.size_bytes
+            if _intervals_overlap(left_start, left_end, right_start, right_end):
+                raise _ValidationError(
+                    JointFailureCategory.INVALID_SOLUTION,
+                    f"SRAM allocations overlap for time-overlapping items {left.item.item_id!r} and {right.item.item_id!r}",
+                )
+
+
+def _validate_sram_item_ownership(
+    item: JointSramItem,
+    *,
+    actions_by_id: Mapping[str, JointAction],
+    windows_by_residency: Mapping[str, JointResidencyWindow],
+) -> None:
+    if item.kind in (
+        JointSramItemKind.TEMP_INTERVAL,
+        JointSramItemKind.TRANSFER_BUFFER,
+    ):
+        if item.owner_action_id is None:
+            raise _ValidationError(
+                JointFailureCategory.INVALID_SOLUTION,
+                f"{item.kind.value} item {item.item_id!r} must declare owner_action_id",
+            )
+        if item.owner_action_id not in actions_by_id:
+            raise _ValidationError(
+                JointFailureCategory.INVALID_SOLUTION,
+                f"{item.kind.value} item {item.item_id!r} references unknown action {item.owner_action_id!r}",
+            )
+        if item.owner_value_id is not None or item.owner_residency_id is not None:
+            raise _ValidationError(
+                JointFailureCategory.INVALID_SOLUTION,
+                f"{item.kind.value} item {item.item_id!r} has invalid ownership metadata",
+            )
+        return
+
+    if item.owner_action_id is not None:
+        raise _ValidationError(
+            JointFailureCategory.INVALID_SOLUTION,
+            f"resident_window item {item.item_id!r} must not declare owner_action_id",
+        )
+    if item.owner_value_id is None or item.owner_residency_id is None:
+        raise _ValidationError(
+            JointFailureCategory.INVALID_SOLUTION,
+            f"resident_window item {item.item_id!r} has incomplete ownership metadata",
+        )
+    window = windows_by_residency.get(item.owner_residency_id)
+    if window is None or window.value_id != item.owner_value_id:
+        raise _ValidationError(
+            JointFailureCategory.INVALID_SOLUTION,
+            f"resident_window item {item.item_id!r} has ownership mismatch",
+        )
+
+
 def _validate_capacity(
     problem: JointProblem,
     active_actions: Mapping[str, JointAction],
@@ -731,6 +951,31 @@ def _valid_window_open_times(
         ):
             starts.add(end_by_action[action_id])
     return starts
+
+
+def _item_lifetime(
+    item: JointSramItem,
+    *,
+    start_by_action: Mapping[str, int],
+    end_by_action: Mapping[str, int],
+    windows_by_residency: Mapping[str, JointResidencyWindow],
+) -> tuple[int, int] | None:
+    if item.owner_residency_id is not None:
+        window = windows_by_residency.get(item.owner_residency_id)
+        if window is None:
+            return None
+        return window.start_time, window.end_time
+    if item.owner_action_id is not None:
+        start_time = start_by_action.get(item.owner_action_id)
+        end_time = end_by_action.get(item.owner_action_id)
+        if start_time is None or end_time is None:
+            return None
+        return start_time, end_time
+    return None
+
+
+def _intervals_overlap(start_a: int, end_a: int, start_b: int, end_b: int) -> bool:
+    return start_a < end_b and start_b < end_a
 
 
 def _make_failure(

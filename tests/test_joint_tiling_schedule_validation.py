@@ -22,6 +22,9 @@ from nnc_py.ir.joint_tiling_schedule import (
     JointScheduledAction,
     JointSelectedRecipe,
     JointSolution,
+    JointSramAllocation,
+    JointSramItem,
+    JointSramItemKind,
     JointTileSpec,
     JointValue,
     JointValueConsumer,
@@ -32,6 +35,35 @@ from nnc_py.joint_schedule.validation import (
     validate_joint_problem,
     validate_joint_solution,
 )
+
+
+def _window(value_id: str, start_time: int, end_time: int) -> JointResidencyWindow:
+    return JointResidencyWindow(
+        residency_id=f"{value_id}@{start_time}",
+        value_id=value_id,
+        start_time=start_time,
+        end_time=end_time,
+    )
+
+
+def _generated_resident_items(
+    problem: JointProblem,
+    windows: tuple[JointResidencyWindow, ...],
+) -> tuple[JointSramItem, ...]:
+    size_by_value = {value.value_id: value.size_bytes for value in problem.values}
+    return tuple(
+        JointSramItem(
+            item_id=f"{window.residency_id}.item",
+            kind=JointSramItemKind.RESIDENT_WINDOW,
+            size_bytes=size_by_value[window.value_id],
+            alignment_bytes=problem.default_alignment_bytes,
+            is_optional=False,
+            owner_action_id=None,
+            owner_value_id=window.value_id,
+            owner_residency_id=window.residency_id,
+        )
+        for window in windows
+    )
 
 
 def _valid_problem() -> JointProblem:
@@ -307,11 +339,50 @@ def _valid_problem() -> JointProblem:
             JointResource(resource_kind="OTHER", slot_count=1),
         ),
         sram_capacity_bytes=200,
+        sram_items=(
+            JointSramItem(
+                item_id="r0.compute.temp",
+                kind=JointSramItemKind.TEMP_INTERVAL,
+                size_bytes=16,
+                alignment_bytes=16,
+                is_optional=False,
+                owner_action_id="r0.compute",
+                owner_value_id=None,
+                owner_residency_id=None,
+            ),
+            JointSramItem(
+                item_id="r1.compute.temp",
+                kind=JointSramItemKind.TEMP_INTERVAL,
+                size_bytes=8,
+                alignment_bytes=16,
+                is_optional=False,
+                owner_action_id="r1.compute",
+                owner_value_id=None,
+                owner_residency_id=None,
+            ),
+            JointSramItem(
+                item_id="r1.alt_compute.temp",
+                kind=JointSramItemKind.TEMP_INTERVAL,
+                size_bytes=8,
+                alignment_bytes=16,
+                is_optional=False,
+                owner_action_id="r1.alt_compute",
+                owner_value_id=None,
+                owner_residency_id=None,
+            ),
+        ),
+        default_alignment_bytes=16,
         objective="min_makespan",
     )
 
 
 def _valid_solution() -> JointSolution:
+    problem = _valid_problem()
+    residency_windows = (
+        _window("input0", 3, 9),
+        _window("mid", 9, 17),
+        _window("out", 14, 17),
+    )
     return JointSolution(
         schema_version=JOINT_TILING_SCHEDULE_SOLUTION_SCHEMA_VERSION,
         selected_recipes=(
@@ -324,13 +395,46 @@ def _valid_solution() -> JointSolution:
             JointScheduledAction(action_id="r1.compute", start_time=9),
             JointScheduledAction(action_id="r1.dma_out", start_time=14),
         ),
-        residency_windows=(
-            JointResidencyWindow(value_id="input0", start_time=3, end_time=9),
-            JointResidencyWindow(value_id="mid", start_time=9, end_time=17),
-            JointResidencyWindow(value_id="out", start_time=14, end_time=17),
+        residency_windows=residency_windows,
+        generated_sram_items=_generated_resident_items(problem, residency_windows),
+        sram_allocations=(
+            JointSramAllocation(item_id="r0.compute.temp", offset=0),
+            JointSramAllocation(item_id="r1.compute.temp", offset=0),
+            JointSramAllocation(item_id="input0@3.item", offset=16),
+            JointSramAllocation(item_id="mid@9.item", offset=16),
+            JointSramAllocation(item_id="out@14.item", offset=112),
         ),
         objective_value=17,
         diagnostics={},
+    )
+
+
+def _problem_with_transfer_buffer() -> JointProblem:
+    problem = _valid_problem()
+    return replace(
+        problem,
+        sram_items=problem.sram_items
+        + (
+            JointSramItem(
+                item_id="r0.compute.pack",
+                kind=JointSramItemKind.TRANSFER_BUFFER,
+                size_bytes=32,
+                alignment_bytes=16,
+                is_optional=False,
+                owner_action_id="r0.compute",
+                owner_value_id=None,
+                owner_residency_id=None,
+            ),
+        ),
+    )
+
+
+def _solution_with_transfer_buffer() -> JointSolution:
+    solution = _valid_solution()
+    return replace(
+        solution,
+        sram_allocations=solution.sram_allocations
+        + (JointSramAllocation(item_id="r0.compute.pack", offset=80),),
     )
 
 
@@ -521,6 +625,12 @@ def test_validator_rejects_dependency_edges_with_unknown_actions():
 
 
 def test_validator_rejects_incompatible_recipe_boundary():
+    problem = _valid_problem()
+    residency_windows = (
+        _window("input0", 3, 9),
+        _window("mid", 9, 16),
+        _window("out_alt", 13, 16),
+    )
     bad_solution = replace(
         _valid_solution(),
         selected_recipes=(
@@ -533,15 +643,19 @@ def test_validator_rejects_incompatible_recipe_boundary():
             JointScheduledAction(action_id="r1.alt_compute", start_time=9),
             JointScheduledAction(action_id="r1.alt_dma_out", start_time=13),
         ),
-        residency_windows=(
-            JointResidencyWindow(value_id="input0", start_time=3, end_time=9),
-            JointResidencyWindow(value_id="mid", start_time=9, end_time=16),
-            JointResidencyWindow(value_id="out_alt", start_time=13, end_time=16),
+        residency_windows=residency_windows,
+        generated_sram_items=_generated_resident_items(problem, residency_windows),
+        sram_allocations=(
+            JointSramAllocation(item_id="r0.compute.temp", offset=0),
+            JointSramAllocation(item_id="r1.alt_compute.temp", offset=0),
+            JointSramAllocation(item_id="input0@3.item", offset=16),
+            JointSramAllocation(item_id="mid@9.item", offset=16),
+            JointSramAllocation(item_id="out_alt@13.item", offset=112),
         ),
         objective_value=16,
     )
 
-    failure = validate_joint_solution(_valid_problem(), bad_solution)
+    failure = validate_joint_solution(problem, bad_solution)
 
     assert failure is not None
     assert failure.error_category is JointFailureCategory.INCOMPATIBLE_RECIPE_BOUNDARY
@@ -572,6 +686,11 @@ def test_validator_rejects_boundary_pairs_bound_to_wrong_regions():
 
 
 def test_validator_rejects_missing_final_output():
+    problem = _valid_problem()
+    residency_windows = (
+        _window("input0", 3, 9),
+        _window("mid", 9, 14),
+    )
     bad_solution = replace(
         _valid_solution(),
         scheduled_actions=(
@@ -579,14 +698,18 @@ def test_validator_rejects_missing_final_output():
             JointScheduledAction(action_id="r0.compute", start_time=3),
             JointScheduledAction(action_id="r1.compute", start_time=9),
         ),
-        residency_windows=(
-            JointResidencyWindow(value_id="input0", start_time=3, end_time=9),
-            JointResidencyWindow(value_id="mid", start_time=9, end_time=14),
+        residency_windows=residency_windows,
+        generated_sram_items=_generated_resident_items(problem, residency_windows),
+        sram_allocations=(
+            JointSramAllocation(item_id="r0.compute.temp", offset=0),
+            JointSramAllocation(item_id="r1.compute.temp", offset=0),
+            JointSramAllocation(item_id="input0@3.item", offset=16),
+            JointSramAllocation(item_id="mid@9.item", offset=16),
         ),
         objective_value=14,
     )
 
-    failure = validate_joint_solution(_valid_problem(), bad_solution)
+    failure = validate_joint_solution(problem, bad_solution)
 
     assert failure is not None
     assert failure.error_category is JointFailureCategory.INCOMPLETE_SOLUTION
@@ -606,6 +729,12 @@ def test_validator_rejects_invalid_solution_shape():
 
 
 def test_validator_rejects_dependency_violation():
+    problem = _valid_problem()
+    residency_windows = (
+        _window("input0", 3, 9),
+        _window("mid", 9, 17),
+        _window("out", 13, 16),
+    )
     bad_solution = replace(
         _valid_solution(),
         scheduled_actions=(
@@ -614,15 +743,19 @@ def test_validator_rejects_dependency_violation():
             JointScheduledAction(action_id="r1.compute", start_time=9),
             JointScheduledAction(action_id="r1.dma_out", start_time=13),
         ),
-        residency_windows=(
-            JointResidencyWindow(value_id="input0", start_time=3, end_time=9),
-            JointResidencyWindow(value_id="mid", start_time=9, end_time=17),
-            JointResidencyWindow(value_id="out", start_time=13, end_time=16),
+        residency_windows=residency_windows,
+        generated_sram_items=_generated_resident_items(problem, residency_windows),
+        sram_allocations=(
+            JointSramAllocation(item_id="r0.compute.temp", offset=0),
+            JointSramAllocation(item_id="r1.compute.temp", offset=0),
+            JointSramAllocation(item_id="input0@3.item", offset=16),
+            JointSramAllocation(item_id="mid@9.item", offset=16),
+            JointSramAllocation(item_id="out@13.item", offset=112),
         ),
         objective_value=16,
     )
 
-    failure = validate_joint_solution(_valid_problem(), bad_solution)
+    failure = validate_joint_solution(problem, bad_solution)
 
     assert failure is not None
     assert failure.error_category is JointFailureCategory.DEPENDENCY_VIOLATION
@@ -638,6 +771,12 @@ def test_validator_rejects_sram_capacity_exceeded():
 
 
 def test_validator_rejects_illegal_transfer():
+    problem = _valid_problem()
+    residency_windows = (
+        _window("input0", 3, 9),
+        _window("mid", 12, 20),
+        _window("out", 17, 20),
+    )
     bad_solution = replace(
         _valid_solution(),
         scheduled_actions=(
@@ -647,31 +786,45 @@ def test_validator_rejects_illegal_transfer():
             JointScheduledAction(action_id="r1.compute", start_time=12),
             JointScheduledAction(action_id="r1.dma_out", start_time=17),
         ),
-        residency_windows=(
-            JointResidencyWindow(value_id="input0", start_time=3, end_time=9),
-            JointResidencyWindow(value_id="mid", start_time=12, end_time=20),
-            JointResidencyWindow(value_id="out", start_time=17, end_time=20),
+        residency_windows=residency_windows,
+        generated_sram_items=_generated_resident_items(problem, residency_windows),
+        sram_allocations=(
+            JointSramAllocation(item_id="r0.compute.temp", offset=0),
+            JointSramAllocation(item_id="r1.compute.temp", offset=0),
+            JointSramAllocation(item_id="input0@3.item", offset=16),
+            JointSramAllocation(item_id="mid@12.item", offset=16),
+            JointSramAllocation(item_id="out@17.item", offset=112),
         ),
         objective_value=20,
     )
 
-    failure = validate_joint_solution(_valid_problem(), bad_solution)
+    failure = validate_joint_solution(problem, bad_solution)
 
     assert failure is not None
     assert failure.error_category is JointFailureCategory.ILLEGAL_TRANSFER
 
 
 def test_validator_rejects_unjustified_first_residency_window():
+    problem = _valid_problem()
+    residency_windows = (
+        _window("input0", 3, 9),
+        _window("mid", 0, 17),
+        _window("out", 14, 17),
+    )
     bad_solution = replace(
         _valid_solution(),
-        residency_windows=(
-            JointResidencyWindow(value_id="input0", start_time=3, end_time=9),
-            JointResidencyWindow(value_id="mid", start_time=0, end_time=17),
-            JointResidencyWindow(value_id="out", start_time=14, end_time=17),
+        residency_windows=residency_windows,
+        generated_sram_items=_generated_resident_items(problem, residency_windows),
+        sram_allocations=(
+            JointSramAllocation(item_id="r0.compute.temp", offset=0),
+            JointSramAllocation(item_id="r1.compute.temp", offset=0),
+            JointSramAllocation(item_id="input0@3.item", offset=16),
+            JointSramAllocation(item_id="mid@0.item", offset=16),
+            JointSramAllocation(item_id="out@14.item", offset=112),
         ),
     )
 
-    failure = validate_joint_solution(_valid_problem(), bad_solution)
+    failure = validate_joint_solution(problem, bad_solution)
 
     assert failure is not None
     assert failure.error_category is JointFailureCategory.INVALID_SOLUTION
@@ -687,12 +840,21 @@ def test_validator_rejects_must_keep_gap_from_first_availability():
             for value in _valid_problem().values
         ),
     )
+    residency_windows = (
+        _window("input0", 3, 9),
+        _window("mid", 10, 17),
+        _window("out", 14, 17),
+    )
     bad_solution = replace(
         _valid_solution(),
-        residency_windows=(
-            JointResidencyWindow(value_id="input0", start_time=3, end_time=9),
-            JointResidencyWindow(value_id="mid", start_time=10, end_time=17),
-            JointResidencyWindow(value_id="out", start_time=14, end_time=17),
+        residency_windows=residency_windows,
+        generated_sram_items=_generated_resident_items(problem, residency_windows),
+        sram_allocations=(
+            JointSramAllocation(item_id="r0.compute.temp", offset=0),
+            JointSramAllocation(item_id="r1.compute.temp", offset=0),
+            JointSramAllocation(item_id="input0@3.item", offset=16),
+            JointSramAllocation(item_id="mid@10.item", offset=16),
+            JointSramAllocation(item_id="out@14.item", offset=112),
         ),
     )
 
@@ -700,3 +862,138 @@ def test_validator_rejects_must_keep_gap_from_first_availability():
 
     assert failure is not None
     assert failure.error_category is JointFailureCategory.INVALID_SOLUTION
+
+
+def test_validator_rejects_missing_allocation_for_active_fixed_temp_item():
+    bad_solution = replace(
+        _valid_solution(),
+        sram_allocations=tuple(
+            allocation
+            for allocation in _valid_solution().sram_allocations
+            if allocation.item_id != "r1.compute.temp"
+        ),
+    )
+
+    failure = validate_joint_solution(_valid_problem(), bad_solution)
+
+    assert failure is not None
+    assert failure.error_category is JointFailureCategory.INVALID_SOLUTION
+    assert "missing allocation" in str(failure.diagnostics["reason"])
+
+
+def test_validator_rejects_allocation_that_exceeds_sram_capacity():
+    bad_solution = replace(
+        _valid_solution(),
+        sram_allocations=tuple(
+            replace(allocation, offset=144)
+            if allocation.item_id == "out@14.item"
+            else allocation
+            for allocation in _valid_solution().sram_allocations
+        ),
+    )
+
+    failure = validate_joint_solution(_valid_problem(), bad_solution)
+
+    assert failure is not None
+    assert failure.error_category is JointFailureCategory.SRAM_CAPACITY_EXCEEDED
+    assert "exceeds SRAM capacity" in str(failure.diagnostics["reason"])
+
+
+def test_validator_rejects_overlapping_allocations_for_time_overlapping_items():
+    bad_solution = replace(
+        _valid_solution(),
+        sram_allocations=tuple(
+            replace(allocation, offset=80)
+            if allocation.item_id == "out@14.item"
+            else allocation
+            for allocation in _valid_solution().sram_allocations
+        ),
+    )
+
+    failure = validate_joint_solution(_valid_problem(), bad_solution)
+
+    assert failure is not None
+    assert failure.error_category is JointFailureCategory.INVALID_SOLUTION
+    assert "overlap" in str(failure.diagnostics["reason"])
+
+
+def test_validator_rejects_misaligned_allocation_offset():
+    bad_solution = replace(
+        _valid_solution(),
+        sram_allocations=tuple(
+            replace(allocation, offset=18)
+            if allocation.item_id == "input0@3.item"
+            else allocation
+            for allocation in _valid_solution().sram_allocations
+        ),
+    )
+
+    failure = validate_joint_solution(_valid_problem(), bad_solution)
+
+    assert failure is not None
+    assert failure.error_category is JointFailureCategory.INVALID_SOLUTION
+    assert "alignment" in str(failure.diagnostics["reason"])
+
+
+def test_validator_rejects_resident_item_cardinality_mismatch():
+    bad_solution = replace(
+        _valid_solution(),
+        generated_sram_items=tuple(
+            item
+            for item in _valid_solution().generated_sram_items
+            if item.item_id != "out@14.item"
+        ),
+        sram_allocations=tuple(
+            allocation
+            for allocation in _valid_solution().sram_allocations
+            if allocation.item_id != "out@14.item"
+        ),
+    )
+
+    failure = validate_joint_solution(_valid_problem(), bad_solution)
+
+    assert failure is not None
+    assert failure.error_category is JointFailureCategory.INVALID_SOLUTION
+    assert "cardinality" in str(failure.diagnostics["reason"])
+
+
+def test_validator_rejects_generated_resident_item_ownership_mismatch():
+    bad_solution = replace(
+        _valid_solution(),
+        generated_sram_items=tuple(
+            replace(item, owner_value_id="mid")
+            if item.item_id == "out@14.item"
+            else item
+            for item in _valid_solution().generated_sram_items
+        ),
+    )
+
+    failure = validate_joint_solution(_valid_problem(), bad_solution)
+
+    assert failure is not None
+    assert failure.error_category is JointFailureCategory.INVALID_SOLUTION
+    assert "ownership" in str(failure.diagnostics["reason"])
+
+
+def test_validator_rejects_transfer_buffer_with_non_action_ownership():
+    problem = _problem_with_transfer_buffer()
+    bad_problem = replace(
+        problem,
+        sram_items=tuple(
+            replace(
+                item,
+                owner_action_id=None,
+                owner_value_id="input0",
+                owner_residency_id="input0@3",
+            )
+            if item.item_id == "r0.compute.pack"
+            else item
+            for item in problem.sram_items
+        ),
+    )
+
+    failure = validate_joint_solution(bad_problem, _solution_with_transfer_buffer())
+
+    assert failure is not None
+    assert failure.error_category is JointFailureCategory.INVALID_SOLUTION
+    assert "transfer_buffer" in str(failure.diagnostics["reason"])
