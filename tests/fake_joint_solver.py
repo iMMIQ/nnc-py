@@ -6,10 +6,31 @@ import sys
 from nnc_py.ir.joint_tiling_schedule import (
     JOINT_TILING_SCHEDULE_FAILURE_SCHEMA_VERSION,
     JOINT_TILING_SCHEDULE_SOLUTION_SCHEMA_VERSION,
+    JointFailure,
+    JointProblem,
+    JointSolution,
 )
+from nnc_py.joint_schedule.solver import BaselineJointScheduleSolver
 
 
-def _build_solution(problem: dict[str, object]) -> dict[str, object]:
+def _build_solution(problem_payload: dict[str, object]) -> dict[str, object]:
+    problem = JointProblem.from_json(problem_payload)
+    result = BaselineJointScheduleSolver().solve(problem)
+    if isinstance(result, JointFailure):
+        return _build_fallback_solution(problem_payload)
+    if not isinstance(result, JointSolution):
+        raise TypeError("baseline solver returned unexpected payload type")
+
+    payload = result.to_json()
+    payload["schema_version"] = JOINT_TILING_SCHEDULE_SOLUTION_SCHEMA_VERSION
+    payload["diagnostics"] = {
+        **dict(result.diagnostics),
+        "mode": "solution",
+    }
+    return payload
+
+
+def _build_fallback_solution(problem: dict[str, object]) -> dict[str, object]:
     recipes = problem.get("recipes", [])
     actions = problem.get("actions", [])
 
@@ -43,7 +64,7 @@ def _build_solution(problem: dict[str, object]) -> dict[str, object]:
         ],
         "residency_windows": [],
         "objective_value": max(len(mandatory_actions), 1),
-        "diagnostics": {"mode": "solution"},
+        "diagnostics": {"mode": "solution", "fallback": "simple"},
     }
 
 
