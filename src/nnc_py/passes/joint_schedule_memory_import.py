@@ -202,6 +202,12 @@ def _build_fast_allocations(
                 "Malformed feasible joint schedule import metadata: "
                 f"imported interval for SRAM value '{value_name}' is missing offset."
             )
+        if imported.size_bytes != value.size_bytes:
+            raise RuntimeError(
+                "Malformed feasible joint schedule import metadata: "
+                f"imported interval for SRAM value '{value_name}' has size_bytes "
+                f"{imported.size_bytes}, expected {value.size_bytes}."
+            )
         timing = _resolve_value_timing(
             value=value,
             value_name=value_name,
@@ -436,6 +442,11 @@ def _build_transfer_points(
                 )
             producer_step = problem_steps.get(moved_value.producer_step_id)
             after_node_name = getattr(producer_step, "node_name", None)
+            if after_node_name is None:
+                raise RuntimeError(
+                    "Malformed feasible joint schedule import metadata: "
+                    f"spill step '{step_id}' cannot resolve producer node."
+                )
         else:
             resident_value_name = next(iter(problem_step.sram_output_names), None)
             if resident_value_name is None:
@@ -456,11 +467,11 @@ def _build_transfer_points(
             if before_node_name is None and fast_allocation.closed_by_step_id is not None:
                 consumer_step = problem_steps.get(fast_allocation.closed_by_step_id)
                 before_node_name = getattr(consumer_step, "node_name", None)
-
-        if after_node_name is None and problem_step.transfer_kind is TransferStepKind.SPILL_DMA:
-            after_node_name = problem_step.step_id if hasattr(problem_step, "step_id") else step_id
-        if before_node_name is None and problem_step.transfer_kind is TransferStepKind.RELOAD_DMA:
-            before_node_name = problem_step.step_id if hasattr(problem_step, "step_id") else step_id
+            if before_node_name is None:
+                raise RuntimeError(
+                    "Malformed feasible joint schedule import metadata: "
+                    f"reload step '{step_id}' cannot resolve consumer node."
+                )
 
         moved_value = scheduled_values.get(problem_step.moved_value_name)
         if moved_value is None:

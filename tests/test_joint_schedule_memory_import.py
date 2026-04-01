@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from nnc_py.ir.context import CompileContext
@@ -220,4 +222,53 @@ def test_joint_schedule_memory_import_requires_explicit_imported_offset():
     )
 
     with pytest.raises(RuntimeError, match="offset"):
+        JointScheduleMemoryImportPass().run(ctx)
+
+
+def test_joint_schedule_memory_import_requires_interval_size_to_match_scheduled_value():
+    ctx = _make_import_context(
+        sram_intervals=(
+            SramAllocationInterval(
+                value_name="mid",
+                item_id="mid@2.item",
+                item_kind="resident_window",
+                buffer_id="mid@2.item",
+                offset=64,
+                start_time=2,
+                end_time=3,
+                size_bytes=32,
+            ),
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="size_bytes"):
+        JointScheduleMemoryImportPass().run(ctx)
+
+
+def test_joint_schedule_memory_import_requires_spill_producer_node_from_problem_steps():
+    ctx = _make_import_context(
+        sram_intervals=(
+            SramAllocationInterval(
+                value_name="mid",
+                item_id="mid@2.item",
+                item_kind="resident_window",
+                buffer_id="mid@2.item",
+                offset=64,
+                start_time=2,
+                end_time=3,
+                size_bytes=16,
+            ),
+        ),
+    )
+    problem = ctx.pipeline_schedule_problem
+    assert problem is not None
+    set_pipeline_schedule_problem(
+        ctx,
+        replace(
+            problem,
+            steps=(problem.steps[1],),
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="producer node"):
         JointScheduleMemoryImportPass().run(ctx)
