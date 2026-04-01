@@ -23,3 +23,12 @@ def test_snapshot_directory_matches_pyproject_config():
 
     assert snapshots_path == Path("tests/__snapshots__")
     assert (Path(__file__).parent.parent / snapshots_path).exists()
+
+
+def test_joint_schedule_modules_are_importable():
+    import nnc_py.joint_schedule as joint_schedule
+    from nnc_py.passes import JointTilingScheduleProblemPass
+
+    assert callable(joint_schedule.build_joint_problem)
+    assert callable(joint_schedule.build_joint_regions)
+    assert JointTilingScheduleProblemPass.__name__ == "JointTilingScheduleProblemPass"

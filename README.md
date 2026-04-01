@@ -124,6 +124,18 @@ Notes:
 - **O2**: O1 + constrained-memory spill/reload planning, still using the default `cost_aware` allocator
 - **O3**: O2 + pattern fusion + dominator fusion
 
+### External Joint Tiling Contract
+
+`O3` also has an opt-in external joint tiling/schedule contract path for handing
+tiling-recipe selection and makespan-oriented scheduling to an external solver
+without exposing the internal compiler schedule IR.
+
+- Enable it with compile metadata: `{"enable_joint_tiling_schedule_contract": True}`
+- Optionally provide an external CLI solver with:
+  `{"joint_tiling_schedule_solver_command": ["solver-binary", "--stdio"]}`
+- v1 is intentionally limited to regions and recipes the compiler already knows
+  how to build from existing tiled-lowering metadata
+
 ### Memory Planning Defaults
 
 - `O0` keeps the legacy `basic` allocator for conservative planning and debugging.
