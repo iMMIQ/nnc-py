@@ -665,8 +665,16 @@ def test_joint_solution_and_failure_validate_unique_entries_and_json_payloads():
             diagnostics={},
         )
 
+    with pytest.raises((TypeError, ValueError), match="residency_id|required"):
+        JointResidencyWindow(value_id="output0", start_time=5, end_time=6)
+
     with pytest.raises(ValueError, match="JointResidencyWindow.end_time"):
-        JointResidencyWindow(value_id="output0", start_time=5, end_time=5)
+        JointResidencyWindow(
+            residency_id="output0@5",
+            value_id="output0",
+            start_time=5,
+            end_time=5,
+        )
 
 
 def test_joint_tiling_schedule_metadata_helpers_validate_runtime_types():

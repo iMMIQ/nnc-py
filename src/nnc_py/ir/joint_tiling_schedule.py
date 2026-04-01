@@ -1315,13 +1315,11 @@ class JointResidencyWindow:
         )
         if end_time <= start_time:
             raise ValueError("JointResidencyWindow.end_time must be > start_time")
-        residency_id = self.residency_id
+        residency_id = _coerce_optional_str(
+            self.residency_id, field_name="JointResidencyWindow.residency_id"
+        )
         if residency_id is None:
-            residency_id = f"{self.value_id}@{start_time}"
-        else:
-            residency_id = _coerce_optional_str(
-                residency_id, field_name="JointResidencyWindow.residency_id"
-            )
+            raise ValueError("JointResidencyWindow.residency_id is required")
         object.__setattr__(self, "start_time", start_time)
         object.__setattr__(self, "end_time", end_time)
         object.__setattr__(self, "residency_id", residency_id)
