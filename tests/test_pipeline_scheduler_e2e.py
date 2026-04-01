@@ -164,6 +164,35 @@ def _build_generated_x86_source(output_dir: Path) -> None:
     assert (output_dir / "model").exists()
 
 
+def _assert_joint_imported_offsets(ctx) -> None:
+    result = ctx.pipeline_schedule_result
+    assert result is not None
+
+    scheduled_plan = ctx.metadata["scheduled_memory_plan"]
+    compat_plan = ctx.metadata["memory_allocation_plan"]
+    imported_offsets = {
+        interval.value_name: interval.offset
+        for interval in result.sram_intervals
+        if interval.item_kind == "resident_window"
+    }
+
+    if imported_offsets:
+        assert set(imported_offsets).issubset(scheduled_plan.fast_allocations)
+        assert set(imported_offsets).issubset(compat_plan.tensor_allocations)
+        assert set(imported_offsets).issubset(compat_plan.logical_regions)
+        for value_name, offset in imported_offsets.items():
+            assert offset is not None
+            assert scheduled_plan.fast_allocations[value_name].offset == offset
+            assert compat_plan.tensor_allocations[value_name].offset == offset
+            assert compat_plan.logical_regions[value_name].offset == offset
+        return
+
+    assert scheduled_plan.fast_allocations == {}
+    assert compat_plan.tensor_allocations == {}
+    assert compat_plan.logical_regions == {}
+    assert compat_plan.total_fast_memory == 0
+
+
 def test_generated_makefile_uses_real_runtime_path_for_out_of_tree_builds(tmp_path):
     _, output_dir = _compile_model(
         tmp_path,
@@ -280,6 +309,7 @@ def test_joint_contract_path_materializes_and_builds_generated_output(tmp_path):
     assert ctx.pipeline_schedule_result is not None
     assert ctx.pipeline_schedule_result.feasible is True
     assert ctx.pipeline_schedule_result.solver_name == "joint_materialized"
+    _assert_joint_imported_offsets(ctx)
 
     model_c = (output_dir / "model.c").read_text()
     assert "Pipeline schedule summary" in model_c
@@ -303,6 +333,7 @@ def test_joint_contract_external_solver_solution_materializes_and_builds(tmp_pat
     assert ctx.joint_tiling_schedule_solution.diagnostics["mode"] == "solution"
     assert ctx.pipeline_schedule_result is not None
     assert ctx.pipeline_schedule_result.solver_name == "joint_materialized"
+    _assert_joint_imported_offsets(ctx)
 
     model_c = (output_dir / "model.c").read_text()
     assert "solver=joint_materialized" in model_c

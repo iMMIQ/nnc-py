@@ -165,11 +165,6 @@ def _build_fast_allocations(
     windows_by_value_name: dict[str, ResidencyWindow],
     imported_intervals: tuple[SramAllocationInterval, ...],
 ) -> dict[str, ScheduledFastAllocation]:
-    if not imported_intervals:
-        raise RuntimeError(
-            "Malformed feasible joint schedule import metadata: missing imported sram_intervals."
-        )
-
     expected_sram_values = {
         name: value
         for name, value in scheduled_values.items()
@@ -181,6 +176,13 @@ def _build_fast_allocations(
         _validate_imported_interval(interval)
         if interval.value_name in expected_sram_values:
             imported_by_value_name.setdefault(interval.value_name, []).append(interval)
+
+    if not expected_sram_values:
+        return {}
+    if not imported_intervals:
+        raise RuntimeError(
+            "Malformed feasible joint schedule import metadata: missing imported sram_intervals."
+        )
 
     allocations: dict[str, ScheduledFastAllocation] = {}
     for value_name, value in expected_sram_values.items():

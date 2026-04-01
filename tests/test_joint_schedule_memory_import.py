@@ -126,6 +126,84 @@ def _make_import_context(
     return ctx
 
 
+def _make_no_fast_item_import_context() -> CompileContext:
+    graph = Graph("joint_schedule_import_no_fast_item")
+    graph.inputs = ["input"]
+    graph.outputs = ["mid"]
+    graph.add_tensor(
+        TensorType(
+            name="input",
+            dtype=DataType.FLOAT32,
+            shape=TensorShape([1, 4]),
+        )
+    )
+    graph.add_tensor(
+        TensorType(
+            name="mid",
+            dtype=DataType.FLOAT32,
+            shape=TensorShape([1, 4]),
+        )
+    )
+    graph.add_node(
+        Node(
+            op_type=OpType.RELU,
+            name="relu0",
+            inputs=["input"],
+            outputs=["mid"],
+        )
+    )
+
+    ctx = CompileContext(graph=graph, target="x86", optimization_level=3)
+    problem = PipelineScheduleProblem(
+        steps=(
+            ScheduleStep(
+                id="relu0.compute",
+                node_name="relu0",
+                step_kind=ScheduleStepKind.COMPUTE,
+                resource_kind=PipelineResourceKind.OTHER,
+                duration=2,
+                sram_input_names=(),
+                sram_output_names=(),
+            ),
+        ),
+        scheduled_values=(
+            ScheduledValue(
+                name="mid",
+                graph_tensor_name="mid",
+                size_bytes=16,
+                producer_step_id="relu0.compute",
+                consumer_step_ids=(),
+                must_reside_in_sram=False,
+                can_alias=True,
+                home_tier=ScheduledValueHomeTier.SLOW,
+            ),
+        ),
+        resources=(PipelineResourceKind.OTHER,),
+        sram_capacity_bytes=128,
+        metadata={"origin": "joint_tiling_schedule_materialize"},
+    )
+    result = PipelineScheduleResult(
+        scheduled_steps=(
+            ScheduledStep(
+                step_id="relu0.compute",
+                resource_kind=PipelineResourceKind.OTHER,
+                resource_slot=0,
+                start_time=0,
+                end_time=2,
+            ),
+        ),
+        sram_intervals=(),
+        scheduled_values=problem.scheduled_values,
+        feasible=True,
+        makespan=2,
+        solver_name="joint_materialized",
+        diagnostics={"strategy": "joint_contract"},
+    )
+    set_pipeline_schedule_problem(ctx, problem)
+    set_pipeline_schedule_result(ctx, result)
+    return ctx
+
+
 def test_joint_schedule_memory_import_builds_compatibility_metadata_from_imported_offsets():
     ctx = _make_import_context(
         sram_intervals=(
@@ -160,7 +238,25 @@ def test_joint_schedule_memory_import_builds_compatibility_metadata_from_importe
     assert compat_plan.spill_points[0].to_slow_offset == 0
 
 
-def test_joint_schedule_memory_import_requires_imported_sram_intervals():
+def test_joint_schedule_memory_import_allows_empty_imports_when_no_sram_values_are_expected():
+    ctx = _make_no_fast_item_import_context()
+
+    JointScheduleMemoryImportPass().run(ctx)
+
+    scheduled_plan = ctx.metadata["scheduled_memory_plan"]
+    compat_plan = ctx.metadata["memory_allocation_plan"]
+
+    assert compat_plan.strategy_name == "joint_solver_import"
+    assert scheduled_plan.total_fast_memory == 0
+    assert scheduled_plan.fast_allocations == {}
+    assert scheduled_plan.transfer_points == ()
+    assert compat_plan.total_fast_memory == 0
+    assert compat_plan.buffers == []
+    assert compat_plan.tensor_allocations == {}
+    assert compat_plan.logical_regions == {}
+
+
+def test_joint_schedule_memory_import_requires_imported_sram_intervals_for_sram_values():
     ctx = _make_import_context(sram_intervals=())
 
     with pytest.raises(RuntimeError, match="sram_intervals"):

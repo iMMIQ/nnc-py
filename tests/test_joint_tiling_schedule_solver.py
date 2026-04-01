@@ -263,7 +263,7 @@ def _allocatable_joint_problem() -> JointProblem:
                 size_bytes=32,
                 alignment_bytes=16,
                 is_optional=False,
-                owner_action_id="region0.recipe0.compute",
+                owner_action_id="region0.recipe0.dma_in.input0",
                 owner_value_id=None,
                 owner_residency_id=None,
             ),
@@ -341,8 +341,8 @@ def test_baseline_solver_emits_generated_residency_items_and_sram_allocations(
     }
     assert {allocation.item_id: allocation.offset for allocation in result.sram_allocations} == {
         "region0.recipe0.compute.temp": 0,
-        "region0.recipe0.compute.pack": 64,
-        "input0@3.item": 96,
+        "region0.recipe0.compute.pack": 0,
+        "input0@3.item": 64,
         "output0@9.item": 0,
     }
     size_by_item = {
