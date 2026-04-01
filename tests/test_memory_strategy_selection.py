@@ -146,7 +146,7 @@ def test_compiler_explicit_memory_strategy_override_is_stored_in_context(monkeyp
         return SimpleNamespace(files=[], metadata={})
 
     compiler.backend = SimpleNamespace(generate=fake_generate)
-    monkeypatch.setattr(compiler, "_get_passes", lambda *, enable_pipeline_scheduler: [])
+    monkeypatch.setattr(compiler, "_get_passes", lambda: [])
     monkeypatch.setattr(compiler, "_write_output", lambda artifacts, output_dir, entry_point: None)
 
     compiler.compile(

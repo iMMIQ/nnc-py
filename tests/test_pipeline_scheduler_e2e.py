@@ -1,4 +1,4 @@
-"""End-to-end coverage for scheduled and joint-contract O3 compile paths."""
+"""End-to-end coverage for joint-tiling-schedule O3 compile path."""
 
 from __future__ import annotations
 
@@ -112,7 +112,6 @@ def _require_resnet18_model_path() -> Path:
 def _compile_model(
     tmp_path,
     *,
-    enable_pipeline_scheduler: bool | None,
     cost_model_cli_command: list[str] | None = None,
     metadata: dict[str, object] | None = None,
     max_memory: str | None = None,
@@ -133,7 +132,6 @@ def _compile_model(
     compiler.compile(
         str(model_path),
         str(output_dir),
-        enable_pipeline_scheduler=enable_pipeline_scheduler,
         metadata=metadata,
         max_memory=max_memory,
     )
@@ -146,7 +144,6 @@ def _compile_existing_model(
     model_path: Path,
     output_dir: Path,
     *,
-    enable_pipeline_scheduler: bool | None,
     metadata: dict[str, object] | None = None,
 ):
     compiler = Compiler(
@@ -159,7 +156,6 @@ def _compile_existing_model(
     compiler.compile(
         str(model_path),
         str(output_dir),
-        enable_pipeline_scheduler=enable_pipeline_scheduler,
         metadata=metadata,
     )
     assert backend.ctx is not None
@@ -225,10 +221,7 @@ def _assert_joint_imported_offsets(ctx) -> None:
 
 
 def test_generated_makefile_uses_real_runtime_path_for_out_of_tree_builds(tmp_path):
-    _, output_dir = _compile_model(
-        tmp_path,
-        enable_pipeline_scheduler=True,
-    )
+    _, output_dir = _compile_model(tmp_path)
 
     makefile_text = (output_dir / "Makefile").read_text()
     runtime_dir = Path(__file__).resolve().parents[1] / "runtime"
@@ -238,100 +231,9 @@ def test_generated_makefile_uses_real_runtime_path_for_out_of_tree_builds(tmp_pa
     assert "NNC_RUNTIME ?=" in makefile_text
 
 
-def test_explicit_scheduler_enable_emits_current_schedule_contract_and_buildable_x86_source(
-    tmp_path,
-):
-    ctx, output_dir = _compile_model(
-        tmp_path,
-        enable_pipeline_scheduler=True,
-    )
-
-    assert ctx.metadata["pipeline_scheduler_enabled"] is True
-    assert ctx.pipeline_schedule_problem is not None
-    assert ctx.pipeline_schedule_problem.metadata["origin"] == "pipeline_step_lowering"
-    assert ctx.pipeline_schedule_result is not None
-    assert ctx.pipeline_schedule_result.solver_name == "list"
-    assert ctx.pipeline_schedule_result.feasible is True
-    assert ctx.pipeline_schedule_result.makespan > 0
-    assert len(ctx.pipeline_schedule_result.scheduled_steps) == 1
-    assert ctx.pipeline_schedule_result.diagnostics["scheduled_order"] == (
-        "matmul0.compute",
-    )
-    assert ctx.metadata["memory_allocation_plan"].strategy_name in {
-        "schedule_time_v4",
-        "tile_regions_v3",
-    }
-
-    model_c = (output_dir / "model.c").read_text()
-    assert "Pipeline schedule summary" in model_c
-    assert "schedule_metadata=present" in model_c
-    assert "solver=list" in model_c
-    assert "feasible=yes" in model_c
-    assert "pipeline step:" in model_c
-    assert "memory_plan_strategy=" in model_c
-
-    _build_generated_x86_source(output_dir)
-
-
-def test_default_o3_branch_uses_scheduled_contract_and_builds_generated_output(
-    tmp_path,
-):
-    ctx, output_dir = _compile_model(
-        tmp_path,
-        enable_pipeline_scheduler=None,
-        cost_model_cli_command=["/definitely-missing-cost-model-command-12345"],
-    )
-
-    assert ctx.metadata["pipeline_scheduler_enabled"] is True
-    assert "pipeline_scheduler_fallback" not in ctx.metadata
-    assert ctx.metadata["cost_model_cli_command"] == [
-        "/definitely-missing-cost-model-command-12345"
-    ]
-    assert ctx.pipeline_schedule_problem is not None
-    assert ctx.pipeline_schedule_result is not None
-    assert ctx.pipeline_schedule_result.solver_name == "list"
-    assert ctx.pipeline_schedule_result.feasible is True
-    assert ctx.metadata["memory_allocation_plan"].strategy_name == "schedule_time_v4"
-
-    model_c = (output_dir / "model.c").read_text()
-    assert "Pipeline schedule summary" in model_c
-    assert "schedule_metadata=present" in model_c
-    assert "solver=list" in model_c
-    assert "memory_plan_strategy=" in model_c
-
-    _build_generated_x86_source(output_dir)
-
-
-def test_missing_cli_cost_model_falls_back_without_failing_compile_or_build(tmp_path):
-    ctx, output_dir = _compile_model(
-        tmp_path,
-        enable_pipeline_scheduler=True,
-        cost_model_cli_command=["/definitely-missing-cost-model-command-12345"],
-    )
-
-    assert ctx.metadata["pipeline_scheduler_enabled"] is True
-    assert ctx.metadata["cost_model_cli_command"] == [
-        "/definitely-missing-cost-model-command-12345"
-    ]
-    assert ctx.pipeline_schedule_problem is not None
-    assert ctx.pipeline_schedule_result is not None
-    assert all(
-        step.attrs.get("cost_model") == "simple"
-        for step in ctx.pipeline_schedule_problem.steps
-    )
-    assert (output_dir / "model.c").exists()
-
-    _build_generated_x86_source(output_dir)
-
-
 def test_joint_contract_path_materializes_and_builds_generated_output(tmp_path):
-    ctx, output_dir = _compile_model(
-        tmp_path,
-        enable_pipeline_scheduler=None,
-        metadata={"enable_joint_tiling_schedule_contract": True},
-    )
+    ctx, output_dir = _compile_model(tmp_path)
 
-    assert ctx.metadata["enable_joint_tiling_schedule_contract"] is True
     assert ctx.joint_tiling_schedule_problem is not None
     assert ctx.joint_tiling_schedule_solution is not None
     assert ctx.joint_tiling_schedule_failure is None
@@ -353,9 +255,7 @@ def test_joint_contract_path_materializes_and_builds_generated_output(tmp_path):
 def test_joint_contract_external_solver_solution_materializes_and_builds(tmp_path):
     ctx, output_dir = _compile_model(
         tmp_path,
-        enable_pipeline_scheduler=None,
         metadata={
-            "enable_joint_tiling_schedule_contract": True,
             "joint_tiling_schedule_solver_command": _joint_solver_command("solution"),
         },
     )
@@ -388,9 +288,7 @@ def test_joint_contract_external_solver_failure_surfaces_standardized_category(
         compiler.compile(
             str(tmp_path / "model.onnx"),
             str(tmp_path / "build"),
-            enable_pipeline_scheduler=None,
             metadata={
-                "enable_joint_tiling_schedule_contract": True,
                 "joint_tiling_schedule_solver_command": _joint_solver_command(
                     "infeasible"
                 ),
@@ -407,62 +305,9 @@ def test_joint_contract_resnet18_compiles_with_default_submodule_solver(tmp_path
     ctx = _compile_existing_model(
         model_path,
         tmp_path / "resnet18_joint_build",
-        enable_pipeline_scheduler=None,
-        metadata={"enable_joint_tiling_schedule_contract": True},
     )
 
     assert ctx.joint_tiling_schedule_problem is not None
     assert ctx.joint_tiling_schedule_solution is not None
     assert ctx.pipeline_schedule_result is not None
     assert ctx.pipeline_schedule_result.feasible is True
-
-
-def test_strict_o3_scheduled_compile_with_impossible_max_memory_preserves_budget_diagnostics(
-    tmp_path,
-):
-    compiler = Compiler(
-        target="x86",
-        opt_level=3,
-        enable_constant_folding=False,
-    )
-    compiler.frontend = SimpleNamespace(load=lambda _: _make_pipeline_ready_gemm_graph())
-    backend = _CapturingX86Backend()
-    compiler.backend = backend
-
-    with pytest.raises(RuntimeError) as exc_info:
-        compiler.compile(
-            str(tmp_path / "model.onnx"),
-            str(tmp_path / "build"),
-            enable_pipeline_scheduler=True,
-            max_memory="80",
-        )
-
-    message = str(exc_info.value)
-    assert "no_feasible_schedule_under_budget" in message
-    assert "step_id=gemm0.shape_prep" in message
-    assert "disable-pipeline-scheduler" not in message
-
-
-def test_scheduler_disable_keeps_conservative_fallback_metadata_explicit_and_buildable(
-    tmp_path,
-):
-    ctx, output_dir = _compile_model(
-        tmp_path,
-        enable_pipeline_scheduler=False,
-    )
-
-    assert ctx.metadata["pipeline_scheduler_enabled"] is False
-    assert ctx.metadata["pipeline_scheduler_fallback"] == "legacy_o3_disabled"
-    assert ctx.pipeline_schedule_problem is None
-    assert ctx.pipeline_schedule_result is not None
-    assert ctx.pipeline_schedule_result.solver_name == "disabled"
-    assert ctx.pipeline_schedule_result.diagnostics["strategy"] == "serial"
-    assert ctx.pipeline_schedule_result.diagnostics["reason"] == "pipeline_scheduler_disabled"
-    assert ctx.metadata["memory_allocation_plan"].strategy_name != "schedule_time_v4"
-
-    model_c = (output_dir / "model.c").read_text()
-    assert "Pipeline schedule summary" in model_c
-    assert "schedule_metadata=present" in model_c
-    assert "memory_plan_strategy=" in model_c
-
-    _build_generated_x86_source(output_dir)

@@ -10,7 +10,6 @@ from rich.console import Console
 from nnc_py.codegen.npu_backend import NPUBackend
 from nnc_py.codegen.x86_backend import X86Backend
 from nnc_py.ir.context import CompileContext
-from nnc_py.ir.pipeline_schedule import PipelineScheduleResult, set_pipeline_schedule_result
 from nnc_py.passes.base import PassManager
 
 _STAGED_VALUE_PATTERN = re.compile(
@@ -113,7 +112,6 @@ class Compiler:
         enable_constant_folding: bool = True,
         debug_mode: bool = False,
         cost_model_cli_command: str | list[str] | None = None,
-        enable_pipeline_scheduler: bool | None = None,
         metadata: Mapping[str, Any] | None = None,
     ):
         """Initialize the compiler.
@@ -125,7 +123,6 @@ class Compiler:
             enable_constant_folding: Whether to enable ONNX constant folding (via onnxsim).
             debug_mode: Whether to enable debug mode with intermediate tensor dumps.
             cost_model_cli_command: Optional external CLI command for schedule-step cost estimation.
-            enable_pipeline_scheduler: Override for the O3 pipeline scheduler path.
             metadata: Default compile-context metadata to merge into each compilation.
         """
         self.target = target
@@ -134,28 +131,13 @@ class Compiler:
         self.enable_constant_folding = enable_constant_folding
         self.debug_mode = debug_mode
         self.cost_model_cli_command = cost_model_cli_command
-        self.enable_pipeline_scheduler = enable_pipeline_scheduler
         self.default_metadata = self._normalize_metadata_mapping(metadata)
         self.console = Console()
 
         # Initialize compiler stages
         self.frontend = None
         self.backend = self._create_backend(target)
-        base_metadata = self._base_compile_metadata()
-        joint_tiling_schedule_enabled = (
-            self._resolve_joint_tiling_schedule_contract_enabled(base_metadata)
-        )
-        self.pass_manager = self._build_pass_manager(
-            enable_pipeline_scheduler=(
-                True
-                if joint_tiling_schedule_enabled
-                else self._resolve_pipeline_scheduler_enabled(
-                    base_metadata,
-                    explicit_enable_pipeline_scheduler=None,
-                )
-            ),
-            enable_joint_tiling_schedule_contract=joint_tiling_schedule_enabled,
-        )
+        self.pass_manager = self._build_pass_manager()
 
     def compile(
         self,
@@ -165,7 +147,6 @@ class Compiler:
         max_memory: str = None,
         memory_strategy: str = None,
         cost_model_cli_command: str | list[str] | None = None,
-        enable_pipeline_scheduler: bool | None = None,
         metadata: Mapping[str, Any] | None = None,
     ) -> None:
         """Compile an ONNX model to C code.
@@ -177,7 +158,6 @@ class Compiler:
             max_memory: Maximum fast memory size (e.g., "256K", "1M", "16MB").
             memory_strategy: Memory allocation strategy (overrides constructor).
             cost_model_cli_command: Optional external CLI command for schedule-step cost estimation.
-            enable_pipeline_scheduler: Override for the O3 pipeline scheduler path.
             metadata: Additional compile-context metadata for this invocation.
         """
         # Parse max_memory if provided
@@ -228,58 +208,20 @@ class Compiler:
             ctx.metadata["memory_strategy"] = strategy
             self.console.print(f"  Memory strategy: {strategy}")
 
-        joint_tiling_schedule_enabled = (
-            self._resolve_joint_tiling_schedule_contract_enabled(ctx.metadata)
-        )
+        # O3 always uses joint tiling schedule
+        joint_tiling_schedule_enabled = self.opt_level >= 3
         ctx.metadata["enable_joint_tiling_schedule_contract"] = (
             joint_tiling_schedule_enabled
         )
         ctx.metadata["joint_tiling_schedule_contract_enabled"] = (
             joint_tiling_schedule_enabled
         )
-        scheduler_enabled = (
-            True
-            if joint_tiling_schedule_enabled
-            else self._resolve_pipeline_scheduler_enabled(
-                ctx.metadata,
-                explicit_enable_pipeline_scheduler=None,
-            )
-        )
-        if not joint_tiling_schedule_enabled:
-            scheduler_enabled = self._resolve_pipeline_scheduler_enabled(
-                ctx.metadata,
-                explicit_enable_pipeline_scheduler=enable_pipeline_scheduler,
-            )
-        ctx.metadata["pipeline_scheduler_enabled"] = scheduler_enabled
-        if self.opt_level >= 3 and not scheduler_enabled:
-            fallback_reason = self._pipeline_scheduler_fallback_reason(
-                ctx.metadata,
-                explicit_enable_pipeline_scheduler=enable_pipeline_scheduler,
-            )
-            ctx.metadata["pipeline_scheduler_fallback"] = fallback_reason
-            set_pipeline_schedule_result(
-                ctx,
-                PipelineScheduleResult(
-                    feasible=False,
-                    solver_name="disabled",
-                    diagnostics={
-                        "strategy": "serial",
-                        "reason": (
-                            "pipeline_scheduler_disabled"
-                            if fallback_reason == "legacy_o3_disabled"
-                            else "pipeline_scheduler_default_off"
-                        ),
-                    },
-                ),
-            )
+        ctx.metadata["pipeline_scheduler_enabled"] = joint_tiling_schedule_enabled
 
         # Stage 3: Run optimization passes
         # Re-register passes for current opt_level to avoid accumulation
         # when the same Compiler instance is reused across multiple compilations
-        self.pass_manager = self._build_pass_manager(
-            enable_pipeline_scheduler=scheduler_enabled,
-            enable_joint_tiling_schedule_contract=joint_tiling_schedule_enabled,
-        )
+        self.pass_manager = self._build_pass_manager()
 
         try:
             if self.pass_manager.passes:
@@ -288,7 +230,6 @@ class Compiler:
                 ):
                     self.pass_manager.run(ctx)
                     self._validate_joint_tiling_schedule_result(ctx)
-                    self._validate_scheduled_o3_result(ctx)
                     self.console.print(
                         f"✓ Applied {len(self.pass_manager.applied_passes)} passes"
                     )
@@ -372,128 +313,25 @@ class Compiler:
         artifacts.metadata["target"] = self.target
         artifacts.metadata["opt_level"] = self.opt_level
 
-    def _build_pass_manager(
-        self,
-        *,
-        enable_pipeline_scheduler: bool,
-        enable_joint_tiling_schedule_contract: bool,
-    ) -> PassManager:
+    def _build_pass_manager(self) -> PassManager:
         """Build a fresh pass manager for the requested optimization path."""
         pass_manager = PassManager()
-        for pass_obj in self._get_passes(
-            enable_pipeline_scheduler=enable_pipeline_scheduler,
-            enable_joint_tiling_schedule_contract=enable_joint_tiling_schedule_contract,
-        ):
+        for pass_obj in self._get_passes():
             pass_manager.register(pass_obj)
         return pass_manager
 
-    def _get_passes(
-        self,
-        *,
-        enable_pipeline_scheduler: bool,
-        enable_joint_tiling_schedule_contract: bool,
-    ):
+    def _get_passes(self):
         """Return the pass sequence for the current optimization level."""
         if self.opt_level < 3:
             return PassManager.get_default_passes(self.opt_level)
-        if enable_joint_tiling_schedule_contract:
-            return PassManager.get_joint_tiling_schedule_o3_passes()
-        if enable_pipeline_scheduler:
-            return PassManager.get_scheduled_o3_passes()
-        return PassManager.get_conservative_o3_passes()
+        return PassManager.get_joint_tiling_schedule_o3_passes()
 
     def _base_compile_metadata(self) -> dict[str, Any]:
         """Return normalized default metadata for a compile invocation."""
         metadata = dict(self.default_metadata)
         if self.cost_model_cli_command is not None:
             metadata["cost_model_cli_command"] = self.cost_model_cli_command
-        if self.enable_pipeline_scheduler is not None:
-            metadata["enable_pipeline_scheduler"] = self.enable_pipeline_scheduler
         return metadata
-
-    def _resolve_pipeline_scheduler_enabled(
-        self,
-        metadata: Mapping[str, Any],
-        *,
-        explicit_enable_pipeline_scheduler: bool | None,
-    ) -> bool:
-        """Resolve the scheduler-path toggle with conservative defaults."""
-        if explicit_enable_pipeline_scheduler is not None:
-            return bool(explicit_enable_pipeline_scheduler)
-        if "enable_pipeline_scheduler" in metadata:
-            return bool(metadata["enable_pipeline_scheduler"])
-        if "disable_pipeline_scheduler" in metadata:
-            return not bool(metadata["disable_pipeline_scheduler"])
-        return self.opt_level >= 3
-
-    def _resolve_joint_tiling_schedule_contract_enabled(
-        self,
-        metadata: Mapping[str, Any],
-    ) -> bool:
-        """Resolve the opt-in joint-contract O3 path toggle."""
-        if self.opt_level < 3:
-            return False
-        return bool(metadata.get("enable_joint_tiling_schedule_contract"))
-
-    def _pipeline_scheduler_fallback_reason(
-        self,
-        metadata: Mapping[str, Any],
-        *,
-        explicit_enable_pipeline_scheduler: bool | None,
-    ) -> str:
-        """Return a deterministic label describing why the legacy path ran."""
-        if explicit_enable_pipeline_scheduler is False:
-            return "legacy_o3_disabled"
-        if explicit_enable_pipeline_scheduler is True:
-            return "legacy_o3_default"
-        if "enable_pipeline_scheduler" in metadata:
-            return (
-                "legacy_o3_default"
-                if bool(metadata["enable_pipeline_scheduler"])
-                else "legacy_o3_disabled"
-            )
-        if bool(metadata.get("disable_pipeline_scheduler")):
-            return "legacy_o3_disabled"
-        return "legacy_o3_default"
-
-    def _validate_scheduled_o3_result(self, ctx: CompileContext) -> None:
-        """Require O3 scheduled compilation to produce planned or imported schedule metadata."""
-        if self.opt_level < 3:
-            return
-        if not bool(ctx.metadata.get("pipeline_scheduler_enabled")):
-            return
-
-        problem = ctx.pipeline_schedule_problem
-        result = ctx.pipeline_schedule_result
-        scheduled_memory_plan = ctx.metadata.get("scheduled_memory_plan")
-        if (
-            problem is not None
-            and result is not None
-            and result.feasible
-            and scheduled_memory_plan is not None
-        ):
-            return
-
-        reason = "missing_scheduled_memory_plan"
-        if result is None:
-            reason = "missing_schedule_result"
-        if result is not None:
-            diagnostic_reason = result.diagnostics.get("reason")
-            if isinstance(diagnostic_reason, str) and diagnostic_reason:
-                reason = diagnostic_reason
-            elif result.solver_name:
-                reason = result.solver_name
-            elif not result.feasible:
-                reason = "infeasible_schedule_result"
-            elif scheduled_memory_plan is None:
-                reason = "missing_scheduled_memory_plan"
-        elif problem is None:
-            reason = "missing_schedule_problem"
-
-        raise RuntimeError(
-            "O3 scheduled pipeline path failed "
-            f"({reason})."
-        )
 
     def _validate_joint_tiling_schedule_result(self, ctx: CompileContext) -> None:
         """Require the joint-contract O3 path to yield a solution or structured failure."""

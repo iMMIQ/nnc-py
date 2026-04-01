@@ -129,39 +129,6 @@ class PassManager:
         return []
 
     @classmethod
-    def get_scheduled_o3_passes(cls) -> List[PassBase]:
-        """Get the explicit schedule-driven O3 compile path."""
-        from nnc_py.passes.dead_code_elimination import DeadCodeEliminationPass
-        from nnc_py.passes.dominator_fusion import DominatorFusionPass
-        from nnc_py.passes.identity_elimination import IdentityEliminationPass
-        from nnc_py.passes.layout_planning import LayoutPlanningPass
-        from nnc_py.passes.liveness import LivenessAnalysisPass
-        from nnc_py.passes.pattern_fusion import PatternFusionPass
-        from nnc_py.passes.scheduled_memory_expansion import ScheduledMemoryExpansionPass
-        from nnc_py.passes.scheduled_memory_planning import ScheduledMemoryPlanningPass
-        from nnc_py.passes.pipeline_scheduling import PipelineSchedulingPass
-        from nnc_py.passes.pipeline_step_lowering import PipelineStepLoweringPass
-        from nnc_py.passes.prepack_lowering import PrepackLoweringPass
-        from nnc_py.passes.schedule_analysis import ScheduleAnalysisPass
-        from nnc_py.passes.tiled_lowering import TiledLoweringPass
-
-        return [
-            IdentityEliminationPass(),
-            DeadCodeEliminationPass(),
-            PatternFusionPass(),
-            PrepackLoweringPass(),
-            DominatorFusionPass(),
-            ScheduleAnalysisPass(),
-            LayoutPlanningPass(),
-            TiledLoweringPass(),
-            PipelineStepLoweringPass(),
-            ScheduledMemoryExpansionPass(),
-            PipelineSchedulingPass(),
-            LivenessAnalysisPass(),
-            ScheduledMemoryPlanningPass(),
-        ]
-
-    @classmethod
     def get_joint_tiling_schedule_o3_passes(cls) -> List[PassBase]:
         """Get the O3 path that materializes the joint tiling/schedule contract."""
         from nnc_py.passes.dead_code_elimination import DeadCodeEliminationPass
@@ -197,8 +164,3 @@ class PassManager:
             LivenessAnalysisPass(),
             JointScheduleMemoryImportPass(),
         ]
-
-    @classmethod
-    def get_conservative_o3_passes(cls) -> List[PassBase]:
-        """Get the conservative non-scheduled O3 compile path."""
-        return cls.get_default_passes(3)

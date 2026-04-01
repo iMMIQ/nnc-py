@@ -83,10 +83,7 @@ def test_x86_backend_serial_contract(tmp_path):
 
 
 def test_x86_backend_scheduled_contract(tmp_path):
-    _, output_dir = _compile_model(
-        tmp_path,
-        enable_pipeline_scheduler=True,
-    )
+    _, output_dir = _compile_model(tmp_path)
 
     model_c = _read(output_dir / "model.c")
 

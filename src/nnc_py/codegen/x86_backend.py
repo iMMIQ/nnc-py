@@ -154,11 +154,6 @@ class X86Backend(BackendBase):
         node_comments: dict[str, list[str]] = {}
 
         if schedule_result is None:
-            fallback_reason = ctx.metadata.get("pipeline_scheduler_fallback")
-            if fallback_reason is not None:
-                summary_lines.append(
-                    f"fallback={self._sanitize_c_comment_text(str(fallback_reason))}"
-                )
             summary_lines.append(
                 self._build_memory_plan_summary_line(
                     alloc_plan,

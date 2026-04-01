@@ -72,11 +72,6 @@ def main():
     is_flag=True,
     help="Enable debug mode: dump intermediate tensor outputs for comparison with ONNX Runtime",
 )
-@click.option(
-    "--enable-pipeline-scheduler/--disable-pipeline-scheduler",
-    default=None,
-    help="Override the O3 pipeline scheduler path. O3 defaults to the scheduled path.",
-)
 def compile(
     onnx_model,
     output,
@@ -88,7 +83,6 @@ def compile(
     memory_strategy,
     enable_constant_folding,
     debug,
-    enable_pipeline_scheduler,
 ):
     """Compile an ONNX model to C code.
 
@@ -104,14 +98,6 @@ def compile(
     console.print(
         f"[bold blue]Memory Strategy[/bold blue]: {memory_strategy if memory_strategy is not None else 'auto'}"
     )
-    scheduler_label = (
-        "enabled"
-        if enable_pipeline_scheduler is True
-        else "disabled"
-        if enable_pipeline_scheduler is False
-        else "auto"
-    )
-    console.print(f"[bold blue]Pipeline Scheduler[/bold blue]: {scheduler_label}")
     console.print(f"[bold blue]Constant Folding[/bold blue]: {'enabled' if enable_constant_folding else 'disabled'}")
     console.print(f"[bold blue]Debug Mode[/bold blue]: {'enabled' if debug else 'disabled'}")
     if max_memory:
@@ -140,7 +126,6 @@ def compile(
             entry_point=entry_name,
             max_memory=max_memory,
             memory_strategy=memory_strategy,
-            enable_pipeline_scheduler=enable_pipeline_scheduler,
         )
 
     except Exception as e:

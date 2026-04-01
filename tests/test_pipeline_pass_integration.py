@@ -1,4 +1,4 @@
-"""Integration tests for the O3 pipeline scheduling path and strict scheduler mode."""
+"""Integration tests for the O3 joint tiling schedule compile path."""
 
 from __future__ import annotations
 
@@ -75,8 +75,6 @@ def _compile_graph(
     metadata: dict[str, object] | None = None,
     cost_model_cli_command: list[str] | None = None,
     max_memory: str | None = None,
-    enable_pipeline_scheduler: bool | None = None,
-    relax_scheduled_validation: bool = False,
 ):
     backend = _CapturingBackend()
     compiler = Compiler(
@@ -91,30 +89,12 @@ def _compile_graph(
         "_write_output",
         lambda artifacts, output_dir, entry_point: None,
     )
-    if relax_scheduled_validation:
-        from nnc_py.ir.pipeline_schedule import set_pipeline_schedule_result
-        from nnc_py.passes.pipeline_scheduling import PipelineSchedulingPass
-
-        monkeypatch.setattr(
-            compiler,
-            "_validate_scheduled_o3_result",
-            lambda ctx: None,
-        )
-        monkeypatch.setattr(
-            PipelineSchedulingPass,
-            "_execute",
-            lambda self, ctx: set_pipeline_schedule_result(
-                ctx,
-                self._scheduler.solve(ctx.pipeline_schedule_problem),
-            ),
-        )
 
     compiler.compile(
         "model.onnx",
         str(tmp_path),
         metadata=metadata,
         max_memory=max_memory,
-        enable_pipeline_scheduler=enable_pipeline_scheduler,
     )
 
     assert backend.ctx is not None
@@ -148,34 +128,6 @@ def test_o3_default_pass_order_uses_tile_aware_v3_without_scheduler_or_legacy_sp
     assert names.index("LivenessAnalysisPass") < names.index("MemoryPlanningPassV3")
 
 
-def test_o3_conservative_helper_excludes_legacy_spill_pass():
-    names = [
-        pass_obj.__class__.__name__
-        for pass_obj in PassManager.get_conservative_o3_passes()
-    ]
-
-    assert "MemoryPlanningPassV3" in names
-    assert "SpillAnalysisPass" not in names
-
-
-def test_o3_scheduled_pass_order_requires_explicit_helper():
-    names = [
-        pass_obj.__class__.__name__
-        for pass_obj in PassManager.get_scheduled_o3_passes()
-    ]
-
-    assert names.index("ScheduleAnalysisPass") < names.index("LayoutPlanningPass")
-    assert names.index("LayoutPlanningPass") < names.index("TiledLoweringPass")
-    assert names.index("TiledLoweringPass") < names.index("PipelineStepLoweringPass")
-    assert names.index("PipelineStepLoweringPass") < names.index("ScheduledMemoryExpansionPass")
-    assert names.index("ScheduledMemoryExpansionPass") < names.index("PipelineSchedulingPass")
-    assert names.index("PipelineSchedulingPass") < names.index("LivenessAnalysisPass")
-    assert names.index("LivenessAnalysisPass") < names.index("ScheduledMemoryPlanningPass")
-    assert "ScheduledMemoryExpansionPass" in names
-    assert "MemoryPlanningPassV4" not in names
-    assert "SpillAnalysisPass" not in names
-
-
 def test_o3_joint_tiling_schedule_pass_order_runs_materialization_before_liveness():
     names = [
         pass_obj.__class__.__name__
@@ -195,7 +147,7 @@ def test_o3_joint_tiling_schedule_pass_order_runs_materialization_before_livenes
     assert "ScheduledMemoryPlanningPass" not in names
 
 
-def test_o3_compile_defaults_to_scheduled_path(monkeypatch, tmp_path):
+def test_o3_compile_defaults_to_joint_tiling_schedule_path(monkeypatch, tmp_path):
     command = ["external-cost-model", "--stdio"]
 
     ctx = _compile_graph(
@@ -210,119 +162,6 @@ def test_o3_compile_defaults_to_scheduled_path(monkeypatch, tmp_path):
     assert ctx.pipeline_schedule_problem is not None
     assert ctx.pipeline_schedule_result is not None
     assert ctx.pipeline_schedule_result.feasible is True
-    assert ctx.pipeline_schedule_result.solver_name == "list"
-    assert "gemm0" in ctx.metadata.get("node_execution_plans", {})
-    assert "scheduled_memory_plan" in ctx.metadata
-    assert "memory_plan" not in ctx.metadata
-    assert "spill_plan" not in ctx.metadata
-    assert ctx.metadata["memory_allocation_plan"].strategy_name == "schedule_time_v4"
-
-
-def test_explicitly_enabling_scheduler_path_populates_schedule_metadata(monkeypatch, tmp_path):
-    command = ["external-cost-model", "--stdio"]
-
-    ctx = _compile_graph(
-        monkeypatch,
-        tmp_path,
-        cost_model_cli_command=command,
-        enable_pipeline_scheduler=True,
-    )
-
-    assert ctx.metadata["pipeline_scheduler_enabled"] is True
-    assert "pipeline_scheduler_fallback" not in ctx.metadata
-    assert ctx.metadata["cost_model_cli_command"] == command
-    assert ctx.pipeline_schedule_problem is not None
-    assert ctx.pipeline_schedule_problem.metadata["origin"] == "pipeline_step_lowering"
-    assert ctx.pipeline_schedule_result is not None
-    assert ctx.pipeline_schedule_result.solver_name == "list"
-    assert "scheduled_memory_plan" in ctx.metadata
-    assert "memory_plan" not in ctx.metadata
-    assert "spill_plan" not in ctx.metadata
-    assert ctx.metadata["memory_allocation_plan"].strategy_name == "schedule_time_v4"
-
-
-def test_scheduled_compile_with_max_memory_records_expansion_output(monkeypatch, tmp_path):
-    ctx = _compile_graph(
-        monkeypatch,
-        tmp_path,
-        max_memory="80",
-        relax_scheduled_validation=True,
-    )
-
-    problem = ctx.pipeline_schedule_problem
-    assert problem is not None
-    assert problem.metadata["scheduled_memory_expansion"]["max_memory"] == 80
-    assert problem.metadata["scheduled_memory_expansion"]["spilled_values"]
-    assert any(step.id.endswith(".spill0") for step in problem.steps)
-    assert any(step.id.endswith(".reload0") for step in problem.steps)
-    assert "memory_plan" not in ctx.metadata
-    assert "spill_plan" not in ctx.metadata
-
-
-def test_disabling_scheduler_path_keeps_fallback_state_explicit(monkeypatch, tmp_path):
-    ctx = _compile_graph(
-        monkeypatch,
-        tmp_path,
-        metadata={"disable_pipeline_scheduler": True},
-    )
-
-    assert ctx.metadata["pipeline_scheduler_enabled"] is False
-    assert ctx.pipeline_schedule_problem is None
-    assert ctx.pipeline_schedule_result is not None
-    assert ctx.pipeline_schedule_result.feasible is False
-    assert ctx.pipeline_schedule_result.diagnostics["strategy"] == "serial"
-    assert ctx.pipeline_schedule_result.diagnostics["reason"] == "pipeline_scheduler_disabled"
-    assert ctx.metadata["pipeline_scheduler_fallback"] == "legacy_o3_disabled"
-    assert ctx.metadata["memory_allocation_plan"].strategy_name == "tile_regions_v3"
-
-
-def test_disabling_scheduler_with_max_memory_uses_legacy_compatible_fallback(
-    monkeypatch,
-    tmp_path,
-):
-    ctx = _compile_graph(
-        monkeypatch,
-        tmp_path,
-        metadata={"disable_pipeline_scheduler": True},
-        max_memory="64",
-    )
-
-    assert ctx.metadata["pipeline_scheduler_enabled"] is False
-    assert ctx.pipeline_schedule_problem is None
-    assert ctx.pipeline_schedule_result is not None
-    assert ctx.pipeline_schedule_result.diagnostics["strategy"] == "serial"
-    assert ctx.metadata["pipeline_scheduler_fallback"] == "legacy_o3_disabled"
-    assert ctx.metadata["memory_allocation_plan"].strategy_name == "tile_regions_v3"
-
-
-def test_compiler_default_o3_uses_scheduled_o3_helper(
-    monkeypatch,
-    tmp_path,
-):
-    backend = _CapturingBackend()
-    compiler = Compiler(target="x86", opt_level=3)
-    compiler.frontend = SimpleNamespace(load=lambda _: _make_gemm_graph())
-    compiler.backend = backend
-    monkeypatch.setattr(
-        compiler,
-        "_write_output",
-        lambda artifacts, output_dir, entry_point: None,
-    )
-    monkeypatch.setattr(
-        PassManager, "get_default_passes", classmethod(lambda cls, opt_level: [])
-    )
-    monkeypatch.setattr(
-        PassManager,
-        "get_scheduled_o3_passes",
-        classmethod(lambda cls: []),
-    )
-
-    compiler.compile(
-        "model.onnx",
-        str(tmp_path),
-    )
-
-    assert backend.ctx is not None
 
 
 def test_compiler_enables_joint_tiling_schedule_contract_via_metadata(monkeypatch, tmp_path):
@@ -332,7 +171,6 @@ def test_compiler_enables_joint_tiling_schedule_contract_via_metadata(monkeypatc
         metadata={"enable_joint_tiling_schedule_contract": True},
     )
 
-    assert ctx.metadata["enable_joint_tiling_schedule_contract"] is True
     assert ctx.metadata["pipeline_scheduler_enabled"] is True
     assert ctx.joint_tiling_schedule_problem is not None
     assert ctx.joint_tiling_schedule_solution is not None
@@ -454,43 +292,3 @@ def test_joint_tiling_schedule_problem_failure_preserves_structured_category(
     assert getattr(exc_info.value, "error_category", None) == "invalid_solution"
     assert getattr(exc_info.value, "failure_status", None) == "invalid_problem"
     assert "synthetic_invalid_problem" in str(exc_info.value)
-
-
-def test_o3_default_scheduler_failure_does_not_fallback(monkeypatch, tmp_path):
-    backend = _CapturingBackend()
-    compiler = Compiler(target="x86", opt_level=3)
-    compiler.frontend = SimpleNamespace(load=lambda _: _make_gemm_graph())
-    compiler.backend = backend
-    monkeypatch.setattr(
-        compiler,
-        "_write_output",
-        lambda artifacts, output_dir, entry_point: None,
-    )
-
-    class _FailingScheduledPass:
-        @property
-        def name(self) -> str:
-            return "FailingScheduledPass"
-
-        def run(self, ctx):
-            from nnc_py.ir.pipeline_schedule import PipelineScheduleResult, set_pipeline_schedule_result
-
-            set_pipeline_schedule_result(
-                ctx,
-                PipelineScheduleResult(
-                    feasible=False,
-                    solver_name="test",
-                    diagnostics={"strategy": "serial", "reason": "synthetic_failure"},
-                ),
-            )
-
-    monkeypatch.setattr(
-        PassManager,
-        "get_scheduled_o3_passes",
-        classmethod(lambda cls: [_FailingScheduledPass()]),
-    )
-
-    with pytest.raises(RuntimeError, match="scheduled pipeline path") as exc_info:
-        compiler.compile("model.onnx", str(tmp_path))
-
-    assert "disable-pipeline-scheduler" not in str(exc_info.value)

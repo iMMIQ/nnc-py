@@ -214,7 +214,6 @@ class TestTiledRuntimeCorrectness(BaseSnapshotTest):
             compiler.compile(
                 str(model_path),
                 tmpdir,
-                enable_pipeline_scheduler=False,
             )
             model_c = (tmpdir_path / "model.c").read_text()
             tensors_c = (tmpdir_path / "tensors.c").read_text()
