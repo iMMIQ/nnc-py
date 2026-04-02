@@ -6,10 +6,8 @@ This module provides utilities to:
 3. Compare results and report mismatches
 """
 
-import json
-import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import numpy as np
 import onnx
@@ -26,9 +24,9 @@ class DebugOutputParser:
             debug_file: Path to the NNC debug output file.
         """
         self.debug_file = Path(debug_file)
-        self.outputs: Dict[str, Dict[str, Any]] = {}
+        self.outputs: dict[str, dict[str, Any]] = {}
 
-    def parse(self) -> Dict[str, Dict[str, Any]]:
+    def parse(self) -> dict[str, dict[str, Any]]:
         """Parse the debug output file.
 
         Returns:
@@ -48,7 +46,7 @@ class DebugOutputParser:
         collecting_data = False
         data_values = []
 
-        with open(self.debug_file, "r") as f:
+        with open(self.debug_file) as f:
             for line in f:
                 line = line.strip()
 
@@ -72,7 +70,6 @@ class DebugOutputParser:
                 elif line.startswith("DIM"):
                     parts = line.split()
                     # Format: DIM idx value
-                    dim_idx = int(parts[1])
                     dim_val = int(parts[2])
                     current_shape.append(dim_val)
 
@@ -123,7 +120,7 @@ class ONNXRuntimeRunner:
         # Get all intermediate layer names
         self.intermediate_outputs = self._get_intermediate_outputs()
 
-    def _get_intermediate_outputs(self) -> List[str]:
+    def _get_intermediate_outputs(self) -> list[str]:
         """Get names of all intermediate output tensors.
 
         Returns:
@@ -142,7 +139,7 @@ class ONNXRuntimeRunner:
         intermediate = [o for o in outputs if o not in model_outputs]
         return intermediate
 
-    def get_input_info(self) -> List[Tuple[str, List[int]]]:
+    def get_input_info(self) -> list[tuple[str, list[int]]]:
         """Get input tensor names and shapes.
 
         Returns:
@@ -163,9 +160,9 @@ class ONNXRuntimeRunner:
 
     def run_with_intermediates(
         self,
-        input_data: Optional[Dict[str, np.ndarray]] = None,
+        input_data: dict[str, np.ndarray] | None = None,
         test_pattern: bool = True,
-    ) -> Dict[str, np.ndarray]:
+    ) -> dict[str, np.ndarray]:
         """Run the model and capture all intermediate outputs.
 
         Args:
@@ -193,9 +190,9 @@ class ONNXRuntimeRunner:
 
         # Need to expose intermediate outputs
         # Use shape inference to get type information for intermediate tensors
-        from copy import deepcopy
-        import tempfile
         import os
+        import tempfile
+        from copy import deepcopy
 
         model_copy = deepcopy(self.model)
 
@@ -229,7 +226,7 @@ class ONNXRuntimeRunner:
             finally:
                 try:
                     os.unlink(tmp_path)
-                except:
+                except OSError:
                     pass
 
 
@@ -263,7 +260,7 @@ class DebugComparator:
         # Setup ONNX runner
         self.onnx_runner = ONNXRuntimeRunner(self.onnx_model)
 
-    def compare(self) -> Dict[str, Any]:
+    def compare(self) -> dict[str, Any]:
         """Compare NNC and ONNX Runtime outputs.
 
         Returns:
@@ -327,7 +324,7 @@ class DebugComparator:
 
         return results
 
-    def print_report(self, results: Dict[str, Any]) -> None:
+    def print_report(self, results: dict[str, Any]) -> None:
         """Print comparison report.
 
         Args:

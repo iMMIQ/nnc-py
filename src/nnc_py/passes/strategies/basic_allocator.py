@@ -13,7 +13,6 @@ Key properties:
 """
 
 from dataclasses import dataclass
-from typing import Dict, List, Set, Optional
 
 from nnc_py.ir.context import CompileContext
 from nnc_py.passes.liveness import TensorLiveness
@@ -22,9 +21,9 @@ from nnc_py.passes.memory_strategy import (
     AllocationStrategy,
     MemoryAllocationPlan,
     MemoryAllocationStrategy,
-    TensorAllocation,
-    SpillPoint,
     ReloadPoint,
+    SpillPoint,
+    TensorAllocation,
 )
 
 
@@ -63,18 +62,17 @@ class BasicAllocator(MemoryAllocationStrategy):
     def allocate(
         self,
         ctx: CompileContext,
-        liveness_map: Dict[str, TensorLiveness],
-        max_memory: Optional[int] = None,
+        liveness_map: dict[str, TensorLiveness],
+        max_memory: int | None = None,
     ) -> MemoryAllocationPlan:
         """Execute basic allocation."""
         if max_memory is None:
             max_memory = float("inf")
 
         nodes = ctx.graph.topological_sort()
-        node_index = {n.name: i for i, n in enumerate(nodes)}
 
         # Get tensor sizes
-        tensor_sizes: Dict[str, int] = {}
+        tensor_sizes: dict[str, int] = {}
         for tensor_name in liveness_map.keys():
             tensor = ctx.graph.get_tensor(tensor_name)
             if tensor:
@@ -83,19 +81,19 @@ class BasicAllocator(MemoryAllocationStrategy):
         # Track state for sequential allocation
         # Each tensor gets a unique offset within the buffer
         current_offset = 0
-        tensor_offsets: Dict[str, int] = {}
+        tensor_offsets: dict[str, int] = {}
 
         # Track allocations
-        tensor_allocations: Dict[str, TensorAllocation] = {}
-        buffers: List[MemoryBuffer] = []
-        spill_points: List[SpillPoint] = []
-        reload_points: List[ReloadPoint] = []
+        tensor_allocations: dict[str, TensorAllocation] = {}
+        buffers: list[MemoryBuffer] = []
+        spill_points: list[SpillPoint] = []
+        reload_points: list[ReloadPoint] = []
         spill_bytes = 0
         reload_bytes = 0
 
         # Track which tensors are in slow memory (for future spill/reload support)
-        in_slow_memory: Set[str] = set()
-        slow_memory_offsets: Dict[str, int] = {}
+        in_slow_memory: set[str] = set()
+        slow_memory_offsets: dict[str, int] = {}
         slow_offset = 0
 
         def align_offset(offset: int, alignment: int) -> int:

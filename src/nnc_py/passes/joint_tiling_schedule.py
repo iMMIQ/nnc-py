@@ -2,17 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-from pathlib import Path
 import shlex
 import sys
+from collections.abc import Iterable
+from pathlib import Path
 
 from nnc_py.ir.context import CompileContext
 from nnc_py.ir.joint_tiling_schedule import (
     JOINT_TILING_SCHEDULE_FAILURE_METADATA_KEY,
     JOINT_TILING_SCHEDULE_SOLUTION_METADATA_KEY,
     JointFailure,
-    JointProblem,
     JointSolution,
     set_joint_tiling_schedule_failure,
     set_joint_tiling_schedule_problem,

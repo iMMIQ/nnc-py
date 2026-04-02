@@ -1,18 +1,16 @@
 """Dominator-based operator fusion pass."""
 
 import logging
-from typing import Dict, Set, List, Optional
 
 from nnc_py.ir.context import CompileContext
 from nnc_py.ir.graph import Graph
-from nnc_py.ir.node import Node, OpType
-from nnc_py.ir.types import DataType
+from nnc_py.ir.node import Node
+from nnc_py.ir.op_pattern import OpPatternKind, get_op_pattern_kind
 from nnc_py.passes.base import PassBase
-from nnc_py.passes.indexed_forward_graph import IndexedForwardGraph
 from nnc_py.passes.dominator_tree import DominatorTree
 from nnc_py.passes.fusion_groups_enhanced import EnhancedGroupArena
+from nnc_py.passes.indexed_forward_graph import IndexedForwardGraph
 from nnc_py.passes.path_validator import PathValidator
-from nnc_py.ir.op_pattern import get_op_pattern_kind, OpPatternKind
 
 logger = logging.getLogger(__name__)
 
@@ -228,7 +226,7 @@ class DominatorFusionPass(PassBase):
         total_groups = len(groups)
         fused_groups = sum(1 for nodes in groups.values() if len(nodes) > 1)
 
-        logger.info(f"Fusion Summary:")
+        logger.info("Fusion Summary:")
         logger.info(f"  - Total groups created: {total_groups}")
         logger.info(f"  - Fused groups: {fused_groups}")
         logger.info(f"  - Single-node groups: {total_groups - fused_groups}")

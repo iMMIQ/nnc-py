@@ -4,7 +4,6 @@ This pass fuses compatible operator patterns (e.g., Conv+ReLU, Add+Activation)
 into single fused operations for improved performance.
 """
 
-from typing import Dict, Optional, Set
 
 from nnc_py.ir.context import CompileContext
 from nnc_py.ir.graph import Graph
@@ -36,14 +35,14 @@ class OperatorFusionPass(PassBase):
         graph = ctx.graph
 
         # Keep track of fused nodes to avoid double-processing
-        fused_nodes: Set[str] = set()
+        fused_nodes: set[str] = set()
 
         # Get nodes in topological order for deterministic processing
         nodes = graph.topological_sort()
 
         # Track fusion statistics
         fusion_count = 0
-        patterns_found: Dict[str, int] = {}
+        patterns_found: dict[str, int] = {}
 
         for node in nodes:
             # Skip already fused nodes
@@ -66,8 +65,8 @@ class OperatorFusionPass(PassBase):
         self,
         graph: Graph,
         consumer: Node,
-        fused_nodes: Set[str],
-    ) -> Optional[str]:
+        fused_nodes: set[str],
+    ) -> str | None:
         """Try to fuse the consumer node with its producer.
 
         Args:
@@ -119,7 +118,7 @@ class OperatorFusionPass(PassBase):
         graph: Graph,
         conv: Node,
         relu: Node,
-        fused_nodes: Set[str],
+        fused_nodes: set[str],
     ) -> str:
         """Fuse Conv + ReLU into FUSED_CONV_RELU."""
         # Create fused node
@@ -151,7 +150,7 @@ class OperatorFusionPass(PassBase):
         graph: Graph,
         conv: Node,
         sigmoid: Node,
-        fused_nodes: Set[str],
+        fused_nodes: set[str],
     ) -> str:
         """Fuse Conv + Sigmoid into FUSED_CONV_SIGMOID."""
         fused_node = Node(
@@ -179,7 +178,7 @@ class OperatorFusionPass(PassBase):
         graph: Graph,
         add: Node,
         relu: Node,
-        fused_nodes: Set[str],
+        fused_nodes: set[str],
     ) -> str:
         """Fuse Add + ReLU into FUSED_ADD_RELU."""
         fused_node = Node(
@@ -207,7 +206,7 @@ class OperatorFusionPass(PassBase):
         graph: Graph,
         add: Node,
         sigmoid: Node,
-        fused_nodes: Set[str],
+        fused_nodes: set[str],
     ) -> str:
         """Fuse Add + Sigmoid into FUSED_ADD_SIGMOID."""
         fused_node = Node(
@@ -237,13 +236,13 @@ class OperatorFusionPass(PassBase):
             new_outputs = [new_tensor if t == old_tensor else t for t in graph.outputs]
             graph.outputs = new_outputs
 
-    def _log_summary(self, fusion_count: int, patterns_found: Dict[str, int], node_count: int) -> None:
+    def _log_summary(self, fusion_count: int, patterns_found: dict[str, int], node_count: int) -> None:
         """Log a summary of fusion results."""
         print(f"\n{'='*60}")
-        print(f"Operator Fusion Summary")
+        print("Operator Fusion Summary")
         print(f"{'='*60}")
         print(f"Total fusions: {fusion_count}")
-        print(f"Patterns found:")
+        print("Patterns found:")
         for pattern, count in sorted(patterns_found.items()):
             print(f"  - {pattern}: {count}")
         print(f"Nodes after fusion: {node_count}")

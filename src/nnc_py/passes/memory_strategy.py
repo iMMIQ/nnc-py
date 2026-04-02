@@ -4,13 +4,18 @@ This module provides a pluggable interface for memory allocation algorithms,
 allowing different strategies to be selected at runtime.
 """
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, List, Set, Optional, Union, Type
+from typing import TYPE_CHECKING
 
 from nnc_py.ir.context import CompileContext
 from nnc_py.passes.memory_plan import MemoryBuffer
+
+if TYPE_CHECKING:
+    from nnc_py.passes.liveness import TensorLiveness
 
 
 class AllocationStrategy(Enum):
@@ -29,8 +34,8 @@ class TensorAllocation:
 
     # For strategies supporting spill
     is_spilled: bool = False
-    spill_after: Optional[int] = None           # Node index to spill after
-    reload_before: Optional[List[int]] = None   # Node indices to reload before
+    spill_after: int | None = None           # Node index to spill after
+    reload_before: list[int] | None = None   # Node indices to reload before
 
 
 @dataclass
@@ -91,24 +96,24 @@ class MemoryAllocationPlan:
     num_buffers: int = 0                  # Number of buffers/colors
 
     # Buffer definitions (each buffer = a color in graph coloring)
-    buffers: List[MemoryBuffer] = field(default_factory=list)
+    buffers: list[MemoryBuffer] = field(default_factory=list)
 
     # Per-tensor allocation info
-    tensor_allocations: Dict[str, TensorAllocation] = field(default_factory=dict)
-    tensor_to_buffer: Dict[str, int] = field(default_factory=dict)
+    tensor_allocations: dict[str, TensorAllocation] = field(default_factory=dict)
+    tensor_to_buffer: dict[str, int] = field(default_factory=dict)
 
     # Spill information (empty if no spill)
-    spill_points: List[SpillPoint] = field(default_factory=list)
-    reload_points: List[ReloadPoint] = field(default_factory=list)
+    spill_points: list[SpillPoint] = field(default_factory=list)
+    reload_points: list[ReloadPoint] = field(default_factory=list)
     spill_bytes: int = 0
     reload_bytes: int = 0
     total_transfer_bytes: int = 0
-    move_points: List['MovePoint'] = field(default_factory=list)
+    move_points: list[MovePoint] = field(default_factory=list)
     move_bytes: int = 0
 
     # Timing/liveness info for each node (optional, for debugging)
-    node_memory_usage: List[int] = field(default_factory=list)
-    logical_regions: Dict[str, LogicalMemoryRegion] = field(default_factory=dict)
+    node_memory_usage: list[int] = field(default_factory=list)
+    logical_regions: dict[str, LogicalMemoryRegion] = field(default_factory=dict)
 
     @property
     def has_spill(self) -> bool:
@@ -129,20 +134,20 @@ class MemoryAllocationPlan:
         """Get buffer ID for a tensor."""
         return self.tensor_to_buffer.get(tensor_name, -1)
 
-    def get_allocation(self, tensor_name: str) -> Optional[TensorAllocation]:
+    def get_allocation(self, tensor_name: str) -> TensorAllocation | None:
         """Get allocation info for a tensor."""
         return self.tensor_allocations.get(tensor_name)
 
-    def get_spill_points_after(self, node_idx: int) -> List[SpillPoint]:
+    def get_spill_points_after(self, node_idx: int) -> list[SpillPoint]:
         """Get spill points after a specific node."""
         return [sp for sp in self.spill_points if sp.after_node_idx == node_idx]
 
-    def get_reload_points_before(self, node_idx: int) -> List[ReloadPoint]:
+    def get_reload_points_before(self, node_idx: int) -> list[ReloadPoint]:
         """Get reload points before a specific node."""
         return [rp for rp in self.reload_points if rp.before_node_idx == node_idx]
 
     @property
-    def spilled_tensors(self) -> Set[str]:
+    def spilled_tensors(self) -> set[str]:
         """Get set of spilled tensor names."""
         return {
             alloc.tensor_name
@@ -150,7 +155,7 @@ class MemoryAllocationPlan:
             if alloc.is_spilled
         }
 
-    def get_move_points_at(self, node_idx: int) -> List['MovePoint']:
+    def get_move_points_at(self, node_idx: int) -> list[MovePoint]:
         """Get move points at a specific node."""
         return [mp for mp in self.move_points if mp.at_node_idx == node_idx]
 
@@ -160,10 +165,9 @@ class MemoryAllocationPlan:
         This is the maximum number of inputs to any single node that
         may be spilled and need to be reloaded.
         """
-        from nnc_py.ir.context import CompileContext
 
         # Group reload points by node
-        reloads_by_node: Dict[int, List[ReloadPoint]] = {}
+        reloads_by_node: dict[int, list[ReloadPoint]] = {}
         for rp in self.reload_points:
             reloads_by_node.setdefault(rp.before_node_idx, []).append(rp)
 
@@ -198,8 +202,8 @@ class MemoryAllocationStrategy(ABC):
     def allocate(
         self,
         ctx: CompileContext,
-        liveness_map: Dict[str, 'TensorLiveness'],
-        max_memory: Optional[int] = None,
+        liveness_map: dict[str, TensorLiveness],
+        max_memory: int | None = None,
     ) -> MemoryAllocationPlan:
         """Execute the allocation algorithm.
 
@@ -226,11 +230,11 @@ class StrategyRegistry:
 
     Allows runtime selection and registration of strategies.
     """
-    _strategies: Dict[AllocationStrategy, Type[MemoryAllocationStrategy]] = {}
-    _aliases: Dict[str, AllocationStrategy] = {}
+    _strategies: dict[AllocationStrategy, type[MemoryAllocationStrategy]] = {}
+    _aliases: dict[str, AllocationStrategy] = {}
 
     @classmethod
-    def register(cls, strategy_cls: Type[MemoryAllocationStrategy]) -> None:
+    def register(cls, strategy_cls: type[MemoryAllocationStrategy]) -> None:
         """Register a strategy class."""
         # Create instance to get properties
         try:
@@ -246,7 +250,7 @@ class StrategyRegistry:
         cls._aliases[strategy_name] = strategy_type
 
     @classmethod
-    def get(cls, strategy: Union[AllocationStrategy, str]) -> MemoryAllocationStrategy:
+    def get(cls, strategy: AllocationStrategy | str) -> MemoryAllocationStrategy:
         """Get a strategy instance by enum or name."""
         if isinstance(strategy, str):
             if strategy in cls._aliases:
@@ -266,12 +270,12 @@ class StrategyRegistry:
         return strategy_cls()
 
     @classmethod
-    def list_strategies(cls) -> List[str]:
+    def list_strategies(cls) -> list[str]:
         """List all registered strategy names."""
         return list(cls._aliases.keys())
 
     @classmethod
-    def is_registered(cls, strategy: Union[AllocationStrategy, str]) -> bool:
+    def is_registered(cls, strategy: AllocationStrategy | str) -> bool:
         """Check if a strategy is registered."""
         if isinstance(strategy, str):
             return strategy in cls._aliases
@@ -296,7 +300,7 @@ def _register_default_strategies() -> None:
             StrategyRegistry.register(strategy_cls)
 
 
-def get_allocation_plan(ctx: CompileContext) -> Optional[MemoryAllocationPlan]:
+def get_allocation_plan(ctx: CompileContext) -> MemoryAllocationPlan | None:
     """Get the memory allocation plan from context.
 
     Args:
@@ -317,7 +321,7 @@ def get_default_allocation_strategy(
     return AllocationStrategy.COST_AWARE
 
 
-def get_memory_strategy(ctx: CompileContext) -> Optional[MemoryAllocationStrategy]:
+def get_memory_strategy(ctx: CompileContext) -> MemoryAllocationStrategy | None:
     """Get a memory strategy instance based on context configuration.
 
     Args:

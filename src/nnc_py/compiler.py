@@ -3,11 +3,10 @@
 import re
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from rich.console import Console
 
-from nnc_py.codegen.npu_backend import NPUBackend
 from nnc_py.codegen.x86_backend import X86Backend
 from nnc_py.ir.context import CompileContext
 from nnc_py.passes.base import PassManager

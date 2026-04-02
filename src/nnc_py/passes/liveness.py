@@ -6,9 +6,9 @@ of each tensor - when it becomes live (produced) and when it dies (last use).
 This information is used for memory reuse in the MemoryPlanningPass.
 """
 
-from dataclasses import dataclass, field
 from bisect import bisect_right
-from typing import TYPE_CHECKING, Dict, List, Tuple
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from nnc_py.ir.context import CompileContext
 from nnc_py.ir.graph import Graph
@@ -16,7 +16,7 @@ from nnc_py.ir.node import Node
 from nnc_py.passes.base import PassBase
 
 if TYPE_CHECKING:
-    from typing import Any
+    pass
 
 
 @dataclass
@@ -26,7 +26,7 @@ class TensorLiveness:
     tensor_name: str
     live_start: int  # Index of node that produces this tensor
     live_end: int    # Index of last node that uses this tensor
-    use_positions: List[int] = field(default_factory=list)
+    use_positions: list[int] = field(default_factory=list)
     is_input: bool = False
     is_output: bool = False
     is_constant: bool = False
@@ -72,7 +72,7 @@ class LivenessAnalysisPass(PassBase):
         node_index = {node.name: i for i, node in enumerate(nodes)}
 
         # Compute liveness for all tensors
-        liveness_map: Dict[str, TensorLiveness] = {}
+        liveness_map: dict[str, TensorLiveness] = {}
 
         # Process all tensors in the graph
         for tensor_name in graph.tensors:
@@ -90,8 +90,8 @@ class LivenessAnalysisPass(PassBase):
         self,
         graph: Graph,
         tensor_name: str,
-        node_index: Dict[str, int],
-        nodes: List[Node],
+        node_index: dict[str, int],
+        nodes: list[Node],
     ) -> TensorLiveness:
         """Analyze liveness for a single tensor."""
         # Find producers and consumers
@@ -131,10 +131,10 @@ class LivenessAnalysisPass(PassBase):
             is_constant=is_constant,
         )
 
-    def _log_summary(self, liveness_map: Dict[str, TensorLiveness], nodes: List[Node]) -> None:
+    def _log_summary(self, liveness_map: dict[str, TensorLiveness], nodes: list[Node]) -> None:
         """Log a summary of liveness analysis."""
         print(f"\n{'='*60}")
-        print(f"Liveness Analysis Summary")
+        print("Liveness Analysis Summary")
         print(f"{'='*60}")
         print(f"Total nodes: {len(nodes)}")
         print(f"Total tensors: {len(liveness_map)}")
@@ -181,15 +181,15 @@ class LivenessAnalysisPass(PassBase):
         # Find peak liveness (maximum number of simultaneously live tensors)
         self._log_peak_liveness(liveness_map, len(nodes))
 
-    def _log_peak_liveness(self, liveness_map: Dict[str, TensorLiveness], num_nodes: int) -> None:
+    def _log_peak_liveness(self, liveness_map: dict[str, TensorLiveness], num_nodes: int) -> None:
         """Calculate and log the peak number of live tensors."""
         peak_live = 0
         peak_at = 0
 
         for i in range(num_nodes):
             live_count = sum(
-                1 for l in liveness_map.values()
-                if l.live_start <= i <= l.live_end
+                1 for liveness in liveness_map.values()
+                if liveness.live_start <= i <= liveness.live_end
             )
             if live_count > peak_live:
                 peak_live = live_count
@@ -213,7 +213,7 @@ def get_liveness(ctx: CompileContext, tensor_name: str) -> TensorLiveness:
     Raises:
         KeyError: If liveness analysis hasn't been run or tensor not found
     """
-    liveness_map: Dict[str, TensorLiveness] | None = ctx.metadata.get("tensor_liveness")
+    liveness_map: dict[str, TensorLiveness] | None = ctx.metadata.get("tensor_liveness")
     if liveness_map is None:
         raise RuntimeError("LivenessAnalysisPass must be run before calling get_liveness")
     return liveness_map[tensor_name]

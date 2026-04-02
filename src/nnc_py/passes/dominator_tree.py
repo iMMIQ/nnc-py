@@ -10,11 +10,11 @@ Key concepts:
 - A virtual exit node is added to connect all graph outputs
 """
 
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import TYPE_CHECKING
 
 import networkx as nx
 
-from nnc_py.passes.indexed_forward_graph import IndexedForwardGraph, NodeEntry
+from nnc_py.passes.indexed_forward_graph import IndexedForwardGraph
 
 if TYPE_CHECKING:
     from nnc_py.ir.graph import Graph
@@ -46,8 +46,8 @@ class DominatorTree:
         """
         self.indexed_graph: IndexedForwardGraph = indexed_graph
         self.graph: Graph = indexed_graph.graph
-        self._immediate_dominators: Dict[str, Optional[str]] = {}
-        self._dominance_frontier: Dict[str, List[str]] = {}
+        self._immediate_dominators: dict[str, str | None] = {}
+        self._dominance_frontier: dict[str, list[str]] = {}
 
         self._build()
 
@@ -121,7 +121,7 @@ class DominatorTree:
             for node_name in self.graph.nodes:
                 self._immediate_dominators[node_name] = None
 
-    def get_immediate_dominator(self, node_name: str) -> Optional[str]:
+    def get_immediate_dominator(self, node_name: str) -> str | None:
         """Get the immediate post-dominator of a node.
 
         The immediate post-dominator is the closest node that post-dominates
@@ -136,7 +136,7 @@ class DominatorTree:
         """
         return self._immediate_dominators.get(node_name)
 
-    def get_post_dominator_chain(self, node_name: str) -> List[str]:
+    def get_post_dominator_chain(self, node_name: str) -> list[str]:
         """Get the chain of post-dominators from a node to the exit.
 
         Returns a list starting with the node's immediate post-dominator,
@@ -149,7 +149,7 @@ class DominatorTree:
         Returns:
             List of post-dominator names in order from closest to farthest.
         """
-        chain: List[str] = []
+        chain: list[str] = []
         current = self.get_immediate_dominator(node_name)
 
         while current is not None:
@@ -158,7 +158,7 @@ class DominatorTree:
 
         return chain
 
-    def find_common_post_dominator(self, node_names: List[str]) -> Optional[str]:
+    def find_common_post_dominator(self, node_names: list[str]) -> str | None:
         """Find the nearest common post-dominator of multiple nodes.
 
         This is useful for determining fusion boundaries - nodes can be

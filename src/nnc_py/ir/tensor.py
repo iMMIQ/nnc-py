@@ -1,7 +1,6 @@
 """Tensor type system for the IR."""
 
 from dataclasses import dataclass
-from typing import List, Union
 
 from nnc_py.ir.types import DataType, MemoryLayout
 
@@ -10,12 +9,8 @@ from nnc_py.ir.types import DataType, MemoryLayout
 class TensorShape:
     """Tensor shape with layout information."""
 
-    dims: List[Union[int, str]]  # int for static, str for symbolic dimensions
+    dims: list[int | str]  # int for static, str for symbolic dimensions
     layout: MemoryLayout = MemoryLayout.NCHW
-
-    def is_static(self) -> bool:
-        """Check if all dimensions are static (integers)."""
-        return all(isinstance(d, int) for d in self.dims)
 
     def rank(self) -> int:
         """Return the number of dimensions."""

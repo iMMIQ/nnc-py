@@ -1,11 +1,13 @@
 """Pattern registry for fusion patterns."""
 
-from typing import Callable, Dict, List, Optional
+from __future__ import annotations
+
+from collections.abc import Callable
 from dataclasses import dataclass
-from nnc_py.pattern.base import DFPattern, PatternMatch
-from nnc_py.ir.node import OpType
+
 from nnc_py.ir.graph import Graph
-from nnc_py.ir.context import CompileContext
+from nnc_py.ir.node import Node, OpType
+from nnc_py.pattern.base import DFPattern, PatternMatch
 
 
 @dataclass
@@ -25,9 +27,9 @@ class FusionPattern:
     pattern: DFPattern
     priority: int = 100
     description: str = ""
-    check_func: Optional[Callable[[Graph, PatternMatch], bool]] = None
-    replace_func: Optional[Callable[[Graph, PatternMatch, str], 'Node']] = None
-    fused_op_type: Optional[OpType] = None
+    check_func: Callable[[Graph, PatternMatch], bool] | None = None
+    replace_func: Callable[[Graph, PatternMatch, str], Node] | None = None
+    fused_op_type: OpType | None = None
 
 
 class PatternRegistry:
@@ -35,10 +37,10 @@ class PatternRegistry:
 
     Singleton pattern for centralized pattern management.
     """
-    _instance: Optional['PatternRegistry'] = None
-    _patterns: Dict[str, FusionPattern] = {}
+    _instance: PatternRegistry | None = None
+    _patterns: dict[str, FusionPattern] = {}
 
-    def __new__(cls) -> 'PatternRegistry':
+    def __new__(cls) -> PatternRegistry:
         if cls._instance is None:
             cls._instance = super().__new__(cls)
         return cls._instance
@@ -51,22 +53,22 @@ class PatternRegistry:
         cls._patterns[pattern.name] = pattern
 
     @classmethod
-    def get(cls, name: str) -> Optional[FusionPattern]:
+    def get(cls, name: str) -> FusionPattern | None:
         """Get a registered pattern by name."""
         return cls._patterns.get(name)
 
     @classmethod
-    def get_all(cls) -> List[FusionPattern]:
+    def get_all(cls) -> list[FusionPattern]:
         """Get all registered patterns, sorted by priority."""
         return sorted(cls._patterns.values(), key=lambda p: -p.priority)
 
     @classmethod
-    def snapshot(cls) -> Dict[str, FusionPattern]:
+    def snapshot(cls) -> dict[str, FusionPattern]:
         """Capture the current registry state for later restoration."""
         return dict(cls._patterns)
 
     @classmethod
-    def restore(cls, snapshot: Dict[str, FusionPattern]) -> None:
+    def restore(cls, snapshot: dict[str, FusionPattern]) -> None:
         """Restore a previously captured registry snapshot."""
         cls._patterns = dict(snapshot)
 
@@ -81,9 +83,9 @@ def register_pattern(
     pattern: DFPattern,
     priority: int = 100,
     description: str = "",
-    check_func: Optional[Callable[[Graph, PatternMatch], bool]] = None,
-    replace_func: Optional[Callable[[Graph, PatternMatch, str], 'Node']] = None,
-    fused_op_type: Optional[OpType] = None,
+    check_func: Callable[[Graph, PatternMatch], bool] | None = None,
+    replace_func: Callable[[Graph, PatternMatch, str], Node] | None = None,
+    fused_op_type: OpType | None = None,
 ) -> FusionPattern:
     """Register a fusion pattern.
 

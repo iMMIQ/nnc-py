@@ -1,9 +1,14 @@
 """Pattern matching engine for finding pattern matches in graphs."""
 
-from typing import List, Set, Tuple
-from nnc_py.pattern.base import DFPattern, PatternMatch, MatchContext
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from nnc_py.ir.graph import Graph
-from nnc_py.ir.node import Node
+from nnc_py.pattern.base import DFPattern, MatchContext, PatternMatch
+
+if TYPE_CHECKING:
+    from nnc_py.pattern.registry import FusionPattern
 
 
 class PatternMatcher:
@@ -15,7 +20,7 @@ class PatternMatcher:
     def __init__(self, graph: Graph):
         self.graph = graph
 
-    def match_pattern(self, pattern: DFPattern) -> List[PatternMatch]:
+    def match_pattern(self, pattern: DFPattern) -> list[PatternMatch]:
         """Find all matches of a pattern in the graph.
 
         Args:
@@ -36,7 +41,7 @@ class PatternMatcher:
         # Filter for non-overlapping matches (greedy by topological order)
         return self._filter_non_overlapping(matches)
 
-    def _filter_non_overlapping(self, matches: List[PatternMatch]) -> List[PatternMatch]:
+    def _filter_non_overlapping(self, matches: list[PatternMatch]) -> list[PatternMatch]:
         """Filter matches to return non-overlapping ones.
 
         Uses greedy selection: prefer matches that appear earlier
@@ -50,8 +55,8 @@ class PatternMatcher:
         topo_order = {n.name: i for i, n in enumerate(topo_nodes)}
         matches.sort(key=lambda m: topo_order.get(m.anchor.name, float('inf')))
 
-        selected: List[PatternMatch] = []
-        used_names: Set[str] = set()
+        selected: list[PatternMatch] = []
+        used_names: set[str] = set()
 
         for match in matches:
             # Check if any node in this match is already used
@@ -63,8 +68,8 @@ class PatternMatcher:
 
     def match_all_patterns(
         self,
-        patterns: List[Tuple[DFPattern, 'FusionPattern']]
-    ) -> List[Tuple[PatternMatch, 'FusionPattern']]:
+        patterns: list[tuple[DFPattern, FusionPattern]]
+    ) -> list[tuple[PatternMatch, FusionPattern]]:
         """Match multiple patterns, returning (match, fusion_pattern) pairs.
 
         Args:
@@ -85,8 +90,8 @@ class PatternMatcher:
 
     def _select_by_priority(
         self,
-        results: List[Tuple[PatternMatch, 'FusionPattern']]
-    ) -> List[Tuple[PatternMatch, 'FusionPattern']]:
+        results: list[tuple[PatternMatch, FusionPattern]]
+    ) -> list[tuple[PatternMatch, FusionPattern]]:
         """Select matches based on pattern priority.
 
         Higher priority patterns are preferred. When conflicts occur,
@@ -95,8 +100,8 @@ class PatternMatcher:
         # Sort by priority (higher first)
         results.sort(key=lambda x: x[1].priority, reverse=True)
 
-        selected: List[Tuple[PatternMatch, 'FusionPattern']] = []
-        used_names: Set[str] = set()
+        selected: list[tuple[PatternMatch, FusionPattern]] = []
+        used_names: set[str] = set()
 
         for match, fusion_pattern in results:
             if match.node_names.isdisjoint(used_names):

@@ -345,8 +345,6 @@ class CEmitter:
         kernel_shape = node.attrs.get("kernel_shape", [2, 2])
         strides = node.attrs.get("strides", [2, 2])
         pads = node.attrs.get("pads", [0, 0, 0, 0])
-        count_include_pad = node.attrs.get("count_include_pad", 0)
-
         # Add kernel size
         if len(kernel_shape) >= 2:
             args.append(str(kernel_shape[0]))  # kernel_h
@@ -1195,10 +1193,10 @@ class CEmitter:
         self.write_line(f"float {temp_name}_data[{size_bytes // 4}];  // 4 bytes per float32")
         self.write_line(f"static Tensor {temp_name} = {{")
         self.write_line(f"    .data = (void*){temp_name}_data,")
-        self.write_line(f"    .dtype = NNC_DTYPE_FLOAT32,")
+        self.write_line("    .dtype = NNC_DTYPE_FLOAT32,")
         # Output shape will be set dynamically based on conv output
-        self.write_line(f"    .ndim = 4,")
-        self.write_line(f"}};")
+        self.write_line("    .ndim = 4,")
+        self.write_line("};")
 
         # Build conv call with temp as output
         args = []
@@ -1259,9 +1257,9 @@ class CEmitter:
         self.write_line(f"float {temp_name}_data[{size_bytes // 4}];  // 4 bytes per float32")
         self.write_line(f"static Tensor {temp_name} = {{")
         self.write_line(f"    .data = (void*){temp_name}_data,")
-        self.write_line(f"    .dtype = NNC_DTYPE_FLOAT32,")
-        self.write_line(f"    .ndim = 4,")
-        self.write_line(f"}};")
+        self.write_line("    .dtype = NNC_DTYPE_FLOAT32,")
+        self.write_line("    .ndim = 4,")
+        self.write_line("};")
 
         # Build conv call
         args = []
@@ -1316,8 +1314,8 @@ class CEmitter:
         self.write_line(f"float {temp_name}_data[{size_bytes // 4}];  // 4 bytes per float32")
         self.write_line(f"static Tensor {temp_name} = {{")
         self.write_line(f"    .data = (void*){temp_name}_data,")
-        self.write_line(f"    .dtype = NNC_DTYPE_FLOAT32,")
-        self.write_line(f"}};")
+        self.write_line("    .dtype = NNC_DTYPE_FLOAT32,")
+        self.write_line("};")
 
         # Build add call
         args = []
@@ -1349,8 +1347,8 @@ class CEmitter:
         self.write_line(f"float {temp_name}_data[{size_bytes // 4}];  // 4 bytes per float32")
         self.write_line(f"static Tensor {temp_name} = {{")
         self.write_line(f"    .data = (void*){temp_name}_data,")
-        self.write_line(f"    .dtype = NNC_DTYPE_FLOAT32,")
-        self.write_line(f"}};")
+        self.write_line("    .dtype = NNC_DTYPE_FLOAT32,")
+        self.write_line("};")
 
         # Build add call
         args = []

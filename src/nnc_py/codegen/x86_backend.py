@@ -1,26 +1,51 @@
 """x86 backend for simulation."""
 
-from typing import TYPE_CHECKING, Any, List, Union
-
-import numpy as np
+from typing import TYPE_CHECKING, Any, Union
 
 from nnc_py.codegen.base import BackendBase, CodeGenResult
-from nnc_py.codegen.c_emitter import CEmitter
 from nnc_py.codegen.x86_emitters.model_source import (
     _add_debug_macros as _ms_add_debug_macros,
+)
+from nnc_py.codegen.x86_emitters.model_source import (
     _append_entry_point_alias as _ms_append_entry_point_alias,
+)
+from nnc_py.codegen.x86_emitters.model_source import (
     _append_parallel_runtime_includes as _ms_append_parallel_runtime_includes,
+)
+from nnc_py.codegen.x86_emitters.model_source import (
     _append_pipeline_schedule_summary_block as _ms_append_pipeline_schedule_summary_block,
+)
+from nnc_py.codegen.x86_emitters.model_source import (
     _append_pipeline_step_comment_lines as _ms_append_pipeline_step_comment_lines,
+)
+from nnc_py.codegen.x86_emitters.model_source import (
     _augment_parallel_runtime_for_legacy_spill as _ms_augment_parallel_runtime_for_legacy_spill,
+)
+from nnc_py.codegen.x86_emitters.model_source import (
     _build_scheduled_transfer_body_lines as _ms_build_scheduled_transfer_body_lines,
+)
+from nnc_py.codegen.x86_emitters.model_source import (
     _clone_pipeline_codegen_metadata as _ms_clone_pipeline_codegen_metadata,
+)
+from nnc_py.codegen.x86_emitters.model_source import (
     _get_public_entry_point as _ms_get_public_entry_point,
+)
+from nnc_py.codegen.x86_emitters.model_source import (
     _get_scheduled_transfer_points_for_node as _ms_get_scheduled_transfer_points_for_node,
+)
+from nnc_py.codegen.x86_emitters.model_source import (
     _has_parallel_runtime as _ms_has_parallel_runtime,
+)
+from nnc_py.codegen.x86_emitters.model_source import (
     _inject_debug_into_nnc_run as _ms_inject_debug_into_nnc_run,
+)
+from nnc_py.codegen.x86_emitters.model_source import (
     _process_body_code as _ms_process_body_code,
+)
+from nnc_py.codegen.x86_emitters.model_source import (
     _resolve_schedule_value_graph_tensor_name as _ms_resolve_schedule_value_graph_tensor_name,
+)
+from nnc_py.codegen.x86_emitters.model_source import (
     _sanitize_c_comment_text as _ms_sanitize_c_comment_text,
 )
 from nnc_py.ir.context import CompileContext
@@ -72,8 +97,8 @@ class X86Backend(BackendBase):
             emit_test_runner,
             generate_constants_binary,
         )
-        from nnc_py.codegen.x86_lowering.serial import lower_serial_x86_codegen
         from nnc_py.codegen.x86_lowering.scheduled import lower_scheduled_x86_codegen
+        from nnc_py.codegen.x86_lowering.serial import lower_serial_x86_codegen
         from nnc_py.passes.memory_planning import get_memory_allocation_plan
 
         result = CodeGenResult()
@@ -1186,7 +1211,6 @@ class X86Backend(BackendBase):
 
         root_output_symbol = ctx.tensor_symbols.get(root_node.outputs[0], root_node.outputs[0])
         final_node = node_by_name[node_names[-1]]
-        final_output_symbol = ctx.tensor_symbols.get(final_node.outputs[0], final_node.outputs[0])
         final_compute_step = self._find_parallel_runtime_step(
             step_records_by_node,
             final_node.name,
@@ -1489,7 +1513,7 @@ class X86Backend(BackendBase):
                 move.tensor_name: move for move in move_points_at
             }
             reloads_before = plan.get_reload_points_before(node_idx)
-            inputs_need_reload: dict[str, Union[ReloadPoint, SpillPoint]] = {
+            inputs_need_reload: dict[str, ReloadPoint | SpillPoint] = {
                 rp.tensor_name: rp for rp in reloads_before
             }
 
@@ -1531,7 +1555,7 @@ class X86Backend(BackendBase):
                     rp.reload_slot_id = current_slot
                 current_slot += 1
 
-            outputs_need_temp: dict[str, Union[ReloadPoint, SpillPoint]] = {}
+            outputs_need_temp: dict[str, ReloadPoint | SpillPoint] = {}
             for output_name in node.outputs:
                 spill_point = spill_points_after.get(output_name)
                 if spill_point is not None:
@@ -1783,7 +1807,9 @@ class X86Backend(BackendBase):
         pipeline_codegen_metadata: dict[str, Any],
     ) -> str:
         """Delegate to model_source emitter."""
-        from nnc_py.codegen.x86_emitters.model_source import _inject_parallel_runtime_into_emitted_source
+        from nnc_py.codegen.x86_emitters.model_source import (
+            _inject_parallel_runtime_into_emitted_source,
+        )
         return _inject_parallel_runtime_into_emitted_source(source, pipeline_codegen_metadata)
 
     def _build_memory_plan_summary_line(
@@ -2494,13 +2520,13 @@ class X86Backend(BackendBase):
             reloads_before = plan.get_reload_points_before(node_idx)
 
             # Determine which inputs need reload (have reload points before this node)
-            inputs_need_reload: dict[str, Union["ReloadPoint", "SpillPoint"]] = {
+            inputs_need_reload: dict[str, ReloadPoint | SpillPoint] = {
                 rp.tensor_name: rp for rp in reloads_before
             }
 
             # Also check if any input tensors are spilled (allocated in slow memory)
             # This handles model inputs that happen to be in slow memory
-            additional_inputs: list[tuple[str, "TensorAllocation"]] = []
+            additional_inputs: list[tuple[str, TensorAllocation]] = []
             for input_name in node.inputs:
                 if input_name in inputs_need_reload:
                     continue  # Already has a reload point
@@ -2538,7 +2564,7 @@ class X86Backend(BackendBase):
             # An output needs a temp tensor if:
             # 1. It's spilled (allocated in slow memory), OR
             # 2. There's a spill point after this node for it
-            outputs_need_temp: dict[str, Union["ReloadPoint", "SpillPoint"]] = {}
+            outputs_need_temp: dict[str, ReloadPoint | SpillPoint] = {}
             for output_name in node.outputs:
                 spill_point = spill_points_after.get(output_name)
                 if spill_point is not None:
@@ -2892,10 +2918,6 @@ class X86Backend(BackendBase):
                 args.append(dtype_const)
             else:
                 args.append("NNC_DTYPE_FLOAT32")
-        elif node.op_type == OpType.SPLIT:
-            # Split has signature: nnc_split(Tensor* input, Tensor** outputs, int num_outputs, int axis)
-            # We need to completely rewrite the call
-            return self._generate_split_call(ctx, node, inputs_need_reload, outputs_need_temp)
         elif node.op_type == OpType.GATHER:
             # Gather: data, indices, output, axis, data_dtype
             axis = node.attrs.get("axis", 0)
@@ -3090,10 +3112,6 @@ class X86Backend(BackendBase):
                 args.append(dtype_const)
             else:
                 args.append("NNC_DTYPE_FLOAT32")
-        elif node.op_type == OpType.SPLIT:
-            # Split has signature: nnc_split(Tensor* input, Tensor** outputs, int num_outputs, int axis)
-            # We need to completely rewrite the call
-            return self._generate_split_call(ctx, node, inputs_need_reload, outputs_need_temp)
         elif node.op_type == OpType.GATHER:
             # Gather: data, indices, output, axis, data_dtype
             axis = node.attrs.get("axis", 0)

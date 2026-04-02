@@ -2,7 +2,7 @@
 
 import numpy as np
 import onnx
-from onnx import helper, numpy_helper
+from onnx import numpy_helper
 
 try:
     from onnx import shape_inference
@@ -18,7 +18,7 @@ except ImportError:
 
 from nnc_py.ir.graph import Graph
 from nnc_py.ir.node import Node, OpType
-from nnc_py.ir.tensor import TensorType, TensorShape
+from nnc_py.ir.tensor import TensorShape, TensorType
 from nnc_py.ir.types import DataType, MemoryLayout
 
 
@@ -61,7 +61,7 @@ class ONNXFrontend:
         if self.enable_simplify:
             try:
                 model, _ = onnxsim.simplify(model, perform_optimization=True)
-            except Exception as e:
+            except Exception:
                 # Simplification failed, continue with original model
                 pass
 
@@ -69,7 +69,7 @@ class ONNXFrontend:
         if HAS_SHAPE_INFERENCE:
             try:
                 model = shape_inference.infer_shapes(model)
-            except Exception as e:
+            except Exception:
                 # Shape inference failed, continue with original model
                 pass
 
@@ -436,7 +436,7 @@ class ONNXFrontend:
 
             tensor_type = TensorType(dtype=dtype, shape=shape, name=output_name)
             graph.add_tensor(tensor_type)
-        except Exception as e:
+        except Exception:
             # If parsing fails, the constant will remain undefined
             # This can happen for empty tensors or special cases
             pass

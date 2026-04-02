@@ -4,7 +4,6 @@ This pass removes Identity operations from the computation graph by replacing
 all references to an Identity node's output with its input, then removing the node.
 """
 
-from typing import Dict, List, Set
 
 from nnc_py.ir.context import CompileContext
 from nnc_py.ir.node import OpType
@@ -34,7 +33,7 @@ class IdentityEliminationPass(PassBase):
 
         # Step 1: Find all Identity nodes and build replacement mapping
         # We need to handle chains, so we iteratively resolve the mapping
-        replacement_map: Dict[str, str] = {}
+        replacement_map: dict[str, str] = {}
         identity_nodes = [
             node for node in graph.nodes.values()
             if node.op_type == OpType.IDENTITY
@@ -85,14 +84,14 @@ class IdentityEliminationPass(PassBase):
         # Log summary if debug mode is on
         if ctx.debug:
             print(f"\n{'='*60}")
-            print(f"Identity Elimination Summary")
+            print("Identity Elimination Summary")
             print(f"{'='*60}")
             print(f"Identity nodes removed: {len(nodes_to_remove)}")
             if replacement_map:
                 print(f"Replacements: {len(replacement_map)} tensors remapped")
             print(f"{'='*60}")
 
-    def _resolve_chains(self, replacement_map: Dict[str, str]) -> Dict[str, str]:
+    def _resolve_chains(self, replacement_map: dict[str, str]) -> dict[str, str]:
         """Resolve chains of Identity nodes.
 
         If we have mappings: B->A, C->B, we want to map C->A directly.
@@ -107,7 +106,7 @@ class IdentityEliminationPass(PassBase):
         for output_tensor, input_tensor in replacement_map.items():
             # Follow the chain until we hit a tensor not in the map
             current = input_tensor
-            visited: Set[str] = set()
+            visited: set[str] = set()
             while current in replacement_map and current not in visited:
                 visited.add(current)
                 current = replacement_map[current]

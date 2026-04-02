@@ -4,7 +4,7 @@ This pass provides a single entry point for memory allocation with
 runtime-selectable strategies.
 """
 
-from typing import TYPE_CHECKING, Dict, Optional
+from typing import TYPE_CHECKING
 
 from nnc_py.ir.context import CompileContext
 from nnc_py.ir.execution_plan import MemoryRegionKind, get_node_execution_plans
@@ -18,8 +18,8 @@ from nnc_py.passes.memory_strategy import (
     MemoryAllocationPlan,
     MemoryAllocationStrategy,
     StrategyRegistry,
-    get_default_allocation_strategy,
     _register_default_strategies,
+    get_default_allocation_strategy,
 )
 
 if TYPE_CHECKING:
@@ -77,7 +77,7 @@ class MemoryPlanningPassV2(PassBase):
                 "LivenessAnalysisPass must be run before MemoryPlanningPassV2"
             )
 
-        liveness_map: Dict[str, TensorLiveness] = ctx.metadata["tensor_liveness"]
+        liveness_map: dict[str, TensorLiveness] = ctx.metadata["tensor_liveness"]
 
         # Get strategy from metadata or use default
         strategy_config: str | AllocationStrategy | None = ctx.metadata.get(
@@ -180,14 +180,14 @@ class MemoryPlanningPassV2(PassBase):
         print(f"\n{'='*60}")
         print(f"Memory Planning with strategy: {strategy.name}")
         if max_memory == float("inf") or max_memory is None:
-            print(f"Max memory: unlimited")
+            print("Max memory: unlimited")
         else:
             print(f"Max memory: {max_memory} bytes ({max_memory / 1024:.2f} KB)")
         print(f"{'='*60}")
 
     def _log_summary(self, ctx: CompileContext, plan: MemoryAllocationPlan) -> None:
         """Log allocation summary."""
-        print(f"\nMemory Allocation Plan Summary:")
+        print("\nMemory Allocation Plan Summary:")
         print(f"  Strategy: {plan.strategy_name}")
         print(f"  Buffers: {plan.num_buffers}")
         print(f"  Total fast memory: {plan.total_fast_memory} bytes ({plan.total_fast_memory / 1024:.2f} KB)")
@@ -692,7 +692,7 @@ def _initialize_strategies() -> None:
 _initialize_strategies()
 
 
-def get_memory_allocation_plan(ctx: CompileContext) -> Optional[MemoryAllocationPlan]:
+def get_memory_allocation_plan(ctx: CompileContext) -> MemoryAllocationPlan | None:
     """Get the memory allocation plan from context.
 
     Args:

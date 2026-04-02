@@ -6,16 +6,13 @@ and generates spill/reload points.
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set, Tuple
 
 from nnc_py.ir.context import CompileContext
 from nnc_py.ir.graph import Graph
 from nnc_py.passes.base import PassBase
-from nnc_py.passes.liveness import TensorLiveness, get_liveness
+from nnc_py.passes.liveness import TensorLiveness
 from nnc_py.passes.memory_plan import (
-    MemoryBuffer,
     MemoryPlan,
-    TensorMemoryInfo,
     get_memory_plan,
 )
 
@@ -30,7 +27,7 @@ class SpillSlot:
 
     # When to spill/reload (node names)
     spill_after_node: str      # Spill after this node executes
-    reload_before_nodes: List[str] = field(default_factory=list)
+    reload_before_nodes: list[str] = field(default_factory=list)
 
     # Original fast memory info
     original_buffer_id: int = 0
@@ -69,11 +66,11 @@ class SpillPlan:
     max_memory: int
 
     # Tensors that are spilled
-    spilled_tensors: Dict[str, SpillSlot]
+    spilled_tensors: dict[str, SpillSlot]
 
     # Spill and reload points (in execution order)
-    spill_points: List[SpillPoint]
-    reload_points: List[ReloadPoint]
+    spill_points: list[SpillPoint]
+    reload_points: list[ReloadPoint]
 
     # Modified memory plan with spill info
     memory_plan: MemoryPlan
@@ -231,9 +228,9 @@ class SpillAnalysisPass(PassBase):
     def _calculate_spill_priorities(
         self,
         plan: MemoryPlan,
-        liveness_map: Dict[str, TensorLiveness],
+        liveness_map: dict[str, TensorLiveness],
         graph: Graph,
-    ) -> List[Tuple[str, float]]:
+    ) -> list[tuple[str, float]]:
         """Calculate spill priority for each tensor.
 
         Higher priority = should be spilled first
@@ -285,9 +282,9 @@ class SpillAnalysisPass(PassBase):
     def _select_spill_candidates(
         self,
         plan: MemoryPlan,
-        priorities: List[Tuple[str, float]],
+        priorities: list[tuple[str, float]],
         max_memory: int,
-    ) -> Dict[str, SpillSlot]:
+    ) -> dict[str, SpillSlot]:
         """Select tensors to spill until we fit in memory.
 
         This is a simplified approach that selects tensors based on priority.
@@ -307,7 +304,7 @@ class SpillAnalysisPass(PassBase):
             return {}
 
         # Select tensors to spill based on priority
-        spilled: Dict[str, SpillSlot] = {}
+        spilled: dict[str, SpillSlot] = {}
 
         for tensor_name, _ in priorities:
             mem_info = plan.tensor_info.get(tensor_name)
@@ -333,20 +330,17 @@ class SpillAnalysisPass(PassBase):
         self,
         ctx: CompileContext,
         plan: MemoryPlan,
-        spilled_tensors: Dict[str, SpillSlot],
-    ) -> Tuple[List[SpillPoint], List[ReloadPoint]]:
+        spilled_tensors: dict[str, SpillSlot],
+    ) -> tuple[list[SpillPoint], list[ReloadPoint]]:
         """Generate spill and reload points for spilled tensors."""
         graph = ctx.graph
         nodes = graph.topological_sort()
         node_index = {node.name: i for i, node in enumerate(nodes)}
 
-        liveness_map = ctx.metadata["tensor_liveness"]
-
-        spill_points: List[SpillPoint] = []
-        reload_points: List[ReloadPoint] = []
+        spill_points: list[SpillPoint] = []
+        reload_points: list[ReloadPoint] = []
 
         for tensor_name, slot in spilled_tensors.items():
-            liveness = liveness_map[tensor_name]
             mem_info = plan.tensor_info[tensor_name]
             consumers = graph.get_consumers(tensor_name)
 
@@ -395,10 +389,10 @@ class SpillAnalysisPass(PassBase):
     def _recalculate_fast_memory_layout(
         self,
         plan: MemoryPlan,
-        spilled_tensors: Dict[str, SpillSlot],
+        spilled_tensors: dict[str, SpillSlot],
         max_memory: int,
         ctx: CompileContext = None,
-    ) -> Dict[str, int]:
+    ) -> dict[str, int]:
         """Recalculate fast memory layout with lifetime-aware reuse.
 
         Uses tensor liveness information to allow non-overlapping tensors
@@ -485,9 +479,9 @@ class SpillAnalysisPass(PassBase):
     def _sequential_layout(
         self,
         plan: MemoryPlan,
-        spilled_tensors: Dict[str, SpillSlot],
+        spilled_tensors: dict[str, SpillSlot],
         max_memory: int,
-    ) -> Dict[str, int]:
+    ) -> dict[str, int]:
         """Fallback sequential layout without liveness analysis."""
         new_offsets = {}
         current_offset = 0
@@ -550,7 +544,7 @@ class SpillAnalysisPass(PassBase):
         print(f"{'='*80}\n")
 
 
-def get_spill_plan(ctx: CompileContext) -> Optional[SpillPlan]:
+def get_spill_plan(ctx: CompileContext) -> SpillPlan | None:
     """Get the spill plan from the context.
 
     Args:

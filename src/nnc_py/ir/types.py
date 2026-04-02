@@ -2,7 +2,6 @@
 
 from enum import Enum
 
-AxisName = str
 AxisNames = tuple[str, ...]
 
 

@@ -1,15 +1,11 @@
 """Enhanced fusion groups with dominator-based fusion support."""
 
-import logging
-from dataclasses import dataclass, field
-from typing import Dict, Any, List, Set, Optional
 
 from nnc_py.ir.graph import Graph
-from nnc_py.ir.node import Node, OpType
-from nnc_py.passes.indexed_forward_graph import IndexedForwardGraph
+from nnc_py.ir.op_pattern import OpPatternKind
 from nnc_py.passes.dominator_tree import DominatorTree
-from nnc_py.ir.op_pattern import get_op_pattern_kind, OpPatternKind
-from nnc_py.passes.fusion_groups import FusionGroup, GroupArena as BaseGroupArena
+from nnc_py.passes.fusion_groups import GroupArena as BaseGroupArena
+from nnc_py.passes.indexed_forward_graph import IndexedForwardGraph
 
 
 class EnhancedGroupArena(BaseGroupArena):
@@ -35,7 +31,7 @@ class EnhancedGroupArena(BaseGroupArena):
         self.max_function_args = max_function_args
 
         # Additional mapping for node names to groups
-        self._node_to_group_id: Dict[str, int] = {}
+        self._node_to_group_id: dict[str, int] = {}
 
     def new_group(self) -> int:
         """Create a new group and return its ID."""
@@ -128,14 +124,13 @@ class EnhancedGroupArena(BaseGroupArena):
         except KeyError:
             return OpPatternKind.kOpaque
 
-    def get_all_groups(self) -> Dict[int, List[str]]:
+    def get_all_groups(self) -> dict[int, list[str]]:
         """Get all groups with their node names.
 
         Returns:
             Dictionary mapping group ID to list of node names.
         """
-        result = {}
-        node_groups: Dict[int, List[str]] = {}
+        node_groups: dict[int, list[str]] = {}
 
         # Build inverse mapping from node name to group ID
         for node_name, group_id in self._node_to_group_id.items():

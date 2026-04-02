@@ -1,5 +1,5 @@
-from dataclasses import dataclass, field
-from typing import Dict, Any, List
+from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass
@@ -10,7 +10,7 @@ class FusionGroup:
     root_node: int  # ID of the root node
     num_nodes: int  # Number of nodes in this group
     args_num: int
-    attrs: Dict[str, Any]
+    attrs: dict[str, Any]
     node_id: int  # Unique identifier for this node
 
     def __eq__(self, other):
@@ -21,7 +21,7 @@ class FusionGroup:
     def __hash__(self):
         return hash(self.node_id)
 
-    def __init__(self, pattern: str, args_num: int, attrs: Dict[str, Any], node_id: int):
+    def __init__(self, pattern: str, args_num: int, attrs: dict[str, Any], node_id: int):
         self.parent = self  # Initially points to itself
         self.pattern = pattern
         self.root_node = node_id
@@ -51,14 +51,14 @@ class GroupArena:
     """Manages a collection of fusion groups using Union-Find."""
 
     def __init__(self):
-        self._groups: Dict[int, FusionGroup] = {}  # Maps node_id to group data
+        self._groups: dict[int, FusionGroup] = {}  # Maps node_id to group data
         self._next_node_id = 1
 
     def _get_group_by_node(self, node_id: int) -> FusionGroup:
         """Get group by node_id."""
         return self._groups.get(node_id)
 
-    def create_group(self, pattern_kind: str, args_num: int, attrs: Dict[str, Any] = None) -> FusionGroup:
+    def create_group(self, pattern_kind: str, args_num: int, attrs: dict[str, Any] = None) -> FusionGroup:
         """Create a new fusion group."""
         if attrs is None:
             attrs = {}
@@ -87,7 +87,7 @@ class GroupArena:
             # Merge root2 into root1
             root1.merge_from(root2)
 
-    def get_all_roots(self) -> List[FusionGroup]:
+    def get_all_roots(self) -> list[FusionGroup]:
         """Get all root groups in the arena."""
         seen_roots = []
         for group in self._groups.values():

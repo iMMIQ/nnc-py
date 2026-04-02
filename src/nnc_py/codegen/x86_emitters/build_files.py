@@ -165,7 +165,7 @@ FILE* debug_file = NULL;
             num_elements = size // 4
             tensor_setups.append(f"    for (int i = 0; i < {num_elements}; i++) {{")
             tensor_setups.append(f"        ((float*){var_name}.data)[i] = (float)i * 0.01f;  /* Test pattern */")
-            tensor_setups.append(f"    }}")
+            tensor_setups.append("    }")
             tensor_setups.append("")
     else:
         # Dynamic allocation - use malloc/calloc
@@ -194,7 +194,7 @@ FILE* debug_file = NULL;
             num_elements = size // 4
             tensor_setups.append(f"    for (int i = 0; i < {num_elements}; i++) {{")
             tensor_setups.append(f"        ((float*){var_name}.data)[i] = (float)i * 0.01f;  /* Test pattern */")
-            tensor_setups.append(f"    }}")
+            tensor_setups.append("    }")
             tensor_setups.append("")
 
         # Setup intermediate and output tensors

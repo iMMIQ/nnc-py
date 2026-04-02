@@ -1,10 +1,10 @@
 """Built-in fusion pattern definitions."""
 
-from nnc_py.pattern.base import PatternMatch
-from nnc_py.pattern.registry import register_pattern
-from nnc_py.pattern.patterns import OpPattern, WildcardPattern
-from nnc_py.ir.node import Node, OpType
 from nnc_py.ir.graph import Graph
+from nnc_py.ir.node import Node, OpType
+from nnc_py.pattern.base import PatternMatch
+from nnc_py.pattern.patterns import OpPattern
+from nnc_py.pattern.registry import register_pattern
 
 
 # Pattern building helpers
@@ -27,15 +27,6 @@ def relu(name: str = "relu") -> OpPattern:
 def sigmoid(name: str = "sigmoid") -> OpPattern:
     """Create a Sigmoid pattern."""
     return OpPattern(OpType.SIGMOID, name)
-
-def tanh(name: str = "tanh") -> OpPattern:
-    """Create a Tanh pattern."""
-    return OpPattern(OpType.TANH, name)
-
-def wildcard(name: str = "wildcard") -> WildcardPattern:
-    """Create a wildcard pattern."""
-    return WildcardPattern(name)
-
 
 # Fusion helpers
 def _create_fused_conv_relu(graph: Graph, match: PatternMatch, name: str) -> Node:

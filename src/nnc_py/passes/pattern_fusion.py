@@ -1,13 +1,13 @@
 """Pattern-based operator fusion pass."""
 
-from typing import Set
+
 from nnc_py.ir.context import CompileContext
 from nnc_py.ir.graph import Graph
 from nnc_py.ir.node import Node
 from nnc_py.passes.base import PassBase
-from nnc_py.pattern.matcher import PatternMatcher
-from nnc_py.pattern.registry import PatternRegistry, FusionPattern
 from nnc_py.pattern.base import PatternMatch
+from nnc_py.pattern.matcher import PatternMatcher
+from nnc_py.pattern.registry import FusionPattern, PatternRegistry
 
 
 class PatternFusionPass(PassBase):
@@ -39,7 +39,7 @@ class PatternFusionPass(PassBase):
         matches_with_patterns = matcher.match_all_patterns(pattern_pairs)
 
         # Apply fusions
-        fused_nodes: Set[str] = set()
+        fused_nodes: set[str] = set()
         patterns_found = {}
 
         for match, fusion_pattern in matches_with_patterns:
@@ -65,7 +65,7 @@ class PatternFusionPass(PassBase):
         graph: Graph,
         match: PatternMatch,
         fusion_pattern: FusionPattern,
-        fused_nodes: Set[str],
+        fused_nodes: set[str],
     ) -> None:
         """Apply a single fusion transformation.
 
@@ -155,10 +155,10 @@ class PatternFusionPass(PassBase):
     def _log_summary(self, patterns_found: dict, node_count: int) -> None:
         """Log fusion summary."""
         print(f"\n{'='*60}")
-        print(f"Pattern Fusion Summary")
+        print("Pattern Fusion Summary")
         print(f"{'='*60}")
         print(f"Total fusions: {sum(patterns_found.values())}")
-        print(f"Patterns found:")
+        print("Patterns found:")
         for pattern, count in sorted(patterns_found.items()):
             print(f"  - {pattern}: {count}")
         print(f"Nodes after fusion: {node_count}")

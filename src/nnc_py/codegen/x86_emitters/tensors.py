@@ -6,7 +6,6 @@ from typing import Any
 
 from nnc_py.codegen.x86_ir import X86CodegenPackage
 
-
 # ---------------------------------------------------------------------------
 # Shared helpers (also used by the backend or other modules)
 # ---------------------------------------------------------------------------
@@ -464,8 +463,8 @@ def _get_tile_aware_runtime_plan(
 
 def _generate_memory_pool(ctx: Any) -> list[str]:
     """Generate static memory pool declaration."""
-    from nnc_py.passes.memory_planning import get_memory_allocation_plan
     from nnc_py.passes.memory_plan import get_memory_plan
+    from nnc_py.passes.memory_planning import get_memory_allocation_plan
     from nnc_py.passes.spill import get_spill_plan
 
     # Check for new memory allocation plan first
@@ -494,8 +493,8 @@ def _generate_memory_pool(ctx: Any) -> list[str]:
             "/* Fast Memory Pool (SRAM/On-chip) */",
             f"#define NNC_FAST_MEMORY_SIZE {fast_memory_size}",
             "#define NNC_MEMORY_ALIGNMENT 16",
-            f"uint8_t _nnc_fast_pool[NNC_FAST_MEMORY_SIZE] "
-            f"__attribute__((aligned(NNC_MEMORY_ALIGNMENT))) = {{0}};",
+            "uint8_t _nnc_fast_pool[NNC_FAST_MEMORY_SIZE] "
+            "__attribute__((aligned(NNC_MEMORY_ALIGNMENT))) = {0};",
             "",
         ]
         if scheduled_plan.total_slow_memory > 0:
@@ -503,8 +502,8 @@ def _generate_memory_pool(ctx: Any) -> list[str]:
             lines.extend([
                 "/* Slow Memory Pool (DRAM/External) */",
                 f"#define NNC_SLOW_MEMORY_SIZE {slow_memory_size}",
-                f"uint8_t _nnc_slow_pool[NNC_SLOW_MEMORY_SIZE] "
-                f"__attribute__((aligned(NNC_MEMORY_ALIGNMENT))) = {{0}};",
+                "uint8_t _nnc_slow_pool[NNC_SLOW_MEMORY_SIZE] "
+                "__attribute__((aligned(NNC_MEMORY_ALIGNMENT))) = {0};",
                 "",
             ])
         return lines
@@ -554,13 +553,13 @@ def _generate_memory_pool(ctx: Any) -> list[str]:
                 ]
                 lines.extend(region_lines)
                 lines.extend([
-                    f"uint8_t _nnc_fast_pool[NNC_FAST_MEMORY_SIZE] "
-                    f"__attribute__((aligned(NNC_MEMORY_ALIGNMENT))) = {{0}};",
+                    "uint8_t _nnc_fast_pool[NNC_FAST_MEMORY_SIZE] "
+                    "__attribute__((aligned(NNC_MEMORY_ALIGNMENT))) = {0};",
                     "",
                     "/* Slow Memory Pool (DRAM/External) */",
                     f"#define NNC_SLOW_MEMORY_SIZE {alloc_plan.total_slow_memory}",
-                    f"uint8_t _nnc_slow_pool[NNC_SLOW_MEMORY_SIZE] "
-                    f"__attribute__((aligned(NNC_MEMORY_ALIGNMENT))) = {{0}};",
+                    "uint8_t _nnc_slow_pool[NNC_SLOW_MEMORY_SIZE] "
+                    "__attribute__((aligned(NNC_MEMORY_ALIGNMENT))) = {0};",
                     "",
                 ])
                 return lines
@@ -581,8 +580,8 @@ def _generate_memory_pool(ctx: Any) -> list[str]:
             ]
             lines.extend(region_lines)
             lines.append(
-                f"uint8_t _nnc_fast_pool[NNC_FAST_MEMORY_SIZE] "
-                f"__attribute__((aligned(NNC_MEMORY_ALIGNMENT))) = {{0}};"
+                "uint8_t _nnc_fast_pool[NNC_FAST_MEMORY_SIZE] "
+                "__attribute__((aligned(NNC_MEMORY_ALIGNMENT))) = {0};"
             )
             lines.append("")
             return lines
@@ -616,16 +615,16 @@ def _generate_memory_pool(ctx: Any) -> list[str]:
             f"/* Slow memory used: {spill_plan.slow_memory_size} bytes ({spill_plan.slow_memory_size / 1024:.2f} KB) */",
             f"/* Spilled tensors: {len(spill_plan.spilled_tensors)} */",
             "",
-            f"/* Fast Memory Pool (SRAM/On-chip) */",
+            "/* Fast Memory Pool (SRAM/On-chip) */",
             f"#define NNC_FAST_MEMORY_SIZE {spill_plan.max_memory}",
             f"#define NNC_MEMORY_ALIGNMENT {plan.alignment}",
-            f"uint8_t _nnc_fast_pool[NNC_FAST_MEMORY_SIZE] "
-            f"__attribute__((aligned(NNC_MEMORY_ALIGNMENT))) = {{0}};",
+            "uint8_t _nnc_fast_pool[NNC_FAST_MEMORY_SIZE] "
+            "__attribute__((aligned(NNC_MEMORY_ALIGNMENT))) = {0};",
             "",
-            f"/* Slow Memory Pool (DRAM/External) */",
+            "/* Slow Memory Pool (DRAM/External) */",
             f"#define NNC_SLOW_MEMORY_SIZE {spill_plan.slow_memory_size}",
-            f"uint8_t _nnc_slow_pool[NNC_SLOW_MEMORY_SIZE] "
-            f"__attribute__((aligned(NNC_MEMORY_ALIGNMENT))) = {{0}};",
+            "uint8_t _nnc_slow_pool[NNC_SLOW_MEMORY_SIZE] "
+            "__attribute__((aligned(NNC_MEMORY_ALIGNMENT))) = {0};",
             "",
         ]
         return lines
@@ -649,8 +648,8 @@ def _generate_memory_pool(ctx: Any) -> list[str]:
             f"/* Buffers: {plan.num_buffers}, Tensors: {plan.num_tensors} */",
             f"#define NNC_MEMORY_SIZE {plan.total_size}",
             f"#define NNC_MEMORY_ALIGNMENT {plan.alignment}",
-            f"static uint8_t _nnc_memory_pool[NNC_MEMORY_SIZE] "
-            f"__attribute__((aligned(NNC_MEMORY_ALIGNMENT))) = {{0}};",
+            "static uint8_t _nnc_memory_pool[NNC_MEMORY_SIZE] "
+            "__attribute__((aligned(NNC_MEMORY_ALIGNMENT))) = {0};",
             "",
         ]
         return lines

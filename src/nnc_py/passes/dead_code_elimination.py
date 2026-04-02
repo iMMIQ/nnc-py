@@ -65,7 +65,7 @@ class DeadCodeEliminationPass(PassBase):
         # Log summary if debug mode is on
         if ctx.debug:
             print(f"\n{'='*60}")
-            print(f"Dead Code Elimination Summary")
+            print("Dead Code Elimination Summary")
             print(f"{'='*60}")
             print(f"Nodes before: {len(graph.nodes) + len(nodes_to_remove)}")
             print(f"Nodes removed: {len(nodes_to_remove)}")

@@ -12,7 +12,6 @@ from nnc_py.ir.joint_tiling_schedule import (
     JOINT_TILING_SCHEDULE_SOLUTION_SCHEMA_VERSION,
     JointAction,
     JointActionKind,
-    JointDependencyEdgeKind,
     JointFailure,
     JointFailureCategory,
     JointFailureStatus,

@@ -4,10 +4,10 @@ This module provides path validation to ensure safe fusion operations
 by checking paths between nodes satisfy pattern constraints.
 """
 
-from typing import Callable, Optional, Set, List
+from collections.abc import Callable
 
-from nnc_py.passes.indexed_forward_graph import IndexedForwardGraph, NodeEntry, Edge
 from nnc_py.ir.op_pattern import OpPatternKind
+from nnc_py.passes.indexed_forward_graph import IndexedForwardGraph, NodeEntry
 
 
 class PathValidator:
