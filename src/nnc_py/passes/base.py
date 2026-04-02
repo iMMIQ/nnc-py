@@ -1,7 +1,6 @@
 """Base classes for optimization passes."""
 
 from abc import ABC, abstractmethod
-from typing import List
 
 from nnc_py.ir.context import CompileContext
 
@@ -43,8 +42,8 @@ class PassManager:
     """Pass manager for running optimization passes."""
 
     def __init__(self) -> None:
-        self.passes: List[PassBase] = []
-        self.applied_passes: List[str] = []
+        self.passes: list[PassBase] = []
+        self.applied_passes: list[str] = []
 
     def register(self, pass_obj: PassBase) -> None:
         """Register a pass.
@@ -65,7 +64,7 @@ class PassManager:
             self.applied_passes.append(pass_obj.name)
 
     @classmethod
-    def get_default_passes(cls, opt_level: int) -> List[PassBase]:
+    def get_default_passes(cls, opt_level: int) -> list[PassBase]:
         """Get default pass sequence for optimization level.
 
         Args:
@@ -75,13 +74,12 @@ class PassManager:
             List of passes to run.
         """
         from nnc_py.passes.dead_code_elimination import DeadCodeEliminationPass
-        from nnc_py.passes.dominator_fusion import DominatorFusionPass
         from nnc_py.passes.identity_elimination import IdentityEliminationPass
         from nnc_py.passes.layout_planning import LayoutPlanningPass
         from nnc_py.passes.liveness import LivenessAnalysisPass
         from nnc_py.passes.memory_planning import MemoryPlanningPassV2, MemoryPlanningPassV3
-        from nnc_py.passes.prepack_lowering import PrepackLoweringPass
         from nnc_py.passes.pattern_fusion import PatternFusionPass
+        from nnc_py.passes.prepack_lowering import PrepackLoweringPass
         from nnc_py.passes.schedule_analysis import ScheduleAnalysisPass
         from nnc_py.passes.spill import SpillAnalysisPass
         from nnc_py.passes.tiled_lowering import TiledLoweringPass
@@ -111,14 +109,13 @@ class PassManager:
                 SpillAnalysisPass(),  # Handles overflow if max_memory set
             ]
 
-        # O3: Conservative advanced optimizations without legacy spill re-planning
+        # O3: Tiled schedule analysis/lowering without the experimental dominator pass
         if opt_level >= 3:
             return [
                 IdentityEliminationPass(),
                 DeadCodeEliminationPass(),   # Then remove dead code
                 PatternFusionPass(),         # Pattern-based fusion
                 PrepackLoweringPass(),       # Compile-time lowering and weight prepack
-                DominatorFusionPass(),       # Dominator-based fusion
                 ScheduleAnalysisPass(),
                 LayoutPlanningPass(),
                 TiledLoweringPass(),
@@ -129,10 +126,9 @@ class PassManager:
         return []
 
     @classmethod
-    def get_joint_tiling_schedule_o3_passes(cls) -> List[PassBase]:
+    def get_joint_tiling_schedule_o3_passes(cls) -> list[PassBase]:
         """Get the O3 path that materializes the joint tiling/schedule contract."""
         from nnc_py.passes.dead_code_elimination import DeadCodeEliminationPass
-        from nnc_py.passes.dominator_fusion import DominatorFusionPass
         from nnc_py.passes.identity_elimination import IdentityEliminationPass
         from nnc_py.passes.joint_schedule_memory_import import (
             JointScheduleMemoryImportPass,
@@ -154,7 +150,6 @@ class PassManager:
             DeadCodeEliminationPass(),
             PatternFusionPass(),
             PrepackLoweringPass(),
-            DominatorFusionPass(),
             ScheduleAnalysisPass(),
             LayoutPlanningPass(),
             TiledLoweringPass(),

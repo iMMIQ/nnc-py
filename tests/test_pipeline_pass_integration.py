@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -16,8 +16,8 @@ from nnc_py.ir.node import Node, OpType
 from nnc_py.ir.tensor import TensorShape, TensorType
 from nnc_py.ir.types import DataType
 from nnc_py.joint_schedule.solver import CliJointScheduleSolver
-from nnc_py.passes.base import PassManager
 from nnc_py.passes import joint_tiling_schedule as joint_pass_module
+from nnc_py.passes.base import PassManager
 from tests.joint_solver_helpers import joint_solver_cli_command
 
 
@@ -116,12 +116,12 @@ def test_o3_default_pass_order_uses_tile_aware_v3_without_scheduler_or_legacy_sp
     assert "LayoutPlanningPass" in names
     assert "TiledLoweringPass" in names
     assert "MemoryPlanningPassV3" in names
+    assert "DominatorFusionPass" not in names
     assert "PipelineStepLoweringPass" not in names
     assert "PipelineSchedulingPass" not in names
     assert "MemoryPlanningPassV4" not in names
     assert "SpillAnalysisPass" not in names
-    assert names.index("PrepackLoweringPass") < names.index("DominatorFusionPass")
-    assert names.index("DominatorFusionPass") < names.index("ScheduleAnalysisPass")
+    assert names.index("PrepackLoweringPass") < names.index("ScheduleAnalysisPass")
     assert names.index("ScheduleAnalysisPass") < names.index("LayoutPlanningPass")
     assert names.index("LayoutPlanningPass") < names.index("TiledLoweringPass")
     assert names.index("TiledLoweringPass") < names.index("LivenessAnalysisPass")
@@ -134,6 +134,7 @@ def test_o3_joint_tiling_schedule_pass_order_runs_materialization_before_livenes
         for pass_obj in PassManager.get_joint_tiling_schedule_o3_passes()
     ]
 
+    assert "DominatorFusionPass" not in names
     assert names.index("ScheduleAnalysisPass") < names.index("LayoutPlanningPass")
     assert names.index("LayoutPlanningPass") < names.index("TiledLoweringPass")
     assert names.index("TiledLoweringPass") < names.index("JointTilingScheduleProblemPass")

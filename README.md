@@ -2,13 +2,13 @@
 
 > Neural Network Compiler - ONNX to C compiler for edge inference
 
-NNC-Py is a compiler that converts ONNX neural network models to C code for embedded and edge devices. The x86 backend is implemented today; the NPU target is reserved but not implemented yet. The compiler includes operator fusion, memory optimization, and a C runtime for generated models.
+NNC-Py is a compiler that converts ONNX neural network models to C code for embedded and edge devices. The x86 backend is implemented today; the `npu` target name is reserved but intentionally unavailable until a real backend exists. The compiler includes operator fusion, tiled schedule analysis, external joint tiling/schedule solving, memory optimization, and a C runtime for generated models.
 
 ## Features
 
 - **ONNX Frontend**: Load and parse ONNX models with automatic shape inference
-- **Backend**: Generate and run x86 C code today, with an NPU target planned
-- **Optimization Passes**: Identity elimination, dead code elimination, fusion, transfer-aware memory planning, and spill analysis (O0-O3)
+- **Backend**: Generate and run x86 C code today, with the `npu` target name reserved for a future backend
+- **Optimization Passes**: Identity elimination, dead code elimination, pattern fusion, tiled schedule analysis/lowering, external joint tiling/schedule solving, and transfer-aware memory planning (O0-O3)
 - **Runtime Library**: Optimized C runtime for common neural network operators
 - **CLI Interface**: Simple command-line interface for compiling models
 
@@ -16,7 +16,7 @@ NNC-Py is a compiler that converts ONNX neural network models to C code for embe
 
 ```bash
 # Install from source
-git clone <repository-url>
+git clone git@github.com:iMMIQ/nnc-py.git
 cd nnc-py
 pip install -e .
 ```
@@ -127,15 +127,14 @@ Notes:
 - **O0**: Required analysis only, using the conservative legacy `basic` allocator
 - **O1**: O0 + graph cleanup, with `cost_aware` memory planning enabled by default
 - **O2**: O1 + constrained-memory spill/reload planning, still using the default `cost_aware` allocator
-- **O3**: O2 + pattern fusion + dominator fusion
+- **O3**: O2 + pattern fusion + tiled schedule analysis/lowering + joint tiling/schedule solve/materialization
 
 ### External Joint Tiling Contract
 
-`O3` also has an opt-in external joint tiling/schedule contract path for handing
-tiling-recipe selection and makespan-oriented scheduling to an external solver
-without exposing the internal compiler schedule IR.
+`O3` uses the external joint tiling/schedule contract path by default for
+tiling-recipe selection and makespan-oriented scheduling without exposing the
+internal compiler schedule IR.
 
-- Enable it with compile metadata: `{"enable_joint_tiling_schedule_contract": True}`
 - By default, source checkouts resolve the solver from the checked-out
   `joint_solver/bin/nnc-joint-solver` submodule CLI.
 - Optionally override the solver command explicitly with:
@@ -146,6 +145,9 @@ without exposing the internal compiler schedule IR.
   the default joint solver path.
 - v1 is intentionally limited to regions and recipes the compiler already knows
   how to build from existing tiled-lowering metadata
+- The experimental `DominatorFusionPass` still exists as a standalone pass, but
+  it is not part of the default `O3` compile pipeline until it performs real
+  graph rewrites and codegen-visible fusion.
 
 ### Memory Planning Defaults
 
@@ -162,7 +164,6 @@ nnc-py/
 ├── src/nnc_py/
 │   ├── cli.py              # Command-line interface
 │   ├── compiler.py         # Main compiler class
-│   ├── config.py           # Configuration management
 │   ├── codegen/            # Code generation
 │   │   ├── base.py         # Backend base class
 │   │   ├── c_emitter.py    # C code emitter
@@ -174,9 +175,11 @@ nnc-py/
 │   │   ├── node.py         # Operation nodes
 │   │   ├── tensor.py       # Tensor types
 │   │   └── types.py        # Data types
+│   ├── joint_schedule/     # External joint tiling/schedule contract
 │   └── passes/             # Optimization passes
 │       ├── base.py         # Pass manager
-│       └── constant_folding.py
+│       ├── pattern_fusion.py
+│       └── joint_tiling_schedule.py
 ├── runtime/                # C runtime library
 │   ├── include/            # Runtime headers
 │   └── x86/                # x86 implementation

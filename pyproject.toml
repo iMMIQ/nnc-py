@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [
-    {name = "Your Name", email = "your.email@example.com"}
+    {name = "Yudong An", email = "ayd@immiq.top"}
 ]
 keywords = ["onnx", "compiler", "neural-network", "edge-inference", "embedded"]
 classifiers = [
@@ -57,10 +57,10 @@ test = [
 nnc = "nnc_py.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/yourusername/nnc-py"
-Documentation = "https://github.com/yourusername/nnc-py#readme"
-Repository = "https://github.com/yourusername/nnc-py"
-Issues = "https://github.com/yourusername/nnc-py/issues"
+Homepage = "https://github.com/iMMIQ/nnc-py"
+Documentation = "https://github.com/iMMIQ/nnc-py#readme"
+Repository = "https://github.com/iMMIQ/nnc-py"
+Issues = "https://github.com/iMMIQ/nnc-py/issues"
 
 [tool.uv.sources]
 torch = { index = "pytorch-cpu" }
