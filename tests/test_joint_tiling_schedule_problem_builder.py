@@ -600,7 +600,9 @@ def test_build_joint_problem_emits_boundaries_actions_and_logical_values():
     problem = build_joint_problem(ctx)
 
     assert [region.region_id for region in problem.regions] == ["conv0", "conv1"]
-    assert [recipe.region_id for recipe in problem.recipes] == ["conv0", "conv1"]
+    assert {recipe.region_id for recipe in problem.recipes} == {"conv0", "conv1"}
+    assert len([recipe for recipe in problem.recipes if recipe.region_id == "conv0"]) >= 2
+    assert len([recipe for recipe in problem.recipes if recipe.region_id == "conv1"]) >= 2
     assert problem.values
     assert problem.actions
     assert problem.boundary_constraints
@@ -615,9 +617,11 @@ def test_build_joint_problem_emits_boundaries_actions_and_logical_values():
     boundary = problem.boundary_constraints[0]
     assert boundary.src_region_id == "conv0"
     assert boundary.dst_region_id == "conv1"
-    assert {(pair.src_recipe_id, pair.dst_recipe_id) for pair in boundary.compatible_recipe_pairs} == {
-        ("conv0.recipe0", "conv1.recipe0")
+    compatible_pairs = {
+        (pair.src_recipe_id, pair.dst_recipe_id) for pair in boundary.compatible_recipe_pairs
     }
+    assert ("conv0.recipe0", "conv1.recipe0") in compatible_pairs
+    assert ("conv0.recipe1", "conv1.recipe1") in compatible_pairs
 
     values = {value.value_id: value for value in problem.values}
     assert values["input"].initial_tier is JointValueTier.INPUT
@@ -631,6 +635,8 @@ def test_build_joint_problem_emits_boundaries_actions_and_logical_values():
     actions = {action.action_id: action for action in problem.actions}
     assert actions["conv0.recipe0.compute"].kind is JointActionKind.COMPUTE
     assert actions["conv1.recipe0.compute"].kind is JointActionKind.COMPUTE
+    assert actions["conv0.recipe1.compute"].kind is JointActionKind.COMPUTE
+    assert actions["conv1.recipe1.compute"].kind is JointActionKind.COMPUTE
     assert actions["conv0.recipe0.dma_in.input"].kind is JointActionKind.DMA_IN
     assert actions["conv0.recipe0.dma_in.weight0"].kind is JointActionKind.DMA_IN
     assert actions["conv1.recipe0.dma_in.weight1"].kind is JointActionKind.DMA_IN
@@ -644,6 +650,11 @@ def test_build_joint_problem_emits_boundaries_actions_and_logical_values():
     assert any(
         edge.src_action_id == "conv0.recipe0.compute"
         and edge.dst_action_id == "conv1.recipe0.compute"
+        for edge in problem.dependency_edges
+    )
+    assert any(
+        edge.src_action_id == "conv0.recipe1.compute"
+        and edge.dst_action_id == "conv1.recipe1.compute"
         for edge in problem.dependency_edges
     )
 
@@ -664,10 +675,12 @@ def test_build_joint_problem_emits_fixed_sram_items_for_compute_actions():
     assert sram_items["conv0.recipe0.compute.temp"].size_bytes == 1024
     assert sram_items["conv0.recipe0.compute.temp"].alignment_bytes == 16
     assert sram_items["conv0.recipe0.compute.temp"].owner_action_id == "conv0.recipe0.compute"
+    assert "conv0.recipe1.compute.temp" in sram_items
     assert sram_items["conv1.recipe0.compute.temp"].kind is JointSramItemKind.TEMP_INTERVAL
     assert sram_items["conv1.recipe0.compute.temp"].size_bytes == 1536
     assert sram_items["conv1.recipe0.compute.temp"].alignment_bytes == 16
     assert sram_items["conv1.recipe0.compute.temp"].owner_action_id == "conv1.recipe0.compute"
+    assert "conv1.recipe1.compute.temp" in sram_items
 
 
 def test_build_joint_problem_does_not_invent_transfer_buffer_items_from_region_hints():
@@ -709,10 +722,12 @@ def test_build_joint_problem_synthesizes_missing_plain_execution_plan_coverage()
     problem = build_joint_problem(ctx)
 
     assert {region.region_id for region in problem.regions} == {"relu0", "conv0"}
-    recipes = {recipe.region_id: recipe for recipe in problem.recipes}
-    assert recipes["relu0"].tile_spec.axes == ()
-    assert recipes["relu0"].tile_spec.shape == ()
-    assert recipes["conv0"].tile_spec.axes == ("h", "w")
+    relu_recipes = [recipe for recipe in problem.recipes if recipe.region_id == "relu0"]
+    conv_recipes = [recipe for recipe in problem.recipes if recipe.region_id == "conv0"]
+    assert len(relu_recipes) == 1
+    assert relu_recipes[0].tile_spec.axes == ()
+    assert relu_recipes[0].tile_spec.shape == ()
+    assert conv_recipes[0].tile_spec.axes == ("h", "w")
 
 
 def test_build_joint_problem_maps_tile_shape_by_named_axes():

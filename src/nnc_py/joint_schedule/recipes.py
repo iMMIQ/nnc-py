@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
+from dataclasses import replace
 import sys
 
 from nnc_py.ir.context import CompileContext
-from nnc_py.ir.execution_plan import NodeExecutionPlan
+from nnc_py.ir.execution_plan import NodeExecutionPlan, TensorAccessPlan
 from nnc_py.ir.joint_tiling_schedule import (
     JOINT_TILING_SCHEDULE_OBJECTIVE,
     JOINT_TILING_SCHEDULE_PROBLEM_SCHEMA_VERSION,
@@ -68,18 +69,27 @@ def build_joint_problem(ctx: CompileContext) -> JointProblem:
     plan_by_region_id = _plan_by_region_id(ctx, regions)
     provider = _build_cost_model_provider(ctx)
     producer_region_by_value = _producer_region_by_value(regions)
-    value_sizes = _value_sizes(ctx, regions, plan_by_region_id)
-
-    assemblies = tuple(
-        _build_region_assembly(
+    plan_variants_by_region_id = {
+        region.region_id: _plan_variants_for_region(
             ctx,
             region=region,
-            plan=plan_by_region_id[region.region_id],
+            base_plan=plan_by_region_id[region.region_id],
+        )
+        for region in regions
+    }
+    value_sizes = _value_sizes(ctx, regions, plan_variants_by_region_id)
+
+    assemblies = tuple(
+        assembly
+        for region in regions
+        for assembly in _build_region_assemblies(
+            ctx,
+            region=region,
+            plans=plan_variants_by_region_id[region.region_id],
             provider=provider,
             producer_region_by_value=producer_region_by_value,
             value_sizes=value_sizes,
         )
-        for region in regions
     )
     actions = [action for assembly in assemblies for action in assembly.actions]
     actions_by_id = {action.action_id: action for action in actions}
@@ -131,15 +141,40 @@ def build_joint_problem(ctx: CompileContext) -> JointProblem:
     return problem
 
 
+def _build_region_assemblies(
+    ctx: CompileContext,
+    *,
+    region: JointRegion,
+    plans: tuple[NodeExecutionPlan, ...],
+    provider,
+    producer_region_by_value: dict[str, str],
+    value_sizes: dict[str, int],
+) -> tuple[_RegionAssembly, ...]:
+    return tuple(
+        _build_region_assembly(
+            ctx,
+            region=region,
+            plan=plan,
+            recipe_index=recipe_index,
+            provider=provider,
+            producer_region_by_value=producer_region_by_value,
+            value_sizes=value_sizes,
+        )
+        for recipe_index, plan in enumerate(plans)
+    )
+
+
 def _build_region_assembly(
     ctx: CompileContext,
     *,
     region: JointRegion,
     plan: NodeExecutionPlan,
+    recipe_index: int,
     provider,
     producer_region_by_value: dict[str, str],
     value_sizes: dict[str, int],
 ) -> _RegionAssembly:
+    recipe_id = f"{region.region_id}.recipe{recipe_index}"
     external_input_value_ids = tuple(
         value_id
         for value_id in region.input_value_ids
@@ -151,13 +186,13 @@ def _build_region_assembly(
             ctx,
             provider=provider,
             plan=plan,
-            action_id=f"{region.region_id}.recipe0.dma_in.{value_id}",
+            action_id=f"{recipe_id}.dma_in.{value_id}",
             action_kind=JointActionKind.DMA_IN,
             schedule_step_kind=ScheduleStepKind.DMA_IN,
             value_id=value_id,
             size_bytes=value_sizes[value_id],
             region_id=region.region_id,
-            recipe_id=f"{region.region_id}.recipe0",
+            recipe_id=recipe_id,
             is_optional=False,
             optional_value_id=None,
         )
@@ -172,8 +207,8 @@ def _build_region_assembly(
         plan=plan,
         reads=compute_reads,
         writes=compute_writes,
-        action_id=f"{region.region_id}.recipe0.compute",
-        recipe_id=f"{region.region_id}.recipe0",
+        action_id=f"{recipe_id}.compute",
+        recipe_id=recipe_id,
         value_sizes=value_sizes,
     )
     dma_out_actions = tuple(
@@ -181,13 +216,13 @@ def _build_region_assembly(
             ctx,
             provider=provider,
             plan=plan,
-            action_id=f"{region.region_id}.recipe0.dma_out.{value_id}",
+            action_id=f"{recipe_id}.dma_out.{value_id}",
             action_kind=JointActionKind.DMA_OUT,
             schedule_step_kind=ScheduleStepKind.DMA_OUT,
             value_id=value_id,
             size_bytes=value_sizes[value_id],
             region_id=region.region_id,
-            recipe_id=f"{region.region_id}.recipe0",
+            recipe_id=recipe_id,
             is_optional=False,
             optional_value_id=None,
         )
@@ -204,7 +239,7 @@ def _build_region_assembly(
         )
     )
     recipe = JointRecipe(
-        recipe_id=f"{region.region_id}.recipe0",
+        recipe_id=recipe_id,
         region_id=region.region_id,
         tile_spec=_tile_spec_for(ctx, plan),
         layout_spec=_layout_spec_for(plan),
@@ -254,21 +289,21 @@ def _producer_region_by_value(
 def _value_sizes(
     ctx: CompileContext,
     regions: tuple[JointRegion, ...],
-    plan_by_region_id: dict[str, NodeExecutionPlan],
+    plan_variants_by_region_id: dict[str, tuple[NodeExecutionPlan, ...]],
 ) -> dict[str, int]:
     size_by_value: dict[str, int] = {}
     for region in regions:
-        plan = plan_by_region_id[region.region_id]
-        for access in (*plan.input_accesses, *plan.output_accesses):
-            if access.tensor_name not in ctx.graph.tensors:
-                raise JointProblemBuilderError(
-                    f"node execution plan for {plan.node_name!r} references unknown tensor "
-                    f"{access.tensor_name!r}"
+        for plan in plan_variants_by_region_id[region.region_id]:
+            for access in (*plan.input_accesses, *plan.output_accesses):
+                if access.tensor_name not in ctx.graph.tensors:
+                    raise JointProblemBuilderError(
+                        f"node execution plan for {plan.node_name!r} references unknown tensor "
+                        f"{access.tensor_name!r}"
+                    )
+                size_by_value[access.tensor_name] = max(
+                    size_by_value.get(access.tensor_name, 0),
+                    _access_size_bytes(ctx, access, node_name=plan.node_name),
                 )
-            size_by_value[access.tensor_name] = max(
-                size_by_value.get(access.tensor_name, 0),
-                _access_size_bytes(ctx, access, node_name=plan.node_name),
-            )
     for region in regions:
         for value_id in (*region.input_value_ids, *region.output_value_ids):
             size_by_value.setdefault(value_id, _fallback_tensor_size(ctx, value_id))
@@ -396,10 +431,12 @@ def _build_optional_actions(
         for value_id in assembly.spillable_output_value_ids
     }
     optional_actions: list[JointAction] = []
+    seen_value_ids: set[str] = set()
     for assembly in assemblies:
         for value_id in assembly.spillable_output_value_ids:
-            if value_id not in producer_action_by_value:
+            if value_id not in producer_action_by_value or value_id in seen_value_ids:
                 continue
+            seen_value_ids.add(value_id)
             optional_actions.append(
                 _build_transfer_action(
                     ctx,
@@ -510,11 +547,26 @@ def _build_values(
 def _build_boundary_constraints(
     assemblies: tuple[_RegionAssembly, ...]
 ) -> tuple[JointBoundaryConstraint, ...]:
-    recipes_by_region = {assembly.region.region_id: (assembly.recipe,) for assembly in assemblies}
+    recipes_by_region: dict[str, tuple[JointRecipe, ...]] = {
+        region_id: tuple(
+            assembly.recipe
+            for assembly in assemblies
+            if assembly.region.region_id == region_id
+        )
+        for region_id in {assembly.region.region_id for assembly in assemblies}
+    }
+    primary_assemblies = {
+        region_id: next(
+            assembly
+            for assembly in assemblies
+            if assembly.region.region_id == region_id
+        )
+        for region_id in recipes_by_region
+    }
     boundaries: list[JointBoundaryConstraint] = []
-    for src in assemblies:
+    for src in primary_assemblies.values():
         src_outputs = set(src.region.output_value_ids)
-        for dst in assemblies:
+        for dst in primary_assemblies.values():
             if src.region.region_id == dst.region.region_id:
                 continue
             if not src_outputs.intersection(dst.region.input_value_ids):
@@ -597,10 +649,20 @@ def _build_dependency_edges(
                 append_edge(assembly.compute_action.action_id, action.action_id, JointDependencyEdgeKind.DATA)
 
     for value in values:
-        if value.producer is not None:
+        writer_action_ids = sorted(
+            action.action_id
+            for action in action_by_id.values()
+            if value.value_id in action.writes
+            and action.kind in (
+                JointActionKind.COMPUTE,
+                JointActionKind.DMA_IN,
+                JointActionKind.RELOAD,
+            )
+        )
+        for writer_action_id in writer_action_ids:
             for consumer in value.consumers:
                 append_edge(
-                    value.producer.action_id,
+                    writer_action_id,
                     consumer.action_id,
                     JointDependencyEdgeKind.DATA,
                 )
@@ -614,18 +676,21 @@ def _build_dependency_edges(
         value_id = action.optional_value_id
         if value_id is None:
             continue
-        producer_action_id = next(
-            (
-                value.producer.action_id
-                for value in values
-                if value.value_id == value_id and value.producer is not None
-            ),
-            None,
+        producer_action_ids = sorted(
+            action_id
+            for action_id, candidate_action in action_by_id.items()
+            if value_id in candidate_action.writes
+            and candidate_action.kind in (
+                JointActionKind.COMPUTE,
+                JointActionKind.DMA_IN,
+                JointActionKind.RELOAD,
+            )
         )
-        if producer_action_id is None:
+        if not producer_action_ids:
             continue
         if action.kind is JointActionKind.SPILL:
-            append_edge(producer_action_id, action.action_id, JointDependencyEdgeKind.ORDER)
+            for producer_action_id in producer_action_ids:
+                append_edge(producer_action_id, action.action_id, JointDependencyEdgeKind.ORDER)
             reload_action_id = f"{value_id}.reload"
             if reload_action_id in action_by_id:
                 append_edge(action.action_id, reload_action_id, JointDependencyEdgeKind.ORDER)
@@ -846,6 +911,9 @@ def _validate_problem(problem: JointProblem) -> None:
                 )
 
     for region in problem.regions:
+        region_recipes = tuple(
+            recipe for recipe in problem.recipes if recipe.region_id == region.region_id
+        )
         for value_id in (*region.input_value_ids, *region.output_value_ids):
             if value_id not in values_by_id:
                 raise JointProblemBuilderError(
@@ -854,16 +922,6 @@ def _validate_problem(problem: JointProblem) -> None:
         region_actions = tuple(
             action for action in problem.actions if action.region_id == region.region_id
         )
-        compute_actions = tuple(
-            action
-            for action in region_actions
-            if action.kind is JointActionKind.COMPUTE
-        )
-        if len(compute_actions) != 1:
-            raise JointProblemBuilderError(
-                f"region {region.region_id!r} must have exactly one compute action"
-            )
-        compute_action = compute_actions[0]
         if any(
             not any(value_id in action.reads for action in region_actions)
             for value_id in region.input_value_ids
@@ -878,14 +936,16 @@ def _validate_problem(problem: JointProblem) -> None:
             raise JointProblemBuilderError(
                 f"region {region.region_id!r} output interface does not match action writes"
             )
-        if any(value_id not in compute_action.reads for value_id in region.input_value_ids):
-            raise JointProblemBuilderError(
-                f"region {region.region_id!r} input interface does not match compute reads"
+        for recipe in region_recipes:
+            recipe_compute_actions = tuple(
+                action
+                for action in region_actions
+                if action.recipe_id == recipe.recipe_id and action.kind is JointActionKind.COMPUTE
             )
-        if any(value_id not in compute_action.writes for value_id in region.output_value_ids):
-            raise JointProblemBuilderError(
-                f"region {region.region_id!r} output interface does not match compute writes"
-            )
+            if len(recipe_compute_actions) != 1:
+                raise JointProblemBuilderError(
+                    f"recipe {recipe.recipe_id!r} must have exactly one compute action"
+                )
 
     adjacent_pairs = {
         (src.region_id, dst.region_id)
@@ -918,3 +978,128 @@ def _validate_problem(problem: JointProblem) -> None:
 
 
 __all__ = ["build_joint_problem"]
+
+
+def _plan_variants_for_region(
+    ctx: CompileContext,
+    *,
+    region: JointRegion,
+    base_plan: NodeExecutionPlan,
+) -> tuple[NodeExecutionPlan, ...]:
+    del region
+    variants = [base_plan]
+    seen = {_plan_variant_key(base_plan)}
+    for candidate in _candidate_plan_variants(ctx, base_plan=base_plan):
+        key = _plan_variant_key(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        variants.append(candidate)
+    return tuple(variants)
+
+
+def _candidate_plan_variants(
+    ctx: CompileContext,
+    *,
+    base_plan: NodeExecutionPlan,
+) -> tuple[NodeExecutionPlan, ...]:
+    if tuple(base_plan.tile_axes) != ("h", "w"):
+        return ()
+    output_access = next(
+        (access for access in base_plan.output_accesses if access.tile_region.logical_extents),
+        None,
+    )
+    if output_access is None:
+        return ()
+    output_extents = tuple(int(max(dim, 0)) for dim in output_access.tile_region.logical_extents)
+    if len(output_extents) < 2:
+        return ()
+    output_h = output_extents[-2]
+    output_w = output_extents[-1]
+    if output_h <= 1 and output_w <= 1:
+        return ()
+
+    candidate_hw: list[tuple[int, int]] = []
+    for tile_h, tile_w in (
+        (max(1, output_h // 2), output_w),
+        (output_h, max(1, output_w // 2)),
+        (max(1, output_h // 2), max(1, output_w // 2)),
+        (1, output_w),
+        (output_h, 1),
+    ):
+        if (tile_h, tile_w) != (output_h, output_w) and (tile_h, tile_w) not in candidate_hw:
+            candidate_hw.append((tile_h, tile_w))
+
+    variants: list[NodeExecutionPlan] = []
+    for tile_h, tile_w in candidate_hw:
+        output_accesses = tuple(
+            _replace_access_hw(access, tile_h=tile_h, tile_w=tile_w)
+            for access in base_plan.output_accesses
+        )
+        input_hw = _input_hw_for_variant(base_plan, tile_h=tile_h, tile_w=tile_w)
+        input_accesses = tuple(
+            _replace_access_hw(access, tile_h=input_hw[0], tile_w=input_hw[1])
+            if access.tile_region.logical_extents
+            else access
+            for access in base_plan.input_accesses
+        )
+        variants.append(
+            replace(
+                base_plan,
+                input_accesses=input_accesses,
+                output_accesses=output_accesses,
+            )
+        )
+    return tuple(variants)
+
+
+def _replace_access_hw(
+    access: TensorAccessPlan,
+    *,
+    tile_h: int,
+    tile_w: int,
+) -> TensorAccessPlan:
+    if not access.tile_region.logical_extents:
+        return access
+    extents = access.tile_region.logical_extents
+    if len(extents) < 2:
+        return access
+    tile_region = replace(
+        access.tile_region,
+        logical_extents=(*extents[:-2], tile_h, tile_w),
+    )
+    return replace(access, tile_region=tile_region)
+
+
+def _input_hw_for_variant(
+    plan: NodeExecutionPlan,
+    *,
+    tile_h: int,
+    tile_w: int,
+) -> tuple[int, int]:
+    input_access = next(
+        (access for access in plan.input_accesses if access.tile_region.logical_extents),
+        None,
+    )
+    output_access = next(
+        (access for access in plan.output_accesses if access.tile_region.logical_extents),
+        None,
+    )
+    if input_access is None or output_access is None:
+        return tile_h, tile_w
+    input_extents = input_access.tile_region.logical_extents
+    output_extents = output_access.tile_region.logical_extents
+    if len(input_extents) < 2 or len(output_extents) < 2:
+        return tile_h, tile_w
+    halo_h = max(input_extents[-2] - output_extents[-2], 0)
+    halo_w = max(input_extents[-1] - output_extents[-1], 0)
+    return max(1, tile_h + halo_h), max(1, tile_w + halo_w)
+
+
+def _plan_variant_key(plan: NodeExecutionPlan) -> tuple[object, ...]:
+    return (
+        plan.node_name,
+        plan.tile_axes,
+        tuple(access.tile_region.logical_extents for access in plan.input_accesses),
+        tuple(access.tile_region.logical_extents for access in plan.output_accesses),
+    )

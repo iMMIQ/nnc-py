@@ -635,6 +635,15 @@ def _resident_producer_step_id(
     if value.producer is not None and value.producer.action_id in active_actions:
         if window_start is None or end_by_action[value.producer.action_id] == window_start:
             return value.producer.action_id
+    compute_matches = sorted(
+        action_id
+        for action_id, action in active_actions.items()
+        if action.kind is JointActionKind.COMPUTE
+        and value.value_id in action.writes
+        and (window_start is None or end_by_action[action_id] == window_start)
+    )
+    if compute_matches:
+        return compute_matches[0]
     for action_id, action in active_actions.items():
         if action.kind in (JointActionKind.DMA_IN, JointActionKind.RELOAD) and value.value_id in action.writes:
             if window_start is None or end_by_action[action_id] == window_start:

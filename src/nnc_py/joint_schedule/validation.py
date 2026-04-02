@@ -197,6 +197,9 @@ def _validate_problem_shape(problem: JointProblem) -> None:
         region_actions = tuple(
             action for action in problem.actions if action.region_id == region.region_id
         )
+        region_recipes = tuple(
+            recipe for recipe in problem.recipes if recipe.region_id == region.region_id
+        )
         for value_id in (*region.input_value_ids, *region.output_value_ids):
             if value_id not in values_by_id:
                 raise _ValidationError(
@@ -219,6 +222,18 @@ def _validate_problem_shape(problem: JointProblem) -> None:
                 JointFailureCategory.INVALID_SOLUTION,
                 f"region {region.region_id!r} output interface does not match action writes",
             )
+        for recipe in region_recipes:
+            recipe_actions = tuple(
+                action for action in region_actions if action.recipe_id == recipe.recipe_id
+            )
+            compute_actions = tuple(
+                action for action in recipe_actions if action.kind is JointActionKind.COMPUTE
+            )
+            if len(compute_actions) != 1:
+                raise _ValidationError(
+                    JointFailureCategory.INVALID_SOLUTION,
+                    f"recipe {recipe.recipe_id!r} must have exactly one compute action",
+                )
 
     adjacent_pairs = {
         (src.region_id, dst.region_id)
