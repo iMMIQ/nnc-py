@@ -218,6 +218,109 @@ def _make_two_region_context() -> CompileContext:
     return ctx
 
 
+def _make_rectangular_two_region_context() -> CompileContext:
+    graph = Graph("rectangular_two_region_problem")
+    graph.inputs = ["input"]
+    graph.outputs = ["out"]
+
+    tensor_specs = (
+        ("input", [1, 16, 64, 128], MemoryLayout.NCHW),
+        ("weight0", [16, 16, 3, 3], MemoryLayout.OIHW),
+        ("weight1", [16, 16, 3, 3], MemoryLayout.OIHW),
+        ("mid", [1, 16, 64, 128], MemoryLayout.NCHW),
+        ("out", [1, 16, 64, 128], MemoryLayout.NCHW),
+    )
+    for name, dims, layout in tensor_specs:
+        graph.add_tensor(
+            TensorType(
+                name=name,
+                dtype=DataType.FLOAT32,
+                shape=TensorShape(dims, layout=layout),
+            )
+        )
+    graph.constants["weight0"] = [1.0]
+    graph.constants["weight1"] = [1.0]
+    graph.add_node(
+        Node(
+            op_type=OpType.CONV2D,
+            name="conv0",
+            inputs=["input", "weight0"],
+            outputs=["mid"],
+            attrs={"kernel_shape": [3, 3], "pads": [1, 1, 1, 1], "strides": [1, 1]},
+        )
+    )
+    graph.add_node(
+        Node(
+            op_type=OpType.CONV2D,
+            name="conv1",
+            inputs=["mid", "weight1"],
+            outputs=["out"],
+            attrs={"kernel_shape": [3, 3], "pads": [1, 1, 1, 1], "strides": [1, 1]},
+        )
+    )
+
+    ctx = CompileContext(graph=graph, target="x86", optimization_level=3)
+    ctx.metadata["pipeline_sram_capacity_bytes"] = 1 << 20
+    for node_name, input_name, weight_name, output_name in (
+        ("conv0", "input", "weight0", "mid"),
+        ("conv1", "mid", "weight1", "out"),
+    ):
+        set_node_execution_plan(
+            ctx,
+            NodeExecutionPlan(
+                node_name=node_name,
+                op_family="conv2d",
+                tile_axes=("h", "w"),
+                layout_class=LayoutClass.BLOCKED_ACTIVATION,
+                memory_regions=(
+                    MemoryRegionKind.TILE,
+                    MemoryRegionKind.SCRATCH,
+                ),
+                input_accesses=(
+                    TensorAccessPlan(
+                        tensor_name=input_name,
+                        layout_class=LayoutClass.BLOCKED_ACTIVATION,
+                        tile_region=TileRegion(
+                            logical_extents=(1, 16, 28, 58),
+                            halo_extents=(0, 0, 1, 1),
+                        ),
+                        memory_region=MemoryRegionKind.TILE,
+                    ),
+                    TensorAccessPlan(
+                        tensor_name=weight_name,
+                        layout_class=LayoutClass.BLOCKED_WEIGHT,
+                        memory_region=MemoryRegionKind.PERSISTENT,
+                    ),
+                ),
+                output_accesses=(
+                    TensorAccessPlan(
+                        tensor_name=output_name,
+                        layout_class=LayoutClass.BLOCKED_ACTIVATION,
+                        tile_region=TileRegion(logical_extents=(1, 16, 26, 56)),
+                        memory_region=MemoryRegionKind.TILE,
+                    ),
+                ),
+            ),
+        )
+    ctx.metadata["node_execution_plan_region_sizes"] = {
+        "conv0": {
+            "tensor_bytes": {
+                "input": 1 * 16 * 28 * 58 * 4,
+                "mid": 1 * 16 * 26 * 56 * 4,
+            },
+            "region_bytes": {"scratch": 1024},
+        },
+        "conv1": {
+            "tensor_bytes": {
+                "mid": 1 * 16 * 28 * 58 * 4,
+                "out": 1 * 16 * 26 * 56 * 4,
+            },
+            "region_bytes": {"scratch": 1024},
+        },
+    }
+    return ctx
+
+
 def _make_pack_region_context() -> CompileContext:
     graph = Graph("pack_region_problem")
     graph.inputs = ["lhs"]
@@ -620,8 +723,12 @@ def test_build_joint_problem_emits_boundaries_actions_and_logical_values():
     compatible_pairs = {
         (pair.src_recipe_id, pair.dst_recipe_id) for pair in boundary.compatible_recipe_pairs
     }
+    conv0_recipes = [recipe for recipe in problem.recipes if recipe.region_id == "conv0"]
+    conv1_recipes = [recipe for recipe in problem.recipes if recipe.region_id == "conv1"]
     assert ("conv0.recipe0", "conv1.recipe0") in compatible_pairs
-    assert ("conv0.recipe1", "conv1.recipe1") in compatible_pairs
+    assert len(compatible_pairs) < len(conv0_recipes) * len(conv1_recipes)
+    assert ("conv0.recipe0", "conv1.recipe1") not in compatible_pairs
+    assert ("conv0.recipe0", "conv1.recipe2") not in compatible_pairs
 
     values = {value.value_id: value for value in problem.values}
     assert values["input"].initial_tier is JointValueTier.INPUT
@@ -691,25 +798,48 @@ def test_build_joint_problem_uses_recipe_specific_dma_sizes_and_footprints():
     actions = {action.action_id: action for action in problem.actions}
     recipes = {recipe.recipe_id: recipe for recipe in problem.recipes}
     values = {value.value_id: value for value in problem.values}
+    conv0_recipes = [recipe for recipe in problem.recipes if recipe.region_id == "conv0"]
+    conv1_recipes = [recipe for recipe in problem.recipes if recipe.region_id == "conv1"]
+    largest_conv0 = max(conv0_recipes, key=lambda recipe: recipe.value_footprint.resident_bytes)
+    smallest_conv0 = min(conv0_recipes, key=lambda recipe: recipe.value_footprint.resident_bytes)
+    largest_conv1 = max(conv1_recipes, key=lambda recipe: recipe.value_footprint.transfer_bytes)
+    smallest_conv1 = min(conv1_recipes, key=lambda recipe: recipe.value_footprint.transfer_bytes)
 
     assert (
-        actions["conv0.recipe0.dma_in.input"].duration
-        > actions["conv0.recipe4.dma_in.input"].duration
+        actions[f"{largest_conv0.recipe_id}.dma_in.input"].duration
+        > actions[f"{smallest_conv0.recipe_id}.dma_in.input"].duration
     )
     assert (
-        actions["conv1.recipe0.dma_out.out"].duration
-        > actions["conv1.recipe4.dma_out.out"].duration
+        actions[f"{largest_conv1.recipe_id}.dma_out.out"].duration
+        > actions[f"{smallest_conv1.recipe_id}.dma_out.out"].duration
     )
     assert (
-        recipes["conv0.recipe0"].value_footprint.resident_bytes
-        > recipes["conv0.recipe4"].value_footprint.resident_bytes
+        largest_conv0.value_footprint.resident_bytes
+        > smallest_conv0.value_footprint.resident_bytes
     )
     assert (
-        recipes["conv0.recipe0"].value_footprint.transfer_bytes
-        > recipes["conv0.recipe4"].value_footprint.transfer_bytes
+        largest_conv0.value_footprint.transfer_bytes
+        > smallest_conv0.value_footprint.transfer_bytes
     )
     assert values["mid"].size_bytes == 20736
     assert values["out"].size_bytes == 16384
+
+
+def test_build_joint_problem_emits_more_diverse_rectangular_recipe_shapes_without_redundant_points():
+    ctx = _make_rectangular_two_region_context()
+
+    problem = build_joint_problem(ctx)
+
+    conv1_recipes = [recipe for recipe in problem.recipes if recipe.region_id == "conv1"]
+    shapes = {tuple(recipe.tile_spec.shape) for recipe in conv1_recipes}
+
+    assert (26, 56) in shapes
+    assert (26, 28) in shapes
+    assert (13, 56) not in shapes
+    assert any(
+        shape[0] not in {1, 13, 26} or shape[1] not in {1, 28, 56}
+        for shape in shapes
+    )
 
 
 def test_build_joint_problem_does_not_invent_transfer_buffer_items_from_region_hints():

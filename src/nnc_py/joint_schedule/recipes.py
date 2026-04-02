@@ -49,10 +49,17 @@ from nnc_py.passes.pipeline_step_lowering import (
     _shape_elements,
     _scratch_bytes,
 )
+from nnc_py.passes.tiled_lowering import (
+    _estimate_node_working_set_bytes,
+    _estimate_scratch_bytes,
+    _fast_memory_budget_bytes,
+    _tiling_reserve_bytes,
+)
 
 from .regions import JointProblemBuilderError, build_joint_regions, get_joint_problem_plans
 
 _DEFAULT_ALIGNMENT_BYTES = 16
+_VARIANT_DIM_RATIOS = (1.0, 0.75, 2.0 / 3.0, 0.5, 1.0 / 3.0, 0.25)
 
 
 @dataclass(frozen=True)
@@ -114,7 +121,7 @@ def build_joint_problem(ctx: CompileContext) -> JointProblem:
         producer_region_by_value=producer_region_by_value,
         value_sizes=value_sizes,
     )
-    boundary_constraints = _build_boundary_constraints(assemblies)
+    boundary_constraints = _build_boundary_constraints(ctx, assemblies)
     dependency_edges = _build_dependency_edges(
         assemblies=assemblies,
         values=values,
@@ -630,48 +637,187 @@ def _build_values(
 
 
 def _build_boundary_constraints(
+    ctx: CompileContext,
     assemblies: tuple[_RegionAssembly, ...]
 ) -> tuple[JointBoundaryConstraint, ...]:
-    recipes_by_region: dict[str, tuple[JointRecipe, ...]] = {
+    region_ids = tuple(dict.fromkeys(assembly.region.region_id for assembly in assemblies))
+    assemblies_by_region: dict[str, tuple[_RegionAssembly, ...]] = {
         region_id: tuple(
-            assembly.recipe
-            for assembly in assemblies
-            if assembly.region.region_id == region_id
+            assembly for assembly in assemblies if assembly.region.region_id == region_id
         )
-        for region_id in {assembly.region.region_id for assembly in assemblies}
+        for region_id in region_ids
     }
     primary_assemblies = {
-        region_id: next(
-            assembly
-            for assembly in assemblies
-            if assembly.region.region_id == region_id
-        )
-        for region_id in recipes_by_region
+        region_id: assemblies_by_region[region_id][0]
+        for region_id in region_ids
     }
     boundaries: list[JointBoundaryConstraint] = []
-    for src in primary_assemblies.values():
+    for src_region_id in region_ids:
+        src = primary_assemblies[src_region_id]
         src_outputs = set(src.region.output_value_ids)
-        for dst in primary_assemblies.values():
+        for dst_region_id in region_ids:
+            dst = primary_assemblies[dst_region_id]
             if src.region.region_id == dst.region.region_id:
                 continue
-            if not src_outputs.intersection(dst.region.input_value_ids):
+            shared_value_ids = tuple(
+                value_id for value_id in src.region.output_value_ids if value_id in dst.region.input_value_ids
+            )
+            if not shared_value_ids:
                 continue
+            compatible_pairs = tuple(
+                JointCompatibleRecipePair(
+                    src_recipe_id=src_assembly.recipe.recipe_id,
+                    dst_recipe_id=dst_assembly.recipe.recipe_id,
+                )
+                for src_assembly in assemblies_by_region[src_region_id]
+                for dst_assembly in assemblies_by_region[dst_region_id]
+                if _boundary_recipes_are_compatible(
+                    ctx,
+                    src_assembly=src_assembly,
+                    dst_assembly=dst_assembly,
+                    src_base_assembly=primary_assemblies[src_region_id],
+                    dst_base_assembly=primary_assemblies[dst_region_id],
+                    shared_value_ids=shared_value_ids,
+                )
+            )
+            if not compatible_pairs:
+                compatible_pairs = tuple(
+                    JointCompatibleRecipePair(
+                        src_recipe_id=src_assembly.recipe.recipe_id,
+                        dst_recipe_id=dst_assembly.recipe.recipe_id,
+                    )
+                    for src_assembly in assemblies_by_region[src_region_id]
+                    for dst_assembly in assemblies_by_region[dst_region_id]
+                )
             boundaries.append(
                 JointBoundaryConstraint(
                     boundary_id=f"{src.region.region_id}->{dst.region.region_id}",
                     src_region_id=src.region.region_id,
                     dst_region_id=dst.region.region_id,
-                    compatible_recipe_pairs=tuple(
-                        JointCompatibleRecipePair(
-                            src_recipe_id=src_recipe.recipe_id,
-                            dst_recipe_id=dst_recipe.recipe_id,
-                        )
-                        for src_recipe in recipes_by_region[src.region.region_id]
-                        for dst_recipe in recipes_by_region[dst.region.region_id]
-                    ),
+                    compatible_recipe_pairs=compatible_pairs,
                 )
             )
     return tuple(boundaries)
+
+
+def _boundary_recipes_are_compatible(
+    ctx: CompileContext,
+    *,
+    src_assembly: _RegionAssembly,
+    dst_assembly: _RegionAssembly,
+    src_base_assembly: _RegionAssembly,
+    dst_base_assembly: _RegionAssembly,
+    shared_value_ids: tuple[str, ...],
+) -> bool:
+    for value_id in shared_value_ids:
+        src_access = _output_access_for_value(src_assembly.plan, value_id)
+        dst_access = _input_access_for_value(dst_assembly.plan, value_id)
+        if src_access is None or dst_access is None:
+            continue
+        if src_access.layout_class is not dst_access.layout_class:
+            return False
+        src_alignment = tuple(int(max(dim, 0)) for dim in src_access.tile_region.block_alignment)
+        dst_alignment = tuple(int(max(dim, 0)) for dim in dst_access.tile_region.block_alignment)
+        if src_alignment and dst_alignment and src_alignment != dst_alignment:
+            return False
+        if not _boundary_requires_scale_match(ctx, src_access=src_access, dst_plan=dst_assembly.plan):
+            continue
+        src_signature = _boundary_scale_signature(src_assembly, src_base_assembly)
+        dst_signature = _boundary_scale_signature(dst_assembly, dst_base_assembly)
+        if src_signature is None or dst_signature is None:
+            continue
+        if len(src_signature) != len(dst_signature):
+            return False
+        if not all(
+            abs(src_bucket - dst_bucket) <= 1
+            for src_bucket, dst_bucket in zip(src_signature, dst_signature)
+        ):
+            return False
+    return True
+
+
+def _boundary_requires_scale_match(
+    ctx: CompileContext,
+    *,
+    src_access: TensorAccessPlan,
+    dst_plan: NodeExecutionPlan,
+) -> bool:
+    shared_tensor = ctx.graph.get_tensor(src_access.tensor_name)
+    dst_output_access = next(
+        (access for access in dst_plan.output_accesses if access.tile_region.logical_extents),
+        None,
+    )
+    if shared_tensor is None or dst_output_access is None:
+        return False
+    dst_tensor = ctx.graph.get_tensor(dst_output_access.tensor_name)
+    shared_hw = _tensor_hw_dims(shared_tensor.shape.dims)
+    dst_hw = None if dst_tensor is None else _tensor_hw_dims(dst_tensor.shape.dims)
+    return shared_hw is not None and dst_hw is not None and shared_hw == dst_hw
+
+
+def _boundary_scale_signature(
+    assembly: _RegionAssembly,
+    base_assembly: _RegionAssembly,
+) -> tuple[int, ...] | None:
+    current_access = next(
+        (access for access in assembly.plan.output_accesses if access.tile_region.logical_extents),
+        None,
+    )
+    base_access = next(
+        (access for access in base_assembly.plan.output_accesses if access.tile_region.logical_extents),
+        None,
+    )
+    if current_access is None or base_access is None:
+        return None
+    current_hw = _boundary_hw_extents(current_access)
+    base_hw = _boundary_hw_extents(base_access)
+    if current_hw is None or base_hw is None:
+        return None
+    return tuple(
+        _nearest_ratio_bucket(current_dim=current_dim, base_dim=base_dim)
+        for current_dim, base_dim in zip(current_hw, base_hw)
+    )
+
+
+def _nearest_ratio_bucket(*, current_dim: int, base_dim: int) -> int:
+    if base_dim <= 0 or current_dim <= 0:
+        return 0
+    ratio = current_dim / base_dim
+    return min(
+        range(len(_VARIANT_DIM_RATIOS)),
+        key=lambda index: abs(ratio - _VARIANT_DIM_RATIOS[index]),
+    )
+
+
+def _boundary_hw_extents(access: TensorAccessPlan) -> tuple[int, int] | None:
+    extents = tuple(int(max(dim, 0)) for dim in access.tile_region.logical_extents)
+    if len(extents) < 2:
+        return None
+    return extents[-2], extents[-1]
+
+
+def _tensor_hw_dims(dims: tuple[object, ...] | list[object]) -> tuple[int, int] | None:
+    if len(dims) < 2:
+        return None
+    height = dims[-2]
+    width = dims[-1]
+    if not isinstance(height, int) or not isinstance(width, int):
+        return None
+    return int(height), int(width)
+
+
+def _output_access_for_value(
+    plan: NodeExecutionPlan,
+    value_id: str,
+) -> TensorAccessPlan | None:
+    return next((access for access in plan.output_accesses if access.tensor_name == value_id), None)
+
+
+def _input_access_for_value(
+    plan: NodeExecutionPlan,
+    value_id: str,
+) -> TensorAccessPlan | None:
+    return next((access for access in plan.input_accesses if access.tensor_name == value_id), None)
 
 
 def _build_problem_sram_items(
@@ -1071,7 +1217,6 @@ def _plan_variants_for_region(
     region: JointRegion,
     base_plan: NodeExecutionPlan,
 ) -> tuple[NodeExecutionPlan, ...]:
-    del region
     variants = [base_plan]
     seen = {_plan_variant_key(base_plan)}
     for candidate in _candidate_plan_variants(ctx, base_plan=base_plan):
@@ -1080,7 +1225,7 @@ def _plan_variants_for_region(
             continue
         seen.add(key)
         variants.append(candidate)
-    return tuple(variants)
+    return (base_plan, *_prune_redundant_plan_variants(ctx, region=region, variants=tuple(variants[1:]), base_plan=base_plan))
 
 
 def _candidate_plan_variants(
@@ -1104,16 +1249,12 @@ def _candidate_plan_variants(
     if output_h <= 1 and output_w <= 1:
         return ()
 
-    candidate_hw: list[tuple[int, int]] = []
-    for tile_h, tile_w in (
-        (max(1, output_h // 2), output_w),
-        (output_h, max(1, output_w // 2)),
-        (max(1, output_h // 2), max(1, output_w // 2)),
-        (1, output_w),
-        (output_h, 1),
-    ):
-        if (tile_h, tile_w) != (output_h, output_w) and (tile_h, tile_w) not in candidate_hw:
-            candidate_hw.append((tile_h, tile_w))
+    candidate_hw = _candidate_hw_shapes(
+        ctx,
+        base_plan=base_plan,
+        output_h=output_h,
+        output_w=output_w,
+    )
 
     variants: list[NodeExecutionPlan] = []
     for tile_h, tile_w in candidate_hw:
@@ -1136,6 +1277,186 @@ def _candidate_plan_variants(
             )
         )
     return tuple(variants)
+
+
+def _candidate_hw_shapes(
+    ctx: CompileContext,
+    *,
+    base_plan: NodeExecutionPlan,
+    output_h: int,
+    output_w: int,
+) -> tuple[tuple[int, int], ...]:
+    candidate_hw: list[tuple[int, int]] = []
+    height_steps = _scaled_dim_candidates(output_h)
+    width_steps = _scaled_dim_candidates(output_w)
+    min_len = min(len(height_steps), len(width_steps))
+
+    for index in range(1, min_len):
+        candidate_hw.append((height_steps[index], width_steps[index]))
+    for tile_h in height_steps[1:]:
+        candidate_hw.append((tile_h, output_w))
+    for tile_w in width_steps[1:]:
+        candidate_hw.append((output_h, tile_w))
+
+    feasible_hw: list[tuple[int, int]] = []
+    seen: set[tuple[int, int]] = set()
+    for tile_h, tile_w in candidate_hw:
+        candidate = (tile_h, tile_w)
+        if candidate == (output_h, output_w) or candidate in seen:
+            continue
+        seen.add(candidate)
+        if _is_feasible_hw_variant(
+            ctx,
+            base_plan=base_plan,
+            tile_h=tile_h,
+            tile_w=tile_w,
+        ):
+            feasible_hw.append(candidate)
+    return tuple(feasible_hw)
+
+
+def _scaled_dim_candidates(dim: int) -> tuple[int, ...]:
+    if dim <= 1:
+        return (1,)
+    candidates: list[int] = []
+    for ratio in _VARIANT_DIM_RATIOS:
+        scaled = max(1, min(dim, math.ceil(dim * ratio)))
+        if scaled not in candidates:
+            candidates.append(scaled)
+    if 1 not in candidates:
+        candidates.append(1)
+    return tuple(candidates)
+
+
+def _is_feasible_hw_variant(
+    ctx: CompileContext,
+    *,
+    base_plan: NodeExecutionPlan,
+    tile_h: int,
+    tile_w: int,
+) -> bool:
+    node = ctx.graph.get_node(base_plan.node_name)
+    scratch_bytes = _estimate_scratch_bytes(ctx, node)
+    memory_budget = _fast_memory_budget_bytes(ctx)
+    explicit_budget = any(
+        isinstance(ctx.metadata.get(key), int) and int(ctx.metadata.get(key)) > 0
+        for key in ("max_memory", "pipeline_sram_capacity_bytes")
+    )
+    reserve_bytes = _tiling_reserve_bytes(memory_budget) if explicit_budget else 0
+    available_budget = max(
+        1,
+        memory_budget - scratch_bytes - reserve_bytes,
+    )
+    total_bytes = _estimate_node_working_set_bytes(
+        ctx,
+        node,
+        output_tile_extents=(tile_h, tile_w),
+        scratch_bytes=scratch_bytes,
+    )
+    return total_bytes is not None and total_bytes <= available_budget
+
+
+@dataclass(frozen=True)
+class _VariantMetrics:
+    compute_work: int
+    transfer_bytes: int
+    resident_bytes: int
+
+
+def _prune_redundant_plan_variants(
+    ctx: CompileContext,
+    *,
+    region: JointRegion,
+    variants: tuple[NodeExecutionPlan, ...],
+    base_plan: NodeExecutionPlan,
+) -> tuple[NodeExecutionPlan, ...]:
+    if not variants:
+        return ()
+
+    metrics_by_key: dict[tuple[object, ...], _VariantMetrics] = {}
+    for plan in variants:
+        metrics_by_key[_plan_variant_key(plan)] = _plan_variant_metrics(
+            ctx,
+            region=region,
+            plan=plan,
+            base_plan=base_plan,
+        )
+
+    kept: list[NodeExecutionPlan] = []
+    seen_metric_keys: set[tuple[int, int, int]] = set()
+    for plan in variants:
+        plan_key = _plan_variant_key(plan)
+        metrics = metrics_by_key[plan_key]
+        metric_key = (
+            metrics.compute_work,
+            metrics.transfer_bytes,
+            metrics.resident_bytes,
+        )
+        if metric_key in seen_metric_keys:
+            continue
+        if any(
+            _variant_metrics_redundant(
+                metrics,
+                metrics_by_key[_plan_variant_key(other_plan)],
+            )
+            for other_plan in variants
+            if other_plan is not plan
+        ):
+            continue
+        kept.append(plan)
+        seen_metric_keys.add(metric_key)
+    return tuple(kept)
+
+
+def _plan_variant_metrics(
+    ctx: CompileContext,
+    *,
+    region: JointRegion,
+    plan: NodeExecutionPlan,
+    base_plan: NodeExecutionPlan,
+) -> _VariantMetrics:
+    recipe_value_sizes = _recipe_value_sizes(ctx, plan, base_plan=base_plan)
+    transfer_bytes = 0
+    for value_id in region.input_value_ids:
+        if ctx.graph.get_producers(value_id):
+            continue
+        if _classify_external_value(ctx, value_id) not in (
+            JointValueTier.INPUT,
+            JointValueTier.CONST,
+        ):
+            continue
+        transfer_bytes += recipe_value_sizes.get(value_id, 0)
+    for value_id in region.output_value_ids:
+        if value_id in ctx.graph.outputs:
+            transfer_bytes += recipe_value_sizes.get(value_id, 0)
+    resident_bytes = sum(
+        recipe_value_sizes.get(value_id, 0)
+        for value_id in (*region.input_value_ids, *region.output_value_ids)
+    )
+    return _VariantMetrics(
+        compute_work=_estimate_work(ctx, plan),
+        transfer_bytes=transfer_bytes,
+        resident_bytes=resident_bytes,
+    )
+
+
+def _variant_metrics_redundant(
+    lhs: _VariantMetrics,
+    rhs: _VariantMetrics,
+) -> bool:
+    return (
+        lhs.compute_work == rhs.compute_work
+        and lhs.transfer_bytes == rhs.transfer_bytes
+        and rhs.resident_bytes < lhs.resident_bytes
+    ) or (
+        lhs.compute_work == rhs.compute_work
+        and lhs.resident_bytes == rhs.resident_bytes
+        and rhs.transfer_bytes < lhs.transfer_bytes
+    ) or (
+        lhs.transfer_bytes == rhs.transfer_bytes
+        and lhs.resident_bytes == rhs.resident_bytes
+        and rhs.compute_work < lhs.compute_work
+    )
 
 
 def _replace_access_hw(
