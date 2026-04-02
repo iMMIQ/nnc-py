@@ -683,6 +683,35 @@ def test_build_joint_problem_emits_fixed_sram_items_for_compute_actions():
     assert "conv1.recipe1.compute.temp" in sram_items
 
 
+def test_build_joint_problem_uses_recipe_specific_dma_sizes_and_footprints():
+    ctx = _make_two_region_context()
+
+    problem = build_joint_problem(ctx)
+
+    actions = {action.action_id: action for action in problem.actions}
+    recipes = {recipe.recipe_id: recipe for recipe in problem.recipes}
+    values = {value.value_id: value for value in problem.values}
+
+    assert (
+        actions["conv0.recipe0.dma_in.input"].duration
+        > actions["conv0.recipe4.dma_in.input"].duration
+    )
+    assert (
+        actions["conv1.recipe0.dma_out.out"].duration
+        > actions["conv1.recipe4.dma_out.out"].duration
+    )
+    assert (
+        recipes["conv0.recipe0"].value_footprint.resident_bytes
+        > recipes["conv0.recipe4"].value_footprint.resident_bytes
+    )
+    assert (
+        recipes["conv0.recipe0"].value_footprint.transfer_bytes
+        > recipes["conv0.recipe4"].value_footprint.transfer_bytes
+    )
+    assert values["mid"].size_bytes == 20736
+    assert values["out"].size_bytes == 16384
+
+
 def test_build_joint_problem_does_not_invent_transfer_buffer_items_from_region_hints():
     ctx = _make_pack_region_context()
 

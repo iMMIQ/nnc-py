@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass
 from dataclasses import replace
+import math
 import sys
 
 from nnc_py.ir.context import CompileContext
@@ -37,6 +38,7 @@ from nnc_py.ir.joint_tiling_schedule import (
 from nnc_py.ir.pipeline_schedule import PipelineResourceKind, ScheduleStepKind
 from nnc_py.ir.types import MemoryLayout
 from nnc_py.passes.pipeline_step_lowering import (
+    _DTYPE_SIZES,
     _access_shape,
     _access_size_bytes,
     _build_cost_model_provider,
@@ -44,6 +46,7 @@ from nnc_py.passes.pipeline_step_lowering import (
     _estimate_work,
     _is_large_tiled_op,
     _is_shape_family_op,
+    _shape_elements,
     _scratch_bytes,
 )
 
@@ -150,11 +153,13 @@ def _build_region_assemblies(
     producer_region_by_value: dict[str, str],
     value_sizes: dict[str, int],
 ) -> tuple[_RegionAssembly, ...]:
+    base_plan = plans[0]
     return tuple(
         _build_region_assembly(
             ctx,
             region=region,
             plan=plan,
+            base_plan=base_plan,
             recipe_index=recipe_index,
             provider=provider,
             producer_region_by_value=producer_region_by_value,
@@ -169,12 +174,15 @@ def _build_region_assembly(
     *,
     region: JointRegion,
     plan: NodeExecutionPlan,
+    base_plan: NodeExecutionPlan,
     recipe_index: int,
     provider,
     producer_region_by_value: dict[str, str],
     value_sizes: dict[str, int],
 ) -> _RegionAssembly:
     recipe_id = f"{region.region_id}.recipe{recipe_index}"
+    recipe_value_sizes = dict(value_sizes)
+    recipe_value_sizes.update(_recipe_value_sizes(ctx, plan, base_plan=base_plan))
     external_input_value_ids = tuple(
         value_id
         for value_id in region.input_value_ids
@@ -190,7 +198,7 @@ def _build_region_assembly(
             action_kind=JointActionKind.DMA_IN,
             schedule_step_kind=ScheduleStepKind.DMA_IN,
             value_id=value_id,
-            size_bytes=value_sizes[value_id],
+            size_bytes=recipe_value_sizes[value_id],
             region_id=region.region_id,
             recipe_id=recipe_id,
             is_optional=False,
@@ -209,7 +217,7 @@ def _build_region_assembly(
         writes=compute_writes,
         action_id=f"{recipe_id}.compute",
         recipe_id=recipe_id,
-        value_sizes=value_sizes,
+        value_sizes=recipe_value_sizes,
     )
     dma_out_actions = tuple(
         _build_transfer_action(
@@ -220,7 +228,7 @@ def _build_region_assembly(
             action_kind=JointActionKind.DMA_OUT,
             schedule_step_kind=ScheduleStepKind.DMA_OUT,
             value_id=value_id,
-            size_bytes=value_sizes[value_id],
+            size_bytes=recipe_value_sizes[value_id],
             region_id=region.region_id,
             recipe_id=recipe_id,
             is_optional=False,
@@ -247,7 +255,7 @@ def _build_region_assembly(
         value_footprint=_recipe_footprint(
             region=region,
             mandatory_actions=mandatory_actions,
-            value_sizes=value_sizes,
+            value_sizes=recipe_value_sizes,
         ),
         cost_parameters=_recipe_cost_parameters(mandatory_actions),
     )
@@ -293,21 +301,98 @@ def _value_sizes(
 ) -> dict[str, int]:
     size_by_value: dict[str, int] = {}
     for region in regions:
-        for plan in plan_variants_by_region_id[region.region_id]:
-            for access in (*plan.input_accesses, *plan.output_accesses):
-                if access.tensor_name not in ctx.graph.tensors:
-                    raise JointProblemBuilderError(
-                        f"node execution plan for {plan.node_name!r} references unknown tensor "
-                        f"{access.tensor_name!r}"
-                    )
-                size_by_value[access.tensor_name] = max(
-                    size_by_value.get(access.tensor_name, 0),
-                    _access_size_bytes(ctx, access, node_name=plan.node_name),
-                )
+        plans = plan_variants_by_region_id[region.region_id]
+        base_plan = plans[0]
+        for plan in plans:
+            for value_id, access_size in _recipe_value_sizes(
+                ctx,
+                plan,
+                base_plan=base_plan,
+            ).items():
+                size_by_value[value_id] = max(size_by_value.get(value_id, 0), access_size)
     for region in regions:
         for value_id in (*region.input_value_ids, *region.output_value_ids):
             size_by_value.setdefault(value_id, _fallback_tensor_size(ctx, value_id))
     return size_by_value
+
+
+def _recipe_value_sizes(
+    ctx: CompileContext,
+    plan: NodeExecutionPlan,
+    *,
+    base_plan: NodeExecutionPlan,
+) -> dict[str, int]:
+    size_by_value: dict[str, int] = {}
+
+    for access, base_access in zip(plan.input_accesses, base_plan.input_accesses):
+        if access.tensor_name not in ctx.graph.tensors:
+            raise JointProblemBuilderError(
+                f"node execution plan for {plan.node_name!r} references unknown tensor "
+                f"{access.tensor_name!r}"
+            )
+        size_by_value[access.tensor_name] = max(
+            size_by_value.get(access.tensor_name, 0),
+            _recipe_access_size_bytes(
+                ctx,
+                access,
+                base_access=base_access,
+                node_name=base_plan.node_name,
+                include_halo=True,
+            ),
+        )
+
+    for access, base_access in zip(plan.output_accesses, base_plan.output_accesses):
+        if access.tensor_name not in ctx.graph.tensors:
+            raise JointProblemBuilderError(
+                f"node execution plan for {plan.node_name!r} references unknown tensor "
+                f"{access.tensor_name!r}"
+            )
+        size_by_value[access.tensor_name] = max(
+            size_by_value.get(access.tensor_name, 0),
+            _recipe_access_size_bytes(
+                ctx,
+                access,
+                base_access=base_access,
+                node_name=base_plan.node_name,
+                include_halo=False,
+            ),
+        )
+
+    return size_by_value
+
+
+def _recipe_access_size_bytes(
+    ctx: CompileContext,
+    access: TensorAccessPlan,
+    *,
+    base_access: TensorAccessPlan,
+    node_name: str,
+    include_halo: bool,
+) -> int:
+    if access.tensor_name != base_access.tensor_name:
+        raise JointProblemBuilderError(
+            f"plan variant for {node_name!r} changed access tensor ordering "
+            f"from {base_access.tensor_name!r} to {access.tensor_name!r}"
+        )
+    tensor = ctx.graph.get_tensor(access.tensor_name)
+    elem_size = _DTYPE_SIZES[tensor.dtype]
+    base_bytes = _access_size_bytes(
+        ctx,
+        base_access,
+        node_name=node_name,
+        include_halo=include_halo,
+    )
+    if access.tile_region.logical_extents and base_access.tile_region.logical_extents:
+        current_elements = _shape_elements(
+            _access_shape(ctx, access, include_halo=include_halo)
+        )
+        base_elements = _shape_elements(
+            _access_shape(ctx, base_access, include_halo=include_halo)
+        )
+        if current_elements > 0 and base_elements > 0:
+            scaled_bytes = math.ceil(base_bytes * current_elements / base_elements)
+            return max(scaled_bytes, elem_size)
+    return max(base_bytes, elem_size)
 
 
 def _fallback_tensor_size(ctx: CompileContext, value_id: str) -> int:
